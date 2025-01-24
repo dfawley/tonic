@@ -44,7 +44,7 @@ impl LbPolicyBuilderSingle for Builder {
     }
 
     fn parse_config(&self, config: &str) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
-        let cfg = match serde_json::from_str::<LbPolicyConfig>(config) {
+        let cfg = match serde_json::from_str::<PickFirstConfig>(config) {
             Ok(cfg) => cfg,
             Err(err) => {
                 return Err(format!("service config parsing failed: {err}").into());
@@ -58,14 +58,14 @@ impl LbPolicyBuilderSingle for Builder {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-struct LbPolicyConfig {
+struct PickFirstConfig {
     shuffle_address_list: Option<bool>,
 }
 
 // TODO(easwars): Should we instead implement `TryFrom`?
-impl <'a> From<&'a LbConfig> for &'a LbPolicyConfig {
-    fn from(value: &'a LbConfig) -> &'a LbPolicyConfig{
-        value.config.downcast_ref::<LbPolicyConfig>().unwrap()
+impl <'a> From<&'a LbConfig> for &'a PickFirstConfig {
+    fn from(value: &'a LbConfig) -> &'a PickFirstConfig{
+        value.config.downcast_ref::<PickFirstConfig>().unwrap()
     }
 }
 
@@ -92,7 +92,7 @@ impl LbPolicySingle for PickFirstPolicy {
 
         let mut shuffle_addresses = false;
         if let Some(cfg) = config {
-            let cfg: &LbPolicyConfig = cfg.into().expect("todo");
+            let cfg: &PickFirstConfig = cfg.into().expect("todo");
             if let Some(v) = cfg.shuffle_address_list {
                 shuffle_addresses = v;
             }
@@ -233,7 +233,7 @@ mod tests {
                     panic!("{}", err);
                 }
             };
-            let config: &LbPolicyConfig = <&LbConfig as Into<&LbPolicyConfig>>::into(&config);
+            let config: &PickFirstConfig = <&LbConfig as Into<&PickFirstConfig>>::into(&config);
             assert_eq!(config.shuffle_address_list == tc.want_shuffle_addresses, true);
         }
         Ok(())
