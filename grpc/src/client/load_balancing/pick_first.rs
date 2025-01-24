@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     ChannelController, LbConfig, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicySingle, Pick,
-    PickResult, Picker, Subchannel, SubchannelState, WorkScheduler,
+    PickResult, Picker, Subchannel, SubchannelState, WorkScheduler
 };
 
 use serde::{Deserialize, Serialize};
@@ -59,8 +59,16 @@ impl LbPolicyBuilderSingle for Builder {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct LbPolicyConfig {
-    shuffle_address_list: bool,
+    shuffle_address_list: Option<bool>,
 }
+
+/*
+impl From<LbConfig> for LbPolicyConfig {
+    fn from(value: LbConfig) -> Self {
+        value.config.downcast_ref::<LbPolicyConfig>()
+    }
+}
+*/
 
 pub fn reg() {
     super::GLOBAL_LB_REGISTRY.add_builder(Builder {})
@@ -86,7 +94,9 @@ impl LbPolicySingle for PickFirstPolicy {
         let mut shuffle_addresses = false;
         if let Some(cfg) = config {
             let cfg: &LbPolicyConfig = cfg.into().unwrap();
-            shuffle_addresses = cfg.shuffle_address_list;
+            if let Some(v) = cfg.shuffle_address_list {
+                shuffle_addresses = v;
+            }
         }
 
         //let endpoints = mem::replace(&mut update.endpoints, vec![]);
@@ -158,5 +168,80 @@ impl Picker for OneSubchannelPicker {
             on_complete: None,
             metadata: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::client::load_balancing::{LbConfig, LbPolicyBuilderSingle, GLOBAL_LB_REGISTRY};
+    use std::sync::Arc;
+    use super::*;
+
+    #[test]
+    fn pickfirst_builder_name() -> Result<(), String> {
+        reg();
+
+        let builder: Arc<dyn LbPolicyBuilderSingle> = match GLOBAL_LB_REGISTRY.get_policy("pick_first") {
+            Some(b) => b,
+            None => {
+                return Err(String::from("pick_first LB policy not registered"));
+            }
+        };
+        assert_eq!(builder.name(), "pick_first");
+        Ok(())
+    }
+
+    #[test]
+    fn pickfirst_builder_parse_config_failure() -> Result<(), String> {
+        reg();
+
+        let builder: Arc<dyn LbPolicyBuilderSingle> = match GLOBAL_LB_REGISTRY.get_policy("pick_first") {
+            Some(b) => b,
+            None => {
+                return Err(String::from("pick_first LB policy not registered"));
+            }
+        };
+
+        // Failure cases.
+        assert_eq!(builder.parse_config("").is_err(), true);
+        assert_eq!(builder.parse_config("This is not JSON").is_err(), true);
+        assert_eq!(builder.parse_config("{").is_err(), true);
+        assert_eq!(builder.parse_config("}").is_err(), true);
+
+        // Success cases.
+        struct TestCase {
+            config: String,
+            want_shuffle_addresses: bool,
+        }
+        let test_cases = vec![
+            TestCase{config: String::from("{}"), want_shuffle_addresses: false},
+        ];
+        for tc in test_cases {
+            let config = match builder.parse_config(tc.config.as_str()) {
+                Ok(c) => c,
+                Err(e) => {
+                    let err = format!("parse_config({}) failed when expected to succeed: {:?}", tc.config, e).clone(); 
+                    panic!("{}", err);
+                }
+            };
+            let config: &LbPolicyConfig = match config {
+                Some(c) => c.into().unwrap(),
+                None => {
+                    let err = format!("parse_config({}) returned None when expected to succeed", tc.config).clone(); 
+                    panic!("{}", err);
+                }
+            };
+            /*
+            let lb_cfg: LbPolicyConfig = match config.into() {
+                Some(c) => c.config.downcast_ref(),
+                None => {
+                    let err = format!("parse_config({}) returned None when expected not to", tc.config).as_str(); 
+                    panic!("{}", err);
+                },
+            };
+             */
+            assert_eq!(config.shuffle_address_list.unwrap_or(false), tc.want_shuffle_addresses);
+        }
+        Ok(())
     }
 }
