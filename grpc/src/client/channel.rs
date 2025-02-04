@@ -142,7 +142,7 @@ impl Channel {
             ac.as_ref().unwrap().clone()
         } else {
             // Otherwise, get or create the active channel.
-            self.get_active_channel()
+            self.get_or_create_active_channel()
         };
         if let Some(s) = ac.subchannel_pool.connectivity_state.cur() {
             return s;
@@ -162,7 +162,7 @@ impl Channel {
         Ok(())
     }
 
-    fn get_active_channel(&self) -> Arc<ActiveChannel> {
+    fn get_or_create_active_channel(&self) -> Arc<ActiveChannel> {
         let mut s = self.inner.active_channel.lock().unwrap();
         if s.is_none() {
             *s = Some(ActiveChannel::new(self.inner.target.clone()));
@@ -171,7 +171,7 @@ impl Channel {
     }
 
     pub async fn call(&self, request: Request) -> Response {
-        let ac = self.get_active_channel();
+        let ac = self.get_or_create_active_channel();
         ac.call(request).await
     }
 }
