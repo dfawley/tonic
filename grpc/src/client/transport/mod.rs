@@ -1,9 +1,10 @@
 use crate::service::Service;
 
 mod registry;
+mod tonic;
 
+use ::tonic::async_trait;
 pub use registry::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
-use tonic::async_trait;
 
 #[async_trait]
 pub trait Transport: Send + Sync {

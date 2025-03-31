@@ -13,6 +13,7 @@ use url::Url;
 
 use crate::attributes::Attributes;
 
+mod passthrough;
 mod registry;
 pub use registry::{ResolverRegistry, SharedResolverBuilder, GLOBAL_RESOLVER_REGISTRY};
 
