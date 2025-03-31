@@ -1,8 +1,11 @@
 use integration_tests::pb::{test_client, test_server, Input, Output};
 use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::{net::TcpListener, sync::oneshot};
 use tonic::{
-    transport::{server::TcpConnectInfo, Endpoint, Server},
+    transport::{
+        server::{TcpConnectInfo, TcpIncoming},
+        Endpoint, Server,
+    },
     Request, Response, Status,
 };
 
@@ -25,17 +28,22 @@ async fn getting_connect_info() {
 
     let (tx, rx) = oneshot::channel::<()>();
 
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
+
     let jh = tokio::spawn(async move {
         Server::builder()
             .add_service(svc)
-            .serve_with_shutdown("127.0.0.1:1400".parse().unwrap(), async { drop(rx.await) })
+            .serve_with_incoming_shutdown(incoming, async { drop(rx.await) })
             .await
             .unwrap();
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let channel = Endpoint::from_static("http://127.0.0.1:1400")
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
         .connect()
         .await
         .unwrap();
@@ -51,6 +59,9 @@ async fn getting_connect_info() {
 
 #[cfg(unix)]
 pub mod unix {
+    use std::io;
+
+    use hyper_util::rt::TokioIo;
     use tokio::{
         net::{UnixListener, UnixStream},
         sync::oneshot,
@@ -106,7 +117,10 @@ pub mod unix {
         let path = unix_socket_path.clone();
         let channel = Endpoint::try_from("http://[::]:50051")
             .unwrap()
-            .connect_with_connector(service_fn(move |_: Uri| UnixStream::connect(path.clone())))
+            .connect_with_connector(service_fn(move |_: Uri| {
+                let path = path.clone();
+                async move { Ok::<_, io::Error>(TokioIo::new(UnixStream::connect(path).await?)) }
+            }))
             .await
             .unwrap();
 

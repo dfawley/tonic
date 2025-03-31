@@ -1,13 +1,15 @@
 use crate::codec::compression::{
     CompressionEncoding, EnabledCompressionEncodings, SingleMessageCompressionOverride,
 };
+use crate::codec::EncodeBody;
+use crate::metadata::GRPC_CONTENT_TYPE;
 use crate::{
-    body::BoxBody,
-    codec::{encode_server, Codec, Streaming},
+    body::Body,
+    codec::{Codec, Streaming},
     server::{ClientStreamingService, ServerStreamingService, StreamingService, UnaryService},
-    Code, Request, Status,
+    Request, Status,
 };
-use http_body::Body;
+use http_body::Body as HttpBody;
 use std::{fmt, pin::pin};
 use tokio_stream::{Stream, StreamExt};
 
@@ -15,7 +17,7 @@ macro_rules! t {
     ($result:expr) => {
         match $result {
             Ok(value) => value,
-            Err(status) => return status.to_http(),
+            Err(status) => return status.into_http(),
         }
     };
 }
@@ -181,40 +183,36 @@ where
 
     #[doc(hidden)]
     pub fn apply_compression_config(
-        self,
+        mut self,
         accept_encodings: EnabledCompressionEncodings,
         send_encodings: EnabledCompressionEncodings,
     ) -> Self {
-        let mut this = self;
-
-        for &encoding in CompressionEncoding::encodings() {
+        for &encoding in CompressionEncoding::ENCODINGS {
             if accept_encodings.is_enabled(encoding) {
-                this = this.accept_compressed(encoding);
+                self = self.accept_compressed(encoding);
             }
             if send_encodings.is_enabled(encoding) {
-                this = this.send_compressed(encoding);
+                self = self.send_compressed(encoding);
             }
         }
 
-        this
+        self
     }
 
     #[doc(hidden)]
     pub fn apply_max_message_size_config(
-        self,
+        mut self,
         max_decoding_message_size: Option<usize>,
         max_encoding_message_size: Option<usize>,
     ) -> Self {
-        let mut this = self;
-
         if let Some(limit) = max_decoding_message_size {
-            this = this.max_decoding_message_size(limit);
+            self = self.max_decoding_message_size(limit);
         }
         if let Some(limit) = max_encoding_message_size {
-            this = this.max_encoding_message_size(limit);
+            self = self.max_encoding_message_size(limit);
         }
 
-        this
+        self
     }
 
     /// Handle a single unary gRPC request.
@@ -222,11 +220,11 @@ where
         &mut self,
         mut service: S,
         req: http::Request<B>,
-    ) -> http::Response<BoxBody>
+    ) -> http::Response<Body>
     where
         S: UnaryService<T::Decode, Response = T::Encode>,
-        B: Body + Send + 'static,
-        B::Error: Into<crate::Error> + Send,
+        B: HttpBody + Send + 'static,
+        B::Error: Into<crate::BoxError> + Send,
     {
         let accept_encoding = CompressionEncoding::from_accept_encoding_header(
             req.headers(),
@@ -265,12 +263,12 @@ where
         &mut self,
         mut service: S,
         req: http::Request<B>,
-    ) -> http::Response<BoxBody>
+    ) -> http::Response<Body>
     where
         S: ServerStreamingService<T::Decode, Response = T::Encode>,
         S::ResponseStream: Send + 'static,
-        B: Body + Send + 'static,
-        B::Error: Into<crate::Error> + Send,
+        B: HttpBody + Send + 'static,
+        B::Error: Into<crate::BoxError> + Send,
     {
         let accept_encoding = CompressionEncoding::from_accept_encoding_header(
             req.headers(),
@@ -306,11 +304,11 @@ where
         &mut self,
         mut service: S,
         req: http::Request<B>,
-    ) -> http::Response<BoxBody>
+    ) -> http::Response<Body>
     where
         S: ClientStreamingService<T::Decode, Response = T::Encode>,
-        B: Body + Send + 'static,
-        B::Error: Into<crate::Error> + Send + 'static,
+        B: HttpBody + Send + 'static,
+        B::Error: Into<crate::BoxError> + Send + 'static,
     {
         let accept_encoding = CompressionEncoding::from_accept_encoding_header(
             req.headers(),
@@ -339,12 +337,12 @@ where
         &mut self,
         mut service: S,
         req: http::Request<B>,
-    ) -> http::Response<BoxBody>
+    ) -> http::Response<Body>
     where
         S: StreamingService<T::Decode, Response = T::Encode> + Send,
         S::ResponseStream: Send + 'static,
-        B: Body + Send + 'static,
-        B::Error: Into<crate::Error> + Send,
+        B: HttpBody + Send + 'static,
+        B::Error: Into<crate::BoxError> + Send,
     {
         let accept_encoding = CompressionEncoding::from_accept_encoding_header(
             req.headers(),
@@ -368,8 +366,8 @@ where
         request: http::Request<B>,
     ) -> Result<Request<T::Decode>, Status>
     where
-        B: Body + Send + 'static,
-        B::Error: Into<crate::Error> + Send,
+        B: HttpBody + Send + 'static,
+        B::Error: Into<crate::BoxError> + Send,
     {
         let request_compression_encoding = self.request_encoding_if_supported(&request)?;
 
@@ -385,7 +383,7 @@ where
         let message = stream
             .try_next()
             .await?
-            .ok_or_else(|| Status::new(Code::Internal, "Missing request message."))?;
+            .ok_or_else(|| Status::internal("Missing request message."))?;
 
         let mut req = Request::from_http_parts(parts, message);
 
@@ -401,8 +399,8 @@ where
         request: http::Request<B>,
     ) -> Result<Request<Streaming<T::Decode>>, Status>
     where
-        B: Body + Send + 'static,
-        B::Error: Into<crate::Error> + Send,
+        B: HttpBody + Send + 'static,
+        B::Error: Into<crate::BoxError> + Send,
     {
         let encoding = self.request_encoding_if_supported(&request)?;
 
@@ -424,24 +422,20 @@ where
         accept_encoding: Option<CompressionEncoding>,
         compression_override: SingleMessageCompressionOverride,
         max_message_size: Option<usize>,
-    ) -> http::Response<BoxBody>
+    ) -> http::Response<Body>
     where
         B: Stream<Item = Result<T::Encode, Status>> + Send + 'static,
     {
-        let response = match response {
-            Ok(r) => r,
-            Err(status) => return status.to_http(),
-        };
+        let response = t!(response);
 
         let (mut parts, body) = response.into_http().into_parts();
 
         // Set the content type
-        parts.headers.insert(
-            http::header::CONTENT_TYPE,
-            http::header::HeaderValue::from_static("application/grpc"),
-        );
+        parts
+            .headers
+            .insert(http::header::CONTENT_TYPE, GRPC_CONTENT_TYPE);
 
-        #[cfg(any(feature = "gzip", feature = "zstd"))]
+        #[cfg(any(feature = "gzip", feature = "deflate", feature = "zstd"))]
         if let Some(encoding) = accept_encoding {
             // Set the content encoding
             parts.headers.insert(
@@ -450,7 +444,7 @@ where
             );
         }
 
-        let body = encode_server(
+        let body = EncodeBody::new_server(
             self.codec.encoder(),
             body,
             accept_encoding,
@@ -458,7 +452,7 @@ where
             max_message_size,
         );
 
-        http::Response::from_parts(parts, BoxBody::new(body))
+        http::Response::from_parts(parts, Body::new(body))
     }
 
     fn request_encoding_if_supported<B>(
@@ -474,21 +468,17 @@ where
 
 impl<T: fmt::Debug> fmt::Debug for Grpc<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut f = f.debug_struct("Grpc");
-
-        f.field("codec", &self.codec);
-
-        f.field(
-            "accept_compression_encodings",
-            &self.accept_compression_encodings,
-        );
-
-        f.field(
-            "send_compression_encodings",
-            &self.send_compression_encodings,
-        );
-
-        f.finish()
+        f.debug_struct("Grpc")
+            .field("codec", &self.codec)
+            .field(
+                "accept_compression_encodings",
+                &self.accept_compression_encodings,
+            )
+            .field(
+                "send_compression_encodings",
+                &self.send_compression_encodings,
+            )
+            .finish()
     }
 }
 

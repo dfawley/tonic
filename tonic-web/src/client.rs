@@ -1,9 +1,7 @@
-use bytes::Bytes;
 use http::header::CONTENT_TYPE;
 use http::{Request, Response, Version};
-use http_body::Body;
 use pin_project::pin_project;
-use std::error::Error;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
@@ -15,7 +13,7 @@ use crate::call::content_types::GRPC_WEB;
 use crate::call::GrpcWebCall;
 
 /// Layer implementing the grpc-web protocol for clients.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct GrpcWebClientLayer {
     _priv: (),
 }
@@ -23,13 +21,7 @@ pub struct GrpcWebClientLayer {
 impl GrpcWebClientLayer {
     /// Create a new grpc-web for clients layer.
     pub fn new() -> GrpcWebClientLayer {
-        Self { _priv: () }
-    }
-}
-
-impl Default for GrpcWebClientLayer {
-    fn default() -> Self {
-        Self::new()
+        Self::default()
     }
 }
 
@@ -59,9 +51,6 @@ impl<S> GrpcWebClientService<S> {
 impl<S, B1, B2> Service<Request<B1>> for GrpcWebClientService<S>
 where
     S: Service<Request<GrpcWebCall<B1>>, Response = Response<B2>>,
-    B1: Body,
-    B2: Body<Data = Bytes>,
-    B2::Error: Error,
 {
     type Response = Response<GrpcWebCall<B2>>;
     type Error = S::Error;
@@ -89,8 +78,7 @@ where
     }
 }
 
-/// Response future for the [`GrpcWebService`].
-#[allow(missing_debug_implementations)]
+/// Response future for the [`GrpcWebService`](crate::GrpcWebService).
 #[pin_project]
 #[must_use = "futures do nothing unless polled"]
 pub struct ResponseFuture<F> {
@@ -100,7 +88,6 @@ pub struct ResponseFuture<F> {
 
 impl<F, B, E> Future for ResponseFuture<F>
 where
-    B: Body<Data = Bytes>,
     F: Future<Output = Result<Response<B>, E>>,
 {
     type Output = Result<Response<GrpcWebCall<B>>, E>;
@@ -109,5 +96,11 @@ where
         let res = ready!(self.project().inner.poll(cx));
 
         Poll::Ready(res.map(|r| r.map(GrpcWebCall::client_response)))
+    }
+}
+
+impl<F> fmt::Debug for ResponseFuture<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResponseFuture").finish()
     }
 }

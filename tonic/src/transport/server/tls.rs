@@ -1,8 +1,7 @@
-use crate::transport::{
-    service::TlsAcceptor,
-    tls::{Certificate, Identity},
-};
 use std::fmt;
+
+use super::service::TlsAcceptor;
+use crate::transport::tls::{Certificate, Identity};
 
 /// Configures TLS settings for servers.
 #[derive(Clone, Default)]
@@ -10,6 +9,7 @@ pub struct ServerTlsConfig {
     identity: Option<Identity>,
     client_ca_root: Option<Certificate>,
     client_auth_optional: bool,
+    ignore_client_order: bool,
 }
 
 impl fmt::Debug for ServerTlsConfig {
@@ -21,11 +21,7 @@ impl fmt::Debug for ServerTlsConfig {
 impl ServerTlsConfig {
     /// Creates a new `ServerTlsConfig`.
     pub fn new() -> Self {
-        ServerTlsConfig {
-            identity: None,
-            client_ca_root: None,
-            client_auth_optional: false,
-        }
+        ServerTlsConfig::default()
     }
 
     /// Sets the [`Identity`] of the server.
@@ -57,11 +53,23 @@ impl ServerTlsConfig {
         }
     }
 
-    pub(crate) fn tls_acceptor(&self) -> Result<TlsAcceptor, crate::Error> {
+    /// Sets whether the server's cipher preferences are followed instead of the client's.
+    ///
+    /// # Default
+    /// By default, this option is set to `false`.
+    pub fn ignore_client_order(self, ignore_client_order: bool) -> Self {
+        ServerTlsConfig {
+            ignore_client_order,
+            ..self
+        }
+    }
+
+    pub(crate) fn tls_acceptor(&self) -> Result<TlsAcceptor, crate::BoxError> {
         TlsAcceptor::new(
-            self.identity.clone().unwrap(),
-            self.client_ca_root.clone(),
+            self.identity.as_ref().unwrap(),
+            self.client_ca_root.as_ref(),
             self.client_auth_optional,
+            self.ignore_client_order,
         )
     }
 }

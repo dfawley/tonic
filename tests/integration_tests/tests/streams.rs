@@ -18,7 +18,7 @@ async fn status_from_server_stream_with_source() {
             &self,
             _: Request<InputStream>,
         ) -> Result<Response<Self::StreamCallStream>, Status> {
-            let s = Unsync;
+            let s = Unsync(std::ptr::null_mut::<()>());
 
             Ok(Response::new(Box::pin(s) as Self::StreamCallStream))
         }
@@ -31,7 +31,7 @@ async fn status_from_server_stream_with_source() {
     let jh = tokio::spawn(async move {
         Server::builder()
             .add_service(svc)
-            .serve_with_shutdown("127.0.0.1:1339".parse().unwrap(), async { drop(rx.await) })
+            .serve_with_shutdown("127.0.0.1:0".parse().unwrap(), async { drop(rx.await) })
             .await
             .unwrap();
     });
@@ -41,7 +41,8 @@ async fn status_from_server_stream_with_source() {
     jh.await.unwrap();
 }
 
-struct Unsync;
+#[allow(dead_code)]
+struct Unsync(*mut ());
 
 unsafe impl Send for Unsync {}
 

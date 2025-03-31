@@ -13,13 +13,11 @@ mod prost;
 use crate::Status;
 use std::io;
 
-pub(crate) use self::encode::{encode_client, encode_server};
-
 pub use self::buffer::{DecodeBuf, EncodeBuf};
 pub use self::compression::{CompressionEncoding, EnabledCompressionEncodings};
 pub use self::decode::Streaming;
+pub use self::encode::EncodeBody;
 #[cfg(feature = "prost")]
-#[cfg_attr(docsrs, doc(cfg(feature = "prost")))]
 pub use self::prost::ProstCodec;
 
 /// Unless overridden, this is the buffer size used for encoding requests.
@@ -57,7 +55,7 @@ const DEFAULT_YIELD_THRESHOLD: usize = 32 * 1024;
 /// together into one larger send(). The yield threshold controls how
 /// much you want to bulk up such a batch of ready-to-send messages.
 /// The larger your yield threshold the more you will batch - and
-/// consequentially allocate contiguous memory, which might be relevant
+/// consequently allocate contiguous memory, which might be relevant
 /// if you're considering large numbers here.
 /// If your server streaming rpc does not reach the yield threshold
 /// before it reaches Poll::Pending (meaning, it's waiting for more

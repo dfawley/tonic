@@ -42,6 +42,7 @@ pub fn configure() -> Builder {
         use_arc_self: false,
         generate_default_stubs: false,
         compile_settings: CompileSettings::default(),
+        skip_debug: HashSet::default(),
     }
 }
 
@@ -57,9 +58,12 @@ pub fn compile_protos(proto: impl AsRef<Path>) -> io::Result<()> {
         .parent()
         .expect("proto file should reside in a directory");
 
-    self::configure().compile(&[proto_path], &[proto_dir])?;
+    self::configure().compile_protos(&[proto_path], &[proto_dir])
+}
 
-    Ok(())
+/// Simple file descriptor set compiling. Use [`configure`] instead if you need more options.
+pub fn compile_fds(fds: prost_types::FileDescriptorSet) -> io::Result<()> {
+    self::configure().compile_fds(fds)
 }
 
 /// Non-path Rust types allowed for request/response types.
@@ -154,6 +158,10 @@ impl crate::Method for TonicBuildMethod {
 
     fn comment(&self) -> &[Self::Comment] {
         &self.prost_method.comments.leading[..]
+    }
+
+    fn deprecated(&self) -> bool {
+        self.prost_method.options.deprecated.unwrap_or_default()
     }
 
     fn request_response_name(
@@ -303,6 +311,7 @@ pub struct Builder {
     pub(crate) use_arc_self: bool,
     pub(crate) generate_default_stubs: bool,
     pub(crate) compile_settings: CompileSettings,
+    pub(crate) skip_debug: HashSet<String>,
 
     out_dir: Option<PathBuf>,
 }
@@ -418,7 +427,7 @@ impl Builder {
     ///
     /// Passed directly to `prost_build::Config.btree_map`.
     ///
-    /// Note: previous configurated paths for `btree_map` will be cleared.
+    /// Note: previous configured paths for `btree_map` will be cleared.
     pub fn btree_map<I, S>(mut self, paths: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -438,7 +447,7 @@ impl Builder {
     ///
     /// Passed directly to `prost_build::Config.bytes`.
     ///
-    /// Note: previous configurated paths for `bytes` will be cleared.
+    /// Note: previous configured paths for `bytes` will be cleared.
     pub fn bytes<I, S>(mut self, paths: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -585,23 +594,62 @@ impl Builder {
         self
     }
 
+    /// Skips generating `impl Debug` for types
+    pub fn skip_debug(mut self, path: impl AsRef<str>) -> Self {
+        self.skip_debug.insert(path.as_ref().to_string());
+        self
+    }
+
     /// Compile the .proto files and execute code generation.
-    pub fn compile(
+    pub fn compile_protos(
         self,
         protos: &[impl AsRef<Path>],
         includes: &[impl AsRef<Path>],
     ) -> io::Result<()> {
-        self.compile_with_config(Config::new(), protos, includes)
+        self.compile_protos_with_config(Config::new(), protos, includes)
     }
 
-    /// Compile the .proto files and execute code generation using a
-    /// custom `prost_build::Config`.
-    pub fn compile_with_config(
+    /// Compile the .proto files and execute code generation using a custom
+    /// `prost_build::Config`. The provided config will be updated with this builder's config.
+    pub fn compile_protos_with_config(
         self,
         mut config: Config,
         protos: &[impl AsRef<Path>],
         includes: &[impl AsRef<Path>],
     ) -> io::Result<()> {
+        if self.emit_rerun_if_changed {
+            for path in protos.iter() {
+                println!("cargo:rerun-if-changed={}", path.as_ref().display())
+            }
+
+            for path in includes.iter() {
+                // Cargo will watch the **entire** directory recursively. If we
+                // could figure out which files are imported by our protos we
+                // could specify only those files instead.
+                println!("cargo:rerun-if-changed={}", path.as_ref().display())
+            }
+        }
+
+        self.setup_config(&mut config);
+        config.compile_protos(protos, includes)
+    }
+
+    /// Execute code generation from a file descriptor set.
+    pub fn compile_fds(self, fds: prost_types::FileDescriptorSet) -> io::Result<()> {
+        self.compile_fds_with_config(Config::new(), fds)
+    }
+
+    /// Execute code generation from a file descriptor set using a custom `prost_build::Config`.
+    pub fn compile_fds_with_config(
+        self,
+        mut config: Config,
+        fds: prost_types::FileDescriptorSet,
+    ) -> io::Result<()> {
+        self.setup_config(&mut config);
+        config.compile_fds(fds)
+    }
+
+    fn setup_config(self, config: &mut Config) {
         if let Some(out_dir) = self.out_dir.as_ref() {
             config.out_dir(out_dir);
         }
@@ -641,29 +689,15 @@ impl Builder {
         if let Some(path) = self.include_file.as_ref() {
             config.include_file(path);
         }
+        if !self.skip_debug.is_empty() {
+            config.skip_debug(&self.skip_debug);
+        }
 
         for arg in self.protoc_args.iter() {
             config.protoc_arg(arg);
         }
 
-        if self.emit_rerun_if_changed {
-            for path in protos.iter() {
-                println!("cargo:rerun-if-changed={}", path.as_ref().display())
-            }
-
-            for path in includes.iter() {
-                // Cargo will watch the **entire** directory recursively. If we
-                // could figure out which files are imported by our protos we
-                // could specify only those files instead.
-                println!("cargo:rerun-if-changed={}", path.as_ref().display())
-            }
-        }
-
         config.service_generator(self.service_generator());
-
-        config.compile_protos(protos, includes)?;
-
-        Ok(())
     }
 
     /// Turn the builder into a `ServiceGenerator` ready to be passed to `prost-build`s

@@ -174,18 +174,18 @@ Edit `Cargo.toml` and add all the dependencies we'll need for this example:
 
 ```toml
 [dependencies]
-tonic = "0.11"
-prost = "0.12"
+tonic = "*"
+prost = "0.13"
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-stream = "0.1"
 
 async-stream = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rand = "0.7"
+rand = "0.8"
 
 [build-dependencies]
-tonic-build = "0.11"
+tonic-build = "*"
 ```
 
 Create a `build.rs` file at the root of your crate:
@@ -401,7 +401,7 @@ async fn list_features(
     &self,
     request: Request<Rectangle>,
 ) -> Result<Response<Self::ListFeaturesStream>, Status> {
-    let (mut tx, rx) = mpsc::channel(4);
+    let (tx, rx) = mpsc::channel(4);
     let features = self.features.clone();
 
     tokio::spawn(async move {
@@ -498,7 +498,7 @@ async fn route_chat(
         while let Some(note) = stream.next().await {
             let note = note?;
 
-            let location = note.location.clone().unwrap();
+            let location = note.location.unwrap();
 
             let location_notes = notes.entry(location).or_insert(vec![]);
             location_notes.push(note);
@@ -668,7 +668,7 @@ async fn print_features(client: &mut RouteGuideClient<Channel>) -> Result<(), Bo
         .into_inner();
 
     while let Some(feature) = stream.message().await? {
-        println!("NOTE = {:?}", feature);
+        println!("FEATURE = {:?}", feature);
     }
 
     Ok(())
@@ -693,8 +693,8 @@ use rand::Rng;
 
 ```rust
 async fn run_record_route(client: &mut RouteGuideClient<Channel>) -> Result<(), Box<dyn Error>> {
-    let mut rng = rand::thread_rng();
-    let point_count: i32 = rng.gen_range(2..100);
+    let mut rng = rand::rng();
+    let point_count: i32 = rng.random_range(2..100);
 
     let mut points = vec![];
     for _ in 0..=point_count {
@@ -715,8 +715,8 @@ async fn run_record_route(client: &mut RouteGuideClient<Channel>) -> Result<(), 
 
 ```rust
 fn random_point(rng: &mut ThreadRng) -> Point {
-    let latitude = (rng.gen_range(0..180) - 90) * 10_000_000;
-    let longitude = (rng.gen_range(0..360) - 180) * 10_000_000;
+    let latitude = (rng.random_range(0..180) - 90) * 10_000_000;
+    let longitude = (rng.random_range(0..360) - 180) * 10_000_000;
     Point {
         latitude,
         longitude,
@@ -816,7 +816,7 @@ fn main() {
     tonic_build::configure()
         .build_client(false)
         .out_dir("another_crate/src/pb")
-        .compile(&["path/my_proto.proto"], &["path"])
+        .compile_protos(&["path/my_proto.proto"], &["path"])
         .expect("failed to compile protos");
 }
 ```

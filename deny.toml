@@ -1,48 +1,50 @@
+[graph]
 all-features = true
+exclude = ["examples"]
 
 [bans]
 multiple-versions = "deny"
 deny = [
     # color-backtrace is nice but brings in too many dependencies and that are often outdated, so not worth it for us.
-    { name = "color-backtrace" },
+    { crate = "color-backtrace" },
 
     # dirs crate has a lot of dependencies and there are better alternatives
-    { name = "dirs" },
-    { name = "dirs-sys" },
+    { crate = "dirs" },
+    { crate = "dirs-sys" },
 
     # deprecated
-    { name = "quickersort" },
+    { crate = "quickersort" },
 
     # term is not fully maintained, and termcolor is replacing it
-    { name = "term" },
+    { crate = "term" },
+]
+skip = [
+    { crate = "getrandom@0.2.15", reason = "quickcheck depends on rand which depends on it" },
+    { crate = "wasi@0.11.0+wasi-snapshot-preview1", reason = "quickcheck depends on rand which depends on it" },
+    { crate = "itertools@0.12.1", reason = "aws-lc-sys depends on bindgen which depends on it" },
+    { crate = "unicode-width@0.1.14", reason = "protox depends on miette wich depends on it" },
 ]
 skip-tree = [
-    { name = "windows-sys" },
-    { name = "hermit-abi" },
-    { name = "syn" },
-    { name = "bitflags" },
-    { name = "indexmap" },
-    { name = "examples" },
+    { crate = "windows-sys" },
+    { crate = "hermit-abi" },
 ]
 
 [licenses]
-unlicensed = "deny"
+version = 2
 # We want really high confidence when inferring licenses from text
 confidence-threshold = 0.92
-copyleft = "deny"
 allow = [
     "Apache-2.0",
     "ISC",
     "MIT",
     "OpenSSL",
-    "Zlib",
-    "Unicode-DFS-2016",
+    "Unicode-3.0",
     "MPL-2.0",
-    "BSD-3-Clause"
+    "BSD-3-Clause",
 ]
 
 [[licenses.clarify]]
-name = "ring"
+crate = "ring"
 # SPDX considers OpenSSL to encompass both the OpenSSL and SSLeay licenses
 # https://spdx.org/licenses/OpenSSL.html
 # ISC - Both BoringSSL and ring use this for their new files

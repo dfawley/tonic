@@ -1,11 +1,11 @@
-use std::error::Error;
+use std::fmt;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 
 use base64::Engine as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{header, HeaderMap, HeaderName, HeaderValue};
-use http_body::{Body, SizeHint};
+use http_body::{Body, Frame, SizeHint};
 use pin_project::pin_project;
 use tokio_stream::Stream;
 use tonic::Status;
@@ -63,9 +63,9 @@ pub struct GrpcWebCall<B> {
     #[pin]
     inner: B,
     buf: BytesMut,
+    decoded: BytesMut,
     direction: Direction,
     encoding: Encoding,
-    poll_trailers: bool,
     client: bool,
     trailers: Option<HeaderMap>,
 }
@@ -75,9 +75,9 @@ impl<B: Default> Default for GrpcWebCall<B> {
         Self {
             inner: Default::default(),
             buf: Default::default(),
+            decoded: Default::default(),
             direction: Direction::Empty,
             encoding: Encoding::None,
-            poll_trailers: Default::default(),
             client: Default::default(),
             trailers: Default::default(),
         }
@@ -108,9 +108,12 @@ impl<B> GrpcWebCall<B> {
                 (Direction::Encode, Encoding::Base64) => BUFFER_SIZE,
                 _ => 0,
             }),
+            decoded: BytesMut::with_capacity(match direction {
+                Direction::Decode => BUFFER_SIZE,
+                _ => 0,
+            }),
             direction,
             encoding,
-            poll_trailers: true,
             client: true,
             trailers: None,
         }
@@ -123,9 +126,9 @@ impl<B> GrpcWebCall<B> {
                 (Direction::Encode, Encoding::Base64) => BUFFER_SIZE,
                 _ => 0,
             }),
+            decoded: BytesMut::with_capacity(0),
             direction,
             encoding,
-            poll_trailers: true,
             client: false,
             trailers: None,
         }
@@ -157,27 +160,43 @@ impl<B> GrpcWebCall<B> {
 
 impl<B> GrpcWebCall<B>
 where
-    B: Body<Data = Bytes>,
-    B::Error: Error,
+    B: Body,
+    B::Data: Buf,
+    B::Error: fmt::Display,
 {
+    // Poll body for data, decoding (e.g. via Base64 if necessary) and returning frames
+    // to the caller. If the caller is a client, it should look for trailers before
+    // returning these frames.
     fn poll_decode(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<B::Data, Status>>> {
+    ) -> Poll<Option<Result<Frame<Bytes>, Status>>> {
         match self.encoding {
             Encoding::Base64 => loop {
                 if let Some(bytes) = self.as_mut().decode_chunk()? {
-                    return Poll::Ready(Some(Ok(bytes)));
+                    return Poll::Ready(Some(Ok(Frame::data(bytes))));
                 }
 
                 let mut this = self.as_mut().project();
 
-                match ready!(this.inner.as_mut().poll_data(cx)) {
-                    Some(Ok(data)) => this.buf.put(data),
+                match ready!(this.inner.as_mut().poll_frame(cx)) {
+                    Some(Ok(frame)) if frame.is_data() => this
+                        .buf
+                        .put(frame.into_data().unwrap_or_else(|_| unreachable!())),
+                    Some(Ok(frame)) if frame.is_trailers() => {
+                        return Poll::Ready(Some(Err(internal_error(
+                            "malformed base64 request has unencoded trailers",
+                        ))))
+                    }
+                    Some(Ok(_)) => {
+                        return Poll::Ready(Some(Err(internal_error("unexpected frame type"))))
+                    }
                     Some(Err(e)) => return Poll::Ready(Some(Err(internal_error(e)))),
                     None => {
                         return if this.buf.has_remaining() {
                             Poll::Ready(Some(Err(internal_error("malformed base64 request"))))
+                        } else if let Some(trailers) = this.trailers.take() {
+                            Poll::Ready(Some(Ok(Frame::trailers(trailers))))
                         } else {
                             Poll::Ready(None)
                         }
@@ -185,80 +204,92 @@ where
                 }
             },
 
-            Encoding::None => match ready!(self.project().inner.poll_data(cx)) {
-                Some(res) => Poll::Ready(Some(res.map_err(internal_error))),
-                None => Poll::Ready(None),
-            },
+            Encoding::None => self
+                .project()
+                .inner
+                .poll_frame(cx)
+                .map_ok(|f| f.map_data(|mut d| d.copy_to_bytes(d.remaining())))
+                .map_err(internal_error),
         }
     }
 
     fn poll_encode(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<B::Data, Status>>> {
+    ) -> Poll<Option<Result<Frame<Bytes>, Status>>> {
         let mut this = self.as_mut().project();
 
-        if let Some(mut res) = ready!(this.inner.as_mut().poll_data(cx)) {
-            if *this.encoding == Encoding::Base64 {
-                res = res.map(|b| crate::util::base64::STANDARD.encode(b).into())
-            }
+        match ready!(this.inner.as_mut().poll_frame(cx)) {
+            Some(Ok(frame)) if frame.is_data() => {
+                let mut data = frame.into_data().unwrap_or_else(|_| unreachable!());
+                let mut res = data.copy_to_bytes(data.remaining());
 
-            return Poll::Ready(Some(res.map_err(internal_error)));
-        }
-
-        // this flag is needed because the inner stream never
-        // returns Poll::Ready(None) when polled for trailers
-        if *this.poll_trailers {
-            return match ready!(this.inner.poll_trailers(cx)) {
-                Ok(Some(map)) => {
-                    let mut frame = make_trailers_frame(map);
-
-                    if *this.encoding == Encoding::Base64 {
-                        frame = crate::util::base64::STANDARD.encode(frame).into_bytes();
-                    }
-
-                    *this.poll_trailers = false;
-                    Poll::Ready(Some(Ok(frame.into())))
+                if *this.encoding == Encoding::Base64 {
+                    res = crate::util::base64::STANDARD.encode(res).into();
                 }
-                Ok(None) => Poll::Ready(None),
-                Err(e) => Poll::Ready(Some(Err(internal_error(e)))),
-            };
-        }
 
-        Poll::Ready(None)
+                Poll::Ready(Some(Ok(Frame::data(res))))
+            }
+            Some(Ok(frame)) if frame.is_trailers() => {
+                let trailers = frame.into_trailers().unwrap_or_else(|_| unreachable!());
+                let mut res = make_trailers_frame(trailers);
+
+                if *this.encoding == Encoding::Base64 {
+                    res = crate::util::base64::STANDARD.encode(res).into();
+                }
+
+                Poll::Ready(Some(Ok(Frame::data(res))))
+            }
+            Some(Ok(_)) => Poll::Ready(Some(Err(internal_error("unexpected frame type")))),
+            Some(Err(e)) => Poll::Ready(Some(Err(internal_error(e)))),
+            None => Poll::Ready(None),
+        }
     }
 }
 
 impl<B> Body for GrpcWebCall<B>
 where
-    B: Body<Data = Bytes>,
-    B::Error: Error,
+    B: Body,
+    B::Error: fmt::Display,
 {
     type Data = Bytes;
     type Error = Status;
 
-    fn poll_data(
+    fn poll_frame(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         if self.client && self.direction == Direction::Decode {
             let mut me = self.as_mut();
 
             loop {
-                let incoming_buf = match ready!(me.as_mut().poll_decode(cx)) {
-                    Some(Ok(incoming_buf)) => incoming_buf,
-                    None => {
-                        // TODO: Consider eofing here?
-                        // Even if the buffer has more data, this will hit the eof branch
-                        // of decode in tonic
-                        return Poll::Ready(None);
+                match ready!(me.as_mut().poll_decode(cx)) {
+                    Some(Ok(incoming_buf)) if incoming_buf.is_data() => {
+                        me.as_mut()
+                            .project()
+                            .decoded
+                            .put(incoming_buf.into_data().unwrap());
                     }
+                    Some(Ok(incoming_buf)) if incoming_buf.is_trailers() => {
+                        let trailers = incoming_buf.into_trailers().unwrap();
+                        match me.as_mut().project().trailers {
+                            Some(current_trailers) => {
+                                current_trailers.extend(trailers);
+                            }
+                            None => {
+                                me.as_mut().project().trailers.replace(trailers);
+                            }
+                        }
+                        continue;
+                    }
+                    Some(Ok(_)) => unreachable!("unexpected frame type"),
+                    None => {} // No more data to decode, time to look for trailers
                     Some(Err(e)) => return Poll::Ready(Some(Err(e))),
                 };
 
-                let buf = &mut me.as_mut().project().buf;
-
-                buf.put(incoming_buf);
+                // Hold the incoming, decoded data until we have a full message
+                // or trailers to return.
+                let buf = me.as_mut().project().decoded;
 
                 return match find_trailers(&buf[..])? {
                     FindTrailers::Trailer(len) => {
@@ -266,20 +297,25 @@ where
                         let msg_buf = buf.copy_to_bytes(len);
                         match decode_trailers_frame(buf.split().freeze()) {
                             Ok(Some(trailers)) => {
-                                self.project().trailers.replace(trailers);
+                                me.as_mut().project().trailers.replace(trailers);
                             }
                             Err(e) => return Poll::Ready(Some(Err(e))),
                             _ => {}
                         }
 
                         if msg_buf.has_remaining() {
-                            Poll::Ready(Some(Ok(msg_buf)))
+                            Poll::Ready(Some(Ok(Frame::data(msg_buf))))
+                        } else if let Some(trailers) = me.as_mut().project().trailers.take() {
+                            Poll::Ready(Some(Ok(Frame::trailers(trailers))))
                         } else {
                             Poll::Ready(None)
                         }
                     }
                     FindTrailers::IncompleteBuf => continue,
-                    FindTrailers::Done(len) => Poll::Ready(Some(Ok(buf.split_to(len).freeze()))),
+                    FindTrailers::Done(len) => Poll::Ready(match len {
+                        0 => None,
+                        _ => Some(Ok(Frame::data(buf.split_to(len).freeze()))),
+                    }),
                 };
             }
         }
@@ -289,14 +325,6 @@ where
             Direction::Encode => self.poll_encode(cx),
             Direction::Empty => Poll::Ready(None),
         }
-    }
-
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap<HeaderValue>>, Self::Error>> {
-        let trailers = self.project().trailers.take();
-        Poll::Ready(Ok(trailers))
     }
 
     fn is_end_stream(&self) -> bool {
@@ -310,13 +338,13 @@ where
 
 impl<B> Stream for GrpcWebCall<B>
 where
-    B: Body<Data = Bytes>,
-    B::Error: Error,
+    B: Body,
+    B::Error: fmt::Display,
 {
-    type Item = Result<Bytes, Status>;
+    type Item = Result<Frame<Bytes>, Status>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Body::poll_data(self, cx)
+        self.poll_frame(cx)
     }
 }
 
@@ -374,11 +402,15 @@ fn decode_trailers_frame(mut buf: Bytes) -> Result<Option<HeaderMap>, Status> {
     let mut cursor_pos = 0;
 
     for (i, b) in buf.iter().enumerate() {
+        // if we are at a trailer delimiter (\r\n)
         if b == &b'\r' && buf.get(i + 1) == Some(&b'\n') {
+            // read the bytes of the trailer passed so far
             let trailer = temp_buf.copy_to_bytes(i - cursor_pos);
-            cursor_pos = i;
+            // increment cursor beyond the delimiter
+            cursor_pos = i + 2;
             trailers.push(trailer);
             if temp_buf.has_remaining() {
+                // advance buf beyond the delimiters
                 temp_buf.get_u8();
                 temp_buf.get_u8();
             }
@@ -397,7 +429,9 @@ fn decode_trailers_frame(mut buf: Bytes) -> Result<Option<HeaderMap>, Status> {
         let value = value
             .split(|b| b == &b'\r')
             .next()
-            .ok_or_else(|| Status::internal("trailers was not escaped"))?;
+            .ok_or_else(|| Status::internal("trailers was not escaped"))?
+            .strip_prefix(b" ")
+            .unwrap_or(value);
 
         let header_key = HeaderName::try_from(key)
             .map_err(|e| Status::internal(format!("Unable to parse HeaderName: {}", e)))?;
@@ -409,17 +443,17 @@ fn decode_trailers_frame(mut buf: Bytes) -> Result<Option<HeaderMap>, Status> {
     Ok(Some(map))
 }
 
-fn make_trailers_frame(trailers: HeaderMap) -> Vec<u8> {
+fn make_trailers_frame(trailers: HeaderMap) -> Bytes {
     let trailers = encode_trailers(trailers);
     let len = trailers.len();
     assert!(len <= u32::MAX as usize);
 
-    let mut frame = Vec::with_capacity(len + FRAME_HEADER_SIZE);
-    frame.push(GRPC_WEB_TRAILERS_BIT);
+    let mut frame = BytesMut::with_capacity(len + FRAME_HEADER_SIZE);
+    frame.put_u8(GRPC_WEB_TRAILERS_BIT);
     frame.put_u32(len as u32);
-    frame.extend(trailers);
+    frame.put_slice(&trailers);
 
-    frame
+    frame.freeze()
 }
 
 /// Search some buffer for grpc-web trailers headers and return
@@ -501,14 +535,15 @@ mod tests {
     #[test]
     fn decode_trailers() {
         let mut headers = HeaderMap::new();
-        headers.insert("grpc-status", 0.try_into().unwrap());
-        headers.insert("grpc-message", "this is a message".try_into().unwrap());
+        headers.insert(Status::GRPC_STATUS, 0.into());
+        headers.insert(
+            Status::GRPC_MESSAGE,
+            "this is a message".try_into().unwrap(),
+        );
 
         let trailers = make_trailers_frame(headers.clone());
 
-        let buf = Bytes::from(trailers);
-
-        let map = decode_trailers_frame(buf).unwrap().unwrap();
+        let map = decode_trailers_frame(trailers).unwrap().unwrap();
 
         assert_eq!(headers, map);
     }
@@ -545,7 +580,7 @@ mod tests {
         let trailers = decode_trailers_frame(Bytes::copy_from_slice(&buf[81..]))
             .unwrap()
             .unwrap();
-        let status = trailers.get("grpc-status").unwrap();
+        let status = trailers.get(Status::GRPC_STATUS).unwrap();
         assert_eq!(status.to_str().unwrap(), "0")
     }
 
@@ -592,5 +627,37 @@ mod tests {
         let out = find_trailers(&buf[..]).unwrap_err();
 
         assert_eq!(out.code(), Code::Internal);
+    }
+
+    #[test]
+    fn decode_multiple_trailers() {
+        let buf = b"\x80\0\0\0\x0fgrpc-status:0\r\ngrpc-message:\r\na:1\r\nb:2\r\n";
+
+        let trailers = decode_trailers_frame(Bytes::copy_from_slice(&buf[..]))
+            .unwrap()
+            .unwrap();
+
+        let mut expected = HeaderMap::new();
+        expected.insert(Status::GRPC_STATUS, "0".parse().unwrap());
+        expected.insert(Status::GRPC_MESSAGE, "".parse().unwrap());
+        expected.insert("a", "1".parse().unwrap());
+        expected.insert("b", "2".parse().unwrap());
+
+        assert_eq!(trailers, expected);
+    }
+
+    #[test]
+    fn decode_trailers_with_space_after_colon() {
+        let buf = b"\x80\0\0\0\x0fgrpc-status: 0\r\ngrpc-message: \r\n";
+
+        let trailers = decode_trailers_frame(Bytes::copy_from_slice(&buf[..]))
+            .unwrap()
+            .unwrap();
+
+        let mut expected = HeaderMap::new();
+        expected.insert(Status::GRPC_STATUS, "0".parse().unwrap());
+        expected.insert(Status::GRPC_MESSAGE, "".parse().unwrap());
+
+        assert_eq!(trailers, expected);
     }
 }

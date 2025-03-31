@@ -1,6 +1,6 @@
 use super::{BufferSettings, Codec, DecodeBuf, Decoder, Encoder};
 use crate::codec::EncodeBuf;
-use crate::{Code, Status};
+use crate::Status;
 use prost::Message;
 use std::marker::PhantomData;
 
@@ -144,18 +144,19 @@ impl<U: Message + Default> Decoder for ProstDecoder<U> {
 fn from_decode_error(error: prost::DecodeError) -> crate::Status {
     // Map Protobuf parse errors to an INTERNAL status code, as per
     // https://github.com/grpc/grpc/blob/master/doc/statuscodes.md
-    Status::new(Code::Internal, error.to_string())
+    Status::internal(error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use crate::codec::compression::SingleMessageCompressionOverride;
     use crate::codec::{
-        encode_server, DecodeBuf, Decoder, EncodeBuf, Encoder, Streaming, HEADER_SIZE,
+        DecodeBuf, Decoder, EncodeBody, EncodeBuf, Encoder, Streaming, HEADER_SIZE,
     };
-    use crate::{Code, Status};
+    use crate::Status;
     use bytes::{Buf, BufMut, BytesMut};
     use http_body::Body;
+    use http_body_util::BodyExt as _;
     use std::pin::pin;
 
     const LEN: usize = 10000;
@@ -208,14 +209,11 @@ mod tests {
 
         let actual = stream.message().await.unwrap_err();
 
-        let expected = Status::new(
-            Code::OutOfRange,
-            format!(
-                "Error, message length too large: found {} bytes, the limit is: {} bytes",
-                msg.len(),
-                MAX_MESSAGE_SIZE
-            ),
-        );
+        let expected = Status::out_of_range(format!(
+            "Error, decoded message length too large: found {} bytes, the limit is: {} bytes",
+            msg.len(),
+            MAX_MESSAGE_SIZE
+        ));
 
         assert_eq!(actual.code(), expected.code());
         assert_eq!(actual.message(), expected.message());
@@ -230,7 +228,7 @@ mod tests {
         let messages = std::iter::repeat_with(move || Ok::<_, Status>(msg.clone())).take(10000);
         let source = tokio_stream::iter(messages);
 
-        let mut body = pin!(encode_server(
+        let mut body = pin!(EncodeBody::new_server(
             encoder,
             source,
             None,
@@ -238,7 +236,7 @@ mod tests {
             None,
         ));
 
-        while let Some(r) = body.data().await {
+        while let Some(r) = body.frame().await {
             r.unwrap();
         }
     }
@@ -252,7 +250,7 @@ mod tests {
         let messages = std::iter::once(Ok::<_, Status>(msg));
         let source = tokio_stream::iter(messages);
 
-        let mut body = pin!(encode_server(
+        let mut body = pin!(EncodeBody::new_server(
             encoder,
             source,
             None,
@@ -260,13 +258,16 @@ mod tests {
             Some(MAX_MESSAGE_SIZE),
         ));
 
-        assert!(body.data().await.is_none());
+        let frame = body
+            .frame()
+            .await
+            .expect("at least one frame")
+            .expect("no error polling frame");
         assert_eq!(
-            body.trailers()
-                .await
-                .expect("no error polling trailers")
-                .expect("some trailers")
-                .get("grpc-status")
+            frame
+                .into_trailers()
+                .expect("got trailers")
+                .get(Status::GRPC_STATUS)
                 .expect("grpc-status header"),
             "11"
         );
@@ -277,6 +278,8 @@ mod tests {
     #[cfg(not(target_family = "windows"))]
     #[tokio::test]
     async fn encode_too_big() {
+        use crate::codec::EncodeBody;
+
         let encoder = MockEncoder::default();
 
         let msg = vec![0u8; u32::MAX as usize + 1];
@@ -284,7 +287,7 @@ mod tests {
         let messages = std::iter::once(Ok::<_, Status>(msg));
         let source = tokio_stream::iter(messages);
 
-        let mut body = pin!(encode_server(
+        let mut body = pin!(EncodeBody::new_server(
             encoder,
             source,
             None,
@@ -292,13 +295,16 @@ mod tests {
             Some(usize::MAX),
         ));
 
-        assert!(body.data().await.is_none());
+        let frame = body
+            .frame()
+            .await
+            .expect("at least one frame")
+            .expect("no error polling frame");
         assert_eq!(
-            body.trailers()
-                .await
-                .expect("no error polling trailers")
-                .expect("some trailers")
-                .get("grpc-status")
+            frame
+                .into_trailers()
+                .expect("got trailers")
+                .get(Status::GRPC_STATUS)
                 .expect("grpc-status header"),
             "8"
         );
@@ -306,7 +312,7 @@ mod tests {
     }
 
     #[derive(Debug, Clone, Default)]
-    struct MockEncoder;
+    struct MockEncoder {}
 
     impl Encoder for MockEncoder {
         type Item = Vec<u8>;
@@ -323,7 +329,7 @@ mod tests {
     }
 
     #[derive(Debug, Clone, Default)]
-    struct MockDecoder;
+    struct MockDecoder {}
 
     impl Decoder for MockDecoder {
         type Item = Vec<u8>;
@@ -343,7 +349,7 @@ mod tests {
     mod body {
         use crate::Status;
         use bytes::Bytes;
-        use http_body::Body;
+        use http_body::{Body, Frame};
         use std::{
             pin::Pin,
             task::{Context, Poll},
@@ -374,10 +380,10 @@ mod tests {
             type Data = Bytes;
             type Error = Status;
 
-            fn poll_data(
+            fn poll_frame(
                 mut self: Pin<&mut Self>,
                 cx: &mut Context<'_>,
-            ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
                 // every other call to poll_data returns data
                 let should_send = self.count % 2 == 0;
                 let data_len = self.data.len();
@@ -388,7 +394,7 @@ mod tests {
                         let response =
                             self.data
                                 .split_to(if count == 0 { partial_len } else { data_len });
-                        Poll::Ready(Some(Ok(response)))
+                        Poll::Ready(Some(Ok(Frame::data(response))))
                     } else {
                         cx.waker().wake_by_ref();
                         Poll::Pending
@@ -399,13 +405,6 @@ mod tests {
                 } else {
                     Poll::Ready(None)
                 }
-            }
-
-            fn poll_trailers(
-                self: Pin<&mut Self>,
-                _cx: &mut Context<'_>,
-            ) -> Poll<Result<Option<http::HeaderMap>, Self::Error>> {
-                Poll::Ready(Ok(None))
             }
         }
     }

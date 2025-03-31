@@ -3,12 +3,10 @@ authors = ["Aurimas Blažulionis <aurimas@chorus.one>"]
 edition = "2021"
 license = "MIT"
 name = "use_arc_self"
-publish = false
-version = "0.1.0"
 
 [dependencies]
 tokio-stream = "0.1"
-prost = "0.12"
+prost = "0.13"
 tonic = {path = "../../tonic", features = ["gzip"]}
 
 [build-dependencies]
