@@ -378,7 +378,12 @@ impl GracefulSwitchBalancer {
 
         // TODO: config should come from ParsedServiceConfig.
         let builder = self.policy_builder.lock().unwrap();
-        let config = builder.as_ref().unwrap().parse_config("");
+        let config = match builder.as_ref().unwrap().parse_config(r#"{"shuffleAddressList": true, "unknown_field": false}"#) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                return Err(e);
+            }
+        };
 
         p.as_mut()
             .unwrap()

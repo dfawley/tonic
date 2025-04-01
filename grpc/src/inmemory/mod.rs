@@ -125,9 +125,6 @@ pub fn reg() {
 struct InMemoryResolverBuilder;
 
 impl ResolverBuilder for InMemoryResolverBuilder {
-    // fn build(&self, target: url::Url, options: ResolverOptions) -> Box<dyn Resolver> {
-    // }
-
     fn scheme(&self) -> &'static str {
         "inmemory"
     }

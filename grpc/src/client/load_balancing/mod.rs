@@ -64,8 +64,9 @@ pub trait LbPolicyBuilderSingle: Send + Sync {
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicySingle>;
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
-    fn parse_config(&self, config: &str) -> Option<LbConfig> {
-        None
+    // Parses the JSON LB policy configuration into an internal representation.
+    fn parse_config(&self, config: &str) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
+        Ok(None)
     }
 }
 
@@ -175,8 +176,7 @@ impl<'a> LbConfig {
     }
 
     fn into<T: 'static>(&self) -> Option<&T> {
-        let s = self.config.downcast_ref::<T>();
-        None
+        self.config.downcast_ref::<T>()
     }
 }
 
