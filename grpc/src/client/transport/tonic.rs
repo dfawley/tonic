@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     error::Error,
+    str::FromStr,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
@@ -19,13 +20,15 @@ use crate::{
     server,
     service::{Request, Response, Service},
 };
+use http::Uri;
 use once_cell::sync::Lazy;
 use tokio::{
+    net::TcpStream,
     sync::{mpsc, oneshot, Mutex, Notify},
     time::sleep,
 };
-use tonic::async_trait;
 use tonic::transport::Endpoint as TonicEndpoint;
+use tonic::{async_trait, client::Grpc};
 
 struct TonicTransportBuilder {}
 
@@ -35,8 +38,12 @@ impl TonicTransportBuilder {
     }
 }
 
+struct Svc {
+    conn: TcpStream,
+}
+
 struct ConnectedTonicTransport {
-    endpoint: TonicEndpoint,
+    grpc: Grpc<Svc>,
 }
 
 #[async_trait]
@@ -56,10 +63,14 @@ impl ConnectedTransport for ConnectedTonicTransport {
 #[async_trait]
 impl transport::Transport for TonicTransportBuilder {
     async fn connect(&self, address: String) -> Result<Box<dyn ConnectedTransport>, String> {
-        let endpoint = TonicEndpoint::from_shared("https://".to_string() + &address)
-            .map_err(|e| e.to_string())?;
-        endpoint.connect().await.map_err(|e| e.to_string())?;
-        Ok(Box::new(ConnectedTonicTransport { endpoint }))
+        let conn = TcpStream::connect(&address)
+            .await
+            .map_err(|e| e.to_string())?; // TODO: err msg
+        let grpc = Grpc::with_origin(
+            Svc { conn },
+            Uri::from_maybe_shared(format!("http://{address}")).map_err(|e| e.to_string())?, // TODO: err msg
+        );
+        Ok(Box::new(ConnectedTonicTransport { grpc }))
     }
 }
 
