@@ -58,6 +58,26 @@ pub trait WorkScheduler: Send + Sync {
     fn schedule_work(&self);
 }
 
+// Abstract representation of the configuration for any LB policy, stored as
+// JSON.  Hides internal storage details and includes a method to deserialize
+// the JSON into a concrete policy struct.
+#[derive(Debug)]
+pub struct ParsedJsonLbConfig(pub serde_json::Value);
+
+impl ParsedJsonLbConfig {
+    pub fn convert_to<T: serde::de::DeserializeOwned>(
+        &self,
+    ) -> Result<T, Box<dyn Error + Send + Sync>> {
+        let res: T = match serde_json::from_value(self.0.clone()) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(format!("{}", e).into());
+            }
+        };
+        Ok(res)
+    }
+}
+
 /// An LB policy factory
 pub trait LbPolicyBuilderSingle: Send + Sync {
     /// Builds an LB policy instance, or returns an error.
@@ -65,7 +85,10 @@ pub trait LbPolicyBuilderSingle: Send + Sync {
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
     // Parses the JSON LB policy configuration into an internal representation.
-    fn parse_config(&self, config: &str) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
+    fn parse_config(
+        &self,
+        config: &ParsedJsonLbConfig,
+    ) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
         Ok(None)
     }
 }
@@ -166,17 +189,25 @@ impl Default for SubchannelUpdate {
     }
 }
 
+// LbConfig is a base type that stores a concrete config type corresponding to a
+// specific LB policy an Arc<dyn Any>.
+#[derive(Debug)]
 pub struct LbConfig {
-    config: Arc<dyn Any>,
+    config: Arc<dyn Any + Send + Sync>,
 }
-
-impl<'a> LbConfig {
-    fn new(config: Arc<dyn Any>) -> Self {
-        LbConfig { config }
+impl LbConfig {
+    fn new<T: 'static + Send + Sync>(config: T) -> Self {
+        LbConfig {
+            config: Arc::new(config),
+        }
     }
 
-    fn into<T: 'static>(&self) -> Option<&T> {
-        self.config.downcast_ref::<T>()
+    // Convenience method to extract the concrete config.
+    fn convert_to<T: 'static + Send + Sync>(&self) -> Result<Arc<T>, Box<dyn Error + Send + Sync>> {
+        match self.config.clone().downcast::<T>() {
+            Ok(c) => Ok(c),
+            Err(e) => Err("failed to downcast to config type".into()),
+        }
     }
 }
 

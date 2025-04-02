@@ -16,15 +16,15 @@ use crate::{
 };
 
 use super::{
-    ChannelController, LbConfig, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicySingle, Pick,
-    PickResult, Picker, Subchannel, SubchannelState, WorkScheduler
+    ChannelController, LbConfig, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicySingle,
+    ParsedJsonLbConfig, Pick, PickResult, Picker, Subchannel, SubchannelState, WorkScheduler,
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json;
+use serde_json::json;
 
-use rand::seq::SliceRandom;
 use rand;
+use rand::seq::SliceRandom;
 
 pub static POLICY_NAME: &str = "pick_first";
 
@@ -43,30 +43,24 @@ impl LbPolicyBuilderSingle for Builder {
         POLICY_NAME
     }
 
-    fn parse_config(&self, config: &str) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
-        let cfg = match serde_json::from_str::<PickFirstConfig>(config) {
-            Ok(cfg) => cfg,
-            Err(err) => {
-                return Err(format!("service config parsing failed: {err}").into());
+    fn parse_config(
+        &self,
+        config: &ParsedJsonLbConfig,
+    ) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
+        let cfg: PickFirstConfig = match config.convert_to() {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(format!("failed to parse JSON config: {}", e).into());
             }
         };
-        let cfg = LbConfig::new(Arc::new(cfg));
-        Ok(Some(cfg))
+        Ok(Some(LbConfig::new(cfg)))
     }
 }
-
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct PickFirstConfig {
     shuffle_address_list: Option<bool>,
-}
-
-// TODO(easwars): Should we instead implement `TryFrom`?
-impl <'a> From<&'a LbConfig> for &'a PickFirstConfig {
-    fn from(value: &'a LbConfig) -> &'a PickFirstConfig{
-        value.config.downcast_ref::<PickFirstConfig>().unwrap()
-    }
 }
 
 pub fn reg() {
@@ -90,12 +84,10 @@ impl LbPolicySingle for PickFirstPolicy {
             return Err("unhandled".into());
         };
 
+        let cfg: Arc<PickFirstConfig> = config.unwrap().convert_to().expect("todo");
         let mut shuffle_addresses = false;
-        if let Some(cfg) = config {
-            let cfg: &PickFirstConfig = cfg.into().expect("todo");
-            if let Some(v) = cfg.shuffle_address_list {
-                shuffle_addresses = v;
-            }
+        if let Some(v) = cfg.shuffle_address_list {
+            shuffle_addresses = v;
         }
 
         //let endpoints = mem::replace(&mut update.endpoints, vec![]);
@@ -172,20 +164,21 @@ impl Picker for OneSubchannelPicker {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::client::load_balancing::{LbConfig, LbPolicyBuilderSingle, GLOBAL_LB_REGISTRY};
     use std::sync::Arc;
-    use super::*;
 
     #[test]
     fn pickfirst_builder_name() -> Result<(), String> {
         reg();
 
-        let builder: Arc<dyn LbPolicyBuilderSingle> = match GLOBAL_LB_REGISTRY.get_policy("pick_first") {
-            Some(b) => b,
-            None => {
-                return Err(String::from("pick_first LB policy not registered"));
-            }
-        };
+        let builder: Arc<dyn LbPolicyBuilderSingle> =
+            match GLOBAL_LB_REGISTRY.get_policy("pick_first") {
+                Some(b) => b,
+                None => {
+                    return Err(String::from("pick_first LB policy not registered"));
+                }
+            };
         assert_eq!(builder.name(), "pick_first");
         Ok(())
     }
@@ -194,47 +187,67 @@ mod tests {
     fn pickfirst_builder_parse_config_failure() -> Result<(), String> {
         reg();
 
-        let builder: Arc<dyn LbPolicyBuilderSingle> = match GLOBAL_LB_REGISTRY.get_policy("pick_first") {
-            Some(b) => b,
-            None => {
-                return Err(String::from("pick_first LB policy not registered"));
-            }
-        };
-
-        // Failure cases.
-        assert_eq!(builder.parse_config("").is_err(), true);
-        assert_eq!(builder.parse_config("This is not JSON").is_err(), true);
-        assert_eq!(builder.parse_config("{").is_err(), true);
-        assert_eq!(builder.parse_config("}").is_err(), true);
+        let builder: Arc<dyn LbPolicyBuilderSingle> =
+            match GLOBAL_LB_REGISTRY.get_policy("pick_first") {
+                Some(b) => b,
+                None => {
+                    return Err(String::from("pick_first LB policy not registered"));
+                }
+            };
 
         // Success cases.
-        struct TestCase <'a> {
-            config: &'a str,
+        struct TestCase {
+            config: ParsedJsonLbConfig,
             want_shuffle_addresses: Option<bool>,
         }
         let test_cases = vec![
-            TestCase{config: r#"{}"#, want_shuffle_addresses: None},
-            TestCase{config: r#"{"shuffleAddressList": false}"#, want_shuffle_addresses: Some(false)},
-            TestCase{config: r#"{"shuffleAddressList": true}"#, want_shuffle_addresses: Some(true)},
-            TestCase{config: r#"{"shuffleAddressList": true, "unknownField": "foo"}"#, want_shuffle_addresses: Some(true)},
+            TestCase {
+                config: ParsedJsonLbConfig(json!({})),
+                want_shuffle_addresses: None,
+            },
+            TestCase {
+                config: ParsedJsonLbConfig(json!({"shuffleAddressList": false})),
+                want_shuffle_addresses: Some(false),
+            },
+            TestCase {
+                config: ParsedJsonLbConfig(json!({"shuffleAddressList": true})),
+                want_shuffle_addresses: Some(true),
+            },
+            TestCase {
+                config: ParsedJsonLbConfig(
+                    json!({"shuffleAddressList": true, "unknownField": "foo"}),
+                ),
+                want_shuffle_addresses: Some(true),
+            },
         ];
         for tc in test_cases {
-            let config = match builder.parse_config(tc.config) {
+            let config = match builder.parse_config(&tc.config) {
                 Ok(c) => c,
                 Err(e) => {
-                    let err = format!("parse_config({}) failed when expected to succeed: {:?}", tc.config, e).clone(); 
+                    let err = format!(
+                        "parse_config({:?}) failed when expected to succeed: {:?}",
+                        tc.config, e
+                    )
+                    .clone();
                     panic!("{}", err);
                 }
             };
             let config: LbConfig = match config {
                 Some(c) => c,
                 None => {
-                    let err = format!("parse_config({}) returned None when expected to succeed", tc.config).clone(); 
+                    let err = format!(
+                        "parse_config({:?}) returned None when expected to succeed",
+                        tc.config
+                    )
+                    .clone();
                     panic!("{}", err);
                 }
             };
-            let config: &PickFirstConfig = <&LbConfig as Into<&PickFirstConfig>>::into(&config);
-            assert_eq!(config.shuffle_address_list == tc.want_shuffle_addresses, true);
+            let got_config: Arc<PickFirstConfig> = config.convert_to().unwrap();
+            assert_eq!(
+                got_config.shuffle_address_list == tc.want_shuffle_addresses,
+                true
+            );
         }
         Ok(())
     }

@@ -7,6 +7,7 @@ use std::{mem, vec};
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::task::AbortHandle;
 
+use serde_json::json;
 use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
@@ -17,7 +18,8 @@ use crate::service::{Request, Response};
 
 use super::load_balancing::{
     self, pick_first, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicyRegistry, LbPolicySingle,
-    LbState, Subchannel, SubchannelState, SubchannelUpdate, WorkScheduler, GLOBAL_LB_REGISTRY,
+    LbState, ParsedJsonLbConfig, Subchannel, SubchannelState, SubchannelUpdate, WorkScheduler,
+    GLOBAL_LB_REGISTRY,
 };
 use super::name_resolution::{
     self, Address, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
@@ -393,11 +395,9 @@ impl GracefulSwitchBalancer {
 
         // TODO: config should come from ParsedServiceConfig.
         let builder = self.policy_builder.lock().unwrap();
-        let config = match builder
-            .as_ref()
-            .unwrap()
-            .parse_config(r#"{"shuffleAddressList": true, "unknown_field": false}"#)
-        {
+        let config = match builder.as_ref().unwrap().parse_config(&ParsedJsonLbConfig(
+            json!({"shuffleAddressList": true, "unknown_field": false}),
+        )) {
             Ok(cfg) => cfg,
             Err(e) => {
                 return Err(e);
