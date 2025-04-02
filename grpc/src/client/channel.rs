@@ -25,7 +25,7 @@ use super::name_resolution::{
 };
 use super::service_config::ParsedServiceConfig;
 use super::subchannel::InternalSubchannelPool;
-use super::transport::TransportRegistry;
+use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 
 #[non_exhaustive]
 pub struct ChannelOptions {
@@ -88,6 +88,12 @@ impl ChannelOptions {
     pub fn override_authority(self, authority: String) -> Self {
         Self {
             override_authority: Some(authority),
+            ..self
+        }
+    }
+    pub fn transport_registry(self, registry: TransportRegistry) -> Self {
+        Self {
+            transport_registry: Some(registry),
             ..self
         }
     }
@@ -165,7 +171,10 @@ impl Channel {
     fn get_or_create_active_channel(&self) -> Arc<ActiveChannel> {
         let mut s = self.inner.active_channel.lock().unwrap();
         if s.is_none() {
-            *s = Some(ActiveChannel::new(self.inner.target.clone()));
+            *s = Some(ActiveChannel::new(
+                self.inner.target.clone(),
+                &self.inner.options,
+            ));
         }
         s.clone().unwrap()
     }
@@ -178,6 +187,7 @@ impl Channel {
 
 struct PersistentChannel {
     target: Url,
+    options: ChannelOptions,
     active_channel: Mutex<Option<Arc<ActiveChannel>>>,
 }
 
@@ -193,6 +203,7 @@ impl PersistentChannel {
         Self {
             target: Url::from_str(target).unwrap(), // TODO handle err
             active_channel: Mutex::default(),
+            options,
         }
     }
 }
@@ -204,9 +215,13 @@ struct ActiveChannel {
 }
 
 impl ActiveChannel {
-    fn new(target: Url) -> Arc<Self> {
+    fn new(target: Url, options: &ChannelOptions) -> Arc<Self> {
         let (tx, mut rx) = mpsc::unbounded_channel::<WorkQueueItem>();
-        let scp = Arc::new(InternalSubchannelPool::new(tx.clone()));
+        let tr = match &options.transport_registry {
+            Some(tr) => tr.clone(),
+            None => GLOBAL_TRANSPORT_REGISTRY.clone(),
+        };
+        let scp = Arc::new(InternalSubchannelPool::new(tr, tx.clone()));
 
         let resolve_now = Arc::new(Notify::new());
 
@@ -378,7 +393,11 @@ impl GracefulSwitchBalancer {
 
         // TODO: config should come from ParsedServiceConfig.
         let builder = self.policy_builder.lock().unwrap();
-        let config = match builder.as_ref().unwrap().parse_config(r#"{"shuffleAddressList": true, "unknown_field": false}"#) {
+        let config = match builder
+            .as_ref()
+            .unwrap()
+            .parse_config(r#"{"shuffleAddressList": true, "unknown_field": false}"#)
+        {
             Ok(cfg) => cfg,
             Err(e) => {
                 return Err(e);

@@ -9,6 +9,7 @@ use super::Transport;
 
 /// A registry to store and retrieve transports.  Transports are indexed by
 /// the address type they are intended to handle.
+#[derive(Clone)]
 pub struct TransportRegistry {
     m: Arc<Mutex<HashMap<String, Arc<dyn Transport>>>>,
 }

@@ -1,6 +1,7 @@
 use std::any::Any;
 
 use grpc::client::load_balancing::pick_first;
+use grpc::client::transport;
 use grpc::service::{Message, Request, Response, Service};
 use grpc::{client::ChannelOptions, inmemory};
 use tokio::sync::mpsc::error::SendError;
@@ -65,7 +66,9 @@ async fn main() {
     });
 
     println!("Creating channel for {target}");
-    let chan = grpc::client::Channel::new(target.as_str(), None, None, ChannelOptions::default());
+    let chan_opts =
+        ChannelOptions::default().transport_registry(transport::GLOBAL_TRANSPORT_REGISTRY.clone());
+    let chan = grpc::client::Channel::new(target.as_str(), None, None, chan_opts);
 
     let (req, tx) = Request::new("hi", None);
     let mut res = chan.call(req).await;

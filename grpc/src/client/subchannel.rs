@@ -9,7 +9,7 @@ use tonic::async_trait;
 use super::channel::WorkQueueTx;
 use super::load_balancing::{self, Picker, Subchannel, SubchannelState, SubchannelUpdate};
 use super::name_resolution::Address;
-use super::transport::{self, ConnectedTransport, Transport};
+use super::transport::{self, ConnectedTransport, Transport, TransportRegistry};
 use super::ConnectivityState;
 use crate::client::channel::InternalChannelController;
 use crate::service::{Request, Response, Service};
@@ -155,6 +155,7 @@ impl Service for InternalSubchannel {
 }
 
 pub(crate) struct InternalSubchannelPool {
+    transport_registry: TransportRegistry,
     subchannels: Mutex<HashMap<Subchannel, Arc<InternalSubchannel>>>,
     //subchannel_update: Arc<Mutex<SubchannelUpdate>>,
     picker: Watcher<Arc<dyn Picker>>,
@@ -163,15 +164,17 @@ pub(crate) struct InternalSubchannelPool {
 }
 
 impl InternalSubchannelPool {
-    pub(crate) fn new(wtx: WorkQueueTx) -> Self {
+    pub(crate) fn new(transport_registry: TransportRegistry, wtx: WorkQueueTx) -> Self {
         Self {
+            transport_registry,
+            wtx,
             subchannels: Mutex::default(),
             //subchannel_update: Arc::default(),
             picker: Watcher::new(),
             connectivity_state: Watcher::new(),
-            wtx,
         }
     }
+
     pub(crate) async fn call(&self, request: Request) -> Response {
         let mut i = self.picker.iter();
         loop {
@@ -194,7 +197,8 @@ impl InternalSubchannelPool {
 
     pub(super) fn new_subchannel(&self, address: &Address) -> Subchannel {
         println!("creating subchannel for {address}");
-        let t = transport::GLOBAL_TRANSPORT_REGISTRY
+        let t = self
+            .transport_registry
             .get_transport(&address.address_type)
             .unwrap();
 
