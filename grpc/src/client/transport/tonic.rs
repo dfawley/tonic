@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     error::Error,
+    future::Future,
     str::FromStr,
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -27,8 +28,8 @@ use tokio::{
     sync::{mpsc, oneshot, Mutex, Notify},
     time::sleep,
 };
-use tonic::transport::Endpoint as TonicEndpoint;
 use tonic::{async_trait, client::Grpc};
+use tonic::{client::GrpcService, transport::Endpoint as TonicEndpoint};
 
 struct TonicTransportBuilder {}
 
@@ -40,6 +41,23 @@ impl TonicTransportBuilder {
 
 struct Svc {
     conn: TcpStream,
+}
+
+impl<ReqBody, ResBody: http_body::Body> tower_service::Service<http::Request<ReqBody>> for Svc {
+    type Response = http::Response<ResBody>;
+    type Error = String;
+    type Future = Box<dyn Future<Output = Result<http::Response<ResBody>, Self::Error>>>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        todo!()
+    }
+
+    fn call(&mut self, req: http::Request<ReqBody>) -> Self::Future {
+        todo!()
+    }
 }
 
 struct ConnectedTonicTransport {
