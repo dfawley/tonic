@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{mem, vec};
 
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::task::AbortHandle;
 
 use serde_json::json;
@@ -20,8 +20,8 @@ use crate::service::{Request, Response};
 
 use super::load_balancing::{
     self, pick_first, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicyRegistry, LbPolicySingle,
-    LbState, ParsedJsonLbConfig, Subchannel, SubchannelState, SubchannelUpdate, WorkScheduler,
-    GLOBAL_LB_REGISTRY,
+    LbState, ParsedJsonLbConfig, Picker, Subchannel, SubchannelState, SubchannelUpdate,
+    WorkScheduler, GLOBAL_LB_REGISTRY,
 };
 use super::name_resolution::{
     self, Address, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
@@ -153,7 +153,7 @@ impl Channel {
             // Otherwise, get or create the active channel.
             self.get_or_create_active_channel()
         };
-        if let Some(s) = ac.subchannel_pool.connectivity_state.cur() {
+        if let Some(s) = ac.connectivity_state.cur() {
             return s;
         }
         ConnectivityState::Idle
@@ -215,6 +215,8 @@ struct ActiveChannel {
     cur_state: Mutex<ConnectivityState>,
     abort_handle: AbortHandle,
     subchannel_pool: Arc<InternalSubchannelPool>,
+    picker: Arc<Watcher<Arc<dyn Picker>>>,
+    connectivity_state: Arc<Watcher<ConnectivityState>>,
 }
 
 impl ActiveChannel {
@@ -228,11 +230,15 @@ impl ActiveChannel {
 
         let resolve_now = Arc::new(Notify::new());
 
+        let connectivity_state = Arc::new(Watcher::new());
+        let picker = Arc::new(Watcher::new());
         let mut channel_controller = InternalChannelController::new(
             target.clone(),
             scp.clone(),
             resolve_now.clone(),
             tx.clone(),
+            picker.clone(),
+            connectivity_state.clone(),
         );
 
         let jh = tokio::task::spawn(async move {
@@ -255,6 +261,8 @@ impl ActiveChannel {
             cur_state: Mutex::new(ConnectivityState::Connecting),
             abort_handle: jh.abort_handle(),
             subchannel_pool: scp,
+            picker: picker.clone(),
+            connectivity_state: connectivity_state.clone(),
         })
     }
 
@@ -263,7 +271,16 @@ impl ActiveChannel {
         // start attempt
         // pick subchannel
         // perform attempt on transport
-        self.subchannel_pool.call(request).await
+        let mut i = self.picker.iter();
+        loop {
+            if let Some(p) = i.next().await {
+                let sc = &p
+                    .pick(&request)
+                    .unwrap_pick() // TODO: handle picker errors (queue or fail RPC)
+                    .subchannel;
+                return self.subchannel_pool.call(sc, request).await;
+            }
+        }
     }
 }
 
@@ -294,6 +311,8 @@ pub(super) struct InternalChannelController {
     pub(super) lb: Arc<GracefulSwitchBalancer>, // called and passes mutable parent to it, so must be Arc.
     scp: Arc<InternalSubchannelPool>,
     resolve_now: Arc<Notify>,
+    picker: Arc<Watcher<Arc<dyn Picker>>>,
+    connectivity_state: Arc<Watcher<ConnectivityState>>,
 }
 
 impl InternalChannelController {
@@ -302,6 +321,8 @@ impl InternalChannelController {
         scp: Arc<InternalSubchannelPool>,
         resolve_now: Arc<Notify>,
         wqtx: WorkQueueTx,
+        picker: Arc<Watcher<Arc<dyn Picker>>>,
+        connectivity_state: Arc<Watcher<ConnectivityState>>,
     ) -> Self {
         let lb = Arc::new(GracefulSwitchBalancer::new(wqtx));
 
@@ -309,6 +330,8 @@ impl InternalChannelController {
             lb,
             scp,
             resolve_now,
+            picker,
+            connectivity_state,
         }
     }
 }
@@ -319,7 +342,8 @@ impl load_balancing::ChannelController for InternalChannelController {
     }
 
     fn update_picker(&mut self, update: LbState) {
-        self.scp.update_picker(update);
+        self.picker.update(update.picker);
+        self.connectivity_state.update(update.connectivity_state);
     }
 
     fn request_resolution(&mut self) {
@@ -425,3 +449,55 @@ impl GracefulSwitchBalancer {
 pub(super) type WorkQueueItem = Box<dyn FnOnce(&mut InternalChannelController) + Send + Sync>;
 
 pub struct TODO;
+
+// Enables multiple receivers to view data output from a single producer.
+// Producer calls update.  Consumers call iter() and call next() until they find
+// a good value or encounter None.
+pub(crate) struct Watcher<T> {
+    tx: watch::Sender<Option<T>>,
+    rx: watch::Receiver<Option<T>>,
+}
+
+impl<T: Clone> Watcher<T> {
+    fn new() -> Self {
+        let (tx, rx) = watch::channel(None);
+        Self { tx, rx }
+    }
+
+    pub(crate) fn iter(&self) -> WatcherIter<T> {
+        let mut rx = self.rx.clone();
+        rx.mark_changed();
+        WatcherIter { rx }
+    }
+
+    pub(crate) fn cur(&self) -> Option<T> {
+        let mut rx = self.rx.clone();
+        rx.mark_changed();
+        let c = rx.borrow();
+        c.clone()
+    }
+
+    fn update(&self, item: T) {
+        self.tx.send(Some(item)).unwrap();
+    }
+}
+
+pub(crate) struct WatcherIter<T> {
+    rx: watch::Receiver<Option<T>>,
+}
+// TODO: Use an arc_swap::ArcSwap instead that contains T and a channel closed
+// when T is updated.  Even if the channel needs a lock, the fast path becomes
+// lock-free.
+
+impl<T: Clone> WatcherIter<T> {
+    /// Returns the next unseen value
+    pub(crate) async fn next(&mut self) -> Option<T> {
+        loop {
+            self.rx.changed().await.ok()?;
+            let x = self.rx.borrow_and_update();
+            if x.is_some() {
+                return x.clone();
+            }
+        }
+    }
+}
