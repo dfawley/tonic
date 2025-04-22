@@ -12,6 +12,8 @@ use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
 use crate::attributes::Attributes;
+use crate::client::service_config::ServiceConfig;
+use crate::client::ConnectivityState;
 use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response};
@@ -25,7 +27,6 @@ use super::name_resolution::{
     self, Address, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
     GLOBAL_RESOLVER_REGISTRY,
 };
-use super::service_config::ParsedServiceConfig;
 use super::subchannel::InternalSubchannelPool;
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 
@@ -247,7 +248,7 @@ impl ActiveChannel {
                 .unwrap()
                 .build(target, resolve_now, ResolverOptions::default());
 
-            resolver.start(resolver_helper).await;
+            resolver.run(resolver_helper).await;
         });
 
         Arc::new(Self {
@@ -276,11 +277,8 @@ pub(super) type WorkQueueTx = mpsc::UnboundedSender<WorkQueueItem>;
 
 #[async_trait]
 impl name_resolution::ChannelController for WorkQueueTx {
-    fn parse_config(
-        &self,
-        config: &str,
-    ) -> Result<ParsedServiceConfig, Box<dyn Error + Send + Sync>> {
-        Ok(ParsedServiceConfig {})
+    fn parse_config(&self, config: &str) -> Result<ServiceConfig, Box<dyn Error + Send + Sync>> {
+        Ok(ServiceConfig {})
         // Needs to call gsb's policy builder
     }
     async fn update(&self, state: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -393,7 +391,7 @@ impl GracefulSwitchBalancer {
             *p = Some(newpol);
         }
 
-        // TODO: config should come from ParsedServiceConfig.
+        // TODO: config should come from ServiceConfig.
         let builder = self.policy_builder.lock().unwrap();
         let config = match builder.as_ref().unwrap().parse_config(&ParsedJsonLbConfig(
             json!({"shuffleAddressList": true, "unknown_field": false}),
@@ -425,13 +423,5 @@ impl GracefulSwitchBalancer {
 }
 
 pub(super) type WorkQueueItem = Box<dyn FnOnce(&mut InternalChannelController) + Send + Sync>;
-
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub enum ConnectivityState {
-    Idle,
-    Connecting,
-    Ready,
-    TransientFailure,
-}
 
 pub struct TODO;

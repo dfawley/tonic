@@ -5,6 +5,7 @@ use std::{
 };
 
 use tokio::time::sleep;
+use tonic::metadata::MetadataMap;
 
 use crate::{
     client::{
@@ -154,10 +155,10 @@ struct OneSubchannelPicker {
 
 impl Picker for OneSubchannelPicker {
     fn pick(&self, request: &Request) -> PickResult {
-        PickResult::Subchannel(Pick {
+        PickResult::Pick(Pick {
             subchannel: self.sc.clone(),
             on_complete: None,
-            metadata: None,
+            metadata: MetadataMap::new(),
         })
     }
 }
