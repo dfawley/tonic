@@ -1,8 +1,13 @@
-use std::error::Error;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use std::{mem, vec};
+use core::panic;
+use std::{
+    error::Error,
+    fmt::Display,
+    mem,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+    vec,
+};
 
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::task::AbortHandle;
@@ -16,18 +21,18 @@ use crate::client::service_config::ServiceConfig;
 use crate::client::ConnectivityState;
 use crate::credentials::Credentials;
 use crate::rt;
-use crate::service::{Request, Response};
+use crate::service::{Request, Response, Service};
 
 use super::load_balancing::{
     self, pick_first, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicyRegistry, LbPolicySingle,
-    LbState, ParsedJsonLbConfig, Picker, Subchannel, SubchannelState, SubchannelUpdate,
-    WorkScheduler, GLOBAL_LB_REGISTRY,
+    LbState, ParsedJsonLbConfig, PickResult, Picker, Subchannel, SubchannelState, WorkScheduler,
+    GLOBAL_LB_REGISTRY,
 };
 use super::name_resolution::{
     self, Address, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
     GLOBAL_RESOLVER_REGISTRY,
 };
-use super::subchannel::InternalSubchannelPool;
+use super::subchannel::{InternalSubchannel, InternalSubchannelPool};
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 
 #[non_exhaustive]
@@ -274,11 +279,22 @@ impl ActiveChannel {
         let mut i = self.picker.iter();
         loop {
             if let Some(p) = i.next().await {
-                let sc = &p
-                    .pick(&request)
-                    .unwrap_pick() // TODO: handle picker errors (queue or fail RPC)
-                    .subchannel;
-                return self.subchannel_pool.call(sc, request).await;
+                let result = &p.pick(&request);
+                // TODO: handle picker errors (queue or fail RPC)
+                match result {
+                    PickResult::Pick(pr) => {
+                        return pr.subchannel.isc.call(request).await;
+                    }
+                    PickResult::Queue => {
+                        // Continue and retry the RPC with the next picker.
+                    }
+                    PickResult::Fail(status) => {
+                        panic!("failed pick: {}", status);
+                    }
+                    PickResult::Drop(status) => {
+                        panic!("dropped pick: {}", status);
+                    }
+                }
             }
         }
     }
@@ -337,11 +353,15 @@ impl InternalChannelController {
 }
 
 impl load_balancing::ChannelController for InternalChannelController {
-    fn new_subchannel(&mut self, address: &Address) -> Subchannel {
-        self.scp.new_subchannel(address)
+    fn new_subchannel(&mut self, address: &Address) -> Arc<Subchannel> {
+        self.scp.new_subchannel(address.clone(), self.scp.clone())
     }
 
     fn update_picker(&mut self, update: LbState) {
+        println!(
+            "update picker called with state: {:?}",
+            update.connectivity_state
+        );
         self.picker.update(update.picker);
         self.connectivity_state.update(update.connectivity_state);
     }
@@ -395,7 +415,6 @@ impl GracefulSwitchBalancer {
         update: ResolverUpdate,
         controller: &mut InternalChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        dbg!();
         let policy_name = pick_first::POLICY_NAME;
         if let ResolverUpdate::Data(ref d) = update {
             if d.service_config.is_some() {
@@ -434,7 +453,7 @@ impl GracefulSwitchBalancer {
     }
     pub(super) fn subchannel_update(
         &self,
-        subchannel: &Subchannel,
+        subchannel: Arc<Subchannel>,
         state: &SubchannelState,
         channel_controller: &mut dyn load_balancing::ChannelController,
     ) {

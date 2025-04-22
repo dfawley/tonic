@@ -1,3 +1,4 @@
+/*
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -9,7 +10,7 @@ use std::{
 
 use super::{
     ChannelController, LbConfig, LbPolicyBuilderSingle as LbPolicyBuilder, LbPolicyOptions,
-    LbPolicySingle as LbPolicy, LbState, SubchannelUpdate, WorkScheduler,
+    LbPolicySingle as LbPolicy, LbState, WorkScheduler,
 };
 use crate::client::name_resolution::{Address, ResolverData, ResolverUpdate};
 
@@ -17,7 +18,7 @@ use super::{Subchannel, SubchannelState};
 
 // An LbPolicy implementation that manages multiple children.
 pub struct ChildManager<T> {
-    subchannel_child_map: HashMap<Subchannel, usize>,
+    subchannel_child_map: HashMap<Arc<dyn Subchannel>, usize>,
     // This needs to be Send + Sync, so Arc<Mutex<>> I guess!
     children_requesting_work: HashSet<usize>,
     children: Vec<Child<T>>,
@@ -96,7 +97,8 @@ impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
             &mut old_subchannel_child_map,
         );
         // Reverse the subchannel map.
-        let mut old_child_subchannels_map: HashMap<usize, Vec<Subchannel>> = HashMap::new();
+        let mut old_child_subchannels_map: HashMap<usize, Vec<Arc<dyn Subchannel>>> =
+            HashMap::new();
         for (subchannel, child_idx) in old_subchannel_child_map {
             old_child_subchannels_map
                 .entry(child_idx)
@@ -164,7 +166,7 @@ impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
 
     fn subchannel_update(
         &mut self,
-        subchannel: &Subchannel,
+        subchannel: Arc<dyn Subchannel>,
         state: &SubchannelState,
         channel_controller: &mut dyn ChannelController,
     ) {
@@ -190,7 +192,7 @@ impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
 
 pub struct WrappedController<'a> {
     channel_controller: &'a mut dyn ChannelController,
-    pub(crate) created_subchannels: Vec<Subchannel>,
+    pub(crate) created_subchannels: Vec<Arc<dyn Subchannel>>,
     pub(crate) picker_update: Option<LbState>,
 }
 
@@ -205,7 +207,7 @@ impl<'a> WrappedController<'a> {
 }
 
 impl<'a> ChannelController for WrappedController<'a> {
-    fn new_subchannel(&mut self, address: &Address) -> Subchannel {
+    fn new_subchannel(&mut self, address: &Address) -> Arc<dyn Subchannel> {
         let subchannel = self.channel_controller.new_subchannel(address);
         self.created_subchannels.push(subchannel.clone());
         subchannel
@@ -225,3 +227,4 @@ impl WorkScheduler for NopWorkScheduler {
     fn schedule_work(&self) { /* do nothing */
     }
 }
+*/

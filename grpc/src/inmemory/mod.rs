@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    ops::Add,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
@@ -46,6 +47,10 @@ impl Listener {
 
     pub fn target(&self) -> String {
         format!("inmemory:///{}", self.id)
+    }
+
+    pub fn id(&self) -> String {
+        self.id.clone()
     }
 
     pub async fn close(&self) {
@@ -148,14 +153,19 @@ struct NopResolver {
 #[async_trait]
 impl Resolver for NopResolver {
     async fn run(&mut self, channel_controller: Box<dyn ChannelController>) {
+        let mut addresses: Vec<Address> = Vec::new();
+        for addr in LISTENERS.lock().unwrap().keys() {
+            addresses.push(Address {
+                address_type: INMEMORY_ADDRESS_TYPE.to_string(),
+                address: addr.clone(),
+                ..Default::default()
+            });
+        }
+
         let _ = channel_controller
             .update(ResolverUpdate::Data(ResolverData {
                 endpoints: vec![Endpoint {
-                    addresses: vec![Address {
-                        address_type: INMEMORY_ADDRESS_TYPE.to_string(),
-                        address: self.id.clone(),
-                        ..Default::default()
-                    }],
+                    addresses: addresses,
                     ..Default::default()
                 }],
                 ..Default::default()

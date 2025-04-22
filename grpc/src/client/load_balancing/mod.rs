@@ -20,11 +20,12 @@ use std::{
     any::Any,
     collections::HashMap,
     error::Error,
-    fmt::Display,
+    fmt::{Debug, Display},
     hash::Hash,
+    ops::{Add, Sub},
     sync::{
         atomic::{AtomicU32, Ordering::Relaxed},
-        Arc,
+        Arc, Weak,
     },
 };
 use tokio::sync::{mpsc::Sender, Notify};
@@ -32,6 +33,9 @@ use tonic::{async_trait, metadata::MetadataMap, Status};
 
 use crate::service::{Request, Response};
 
+use crate::client::subchannel::{
+    InternalSubchannel, InternalSubchannelPool, InternalSubchannelState, SubchannelImpl,
+};
 use crate::client::{
     name_resolution::{Address, ResolverUpdate},
     ConnectivityState,
@@ -136,7 +140,7 @@ pub trait LbPolicySingle: Send {
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
     fn subchannel_update(
         &mut self,
-        subchannel: &Subchannel,
+        subchannel: Arc<Subchannel>,
         state: &SubchannelState,
         channel_controller: &mut dyn ChannelController,
     );
@@ -192,7 +196,7 @@ pub trait LbPolicyBatched: Send {
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
     fn subchannel_update(
         &mut self,
-        update: &SubchannelUpdate,
+        update: &SubchannelState,
         channel_controller: &mut dyn ChannelController,
     );
     fn work(&mut self, channel_controller: &mut dyn ChannelController);
@@ -201,7 +205,7 @@ pub trait LbPolicyBatched: Send {
 /// Controls channel behaviors.
 pub trait ChannelController: Send + Sync {
     /// Creates a new subchannel in IDLE state.
-    fn new_subchannel(&mut self, address: &Address) -> Subchannel;
+    fn new_subchannel(&mut self, address: &Address) -> Arc<Subchannel>;
 
     /// Provides a new snapshot of the LB policy's state to the channel.
     fn update_picker(&mut self, update: LbState);
@@ -223,40 +227,25 @@ pub struct SubchannelState {
     pub last_connection_error: Option<Arc<dyn Error + Send + Sync>>,
 }
 
-pub struct SubchannelUpdate {
-    pub states: HashMap<Subchannel, SubchannelState>,
-}
-
-impl SubchannelUpdate {
-    pub fn new() -> Self {
-        Self {
-            states: HashMap::new(),
-        }
-    }
-    pub fn from(u: &SubchannelUpdate) -> Self {
-        Self {
-            states: u.states.clone().into_iter().collect(),
-        }
-    }
-    pub fn get(&self, subchannel: &Subchannel) -> Option<&SubchannelState> {
-        self.states.get(subchannel)
-    }
-    pub fn set(&mut self, subchannel: &Subchannel, state: SubchannelState) {
-        self.states.insert(subchannel.clone(), state);
-    }
-    pub fn into_iter(self) -> impl Iterator<Item = (Subchannel, SubchannelState)> {
-        self.states.into_iter()
-    }
-    pub fn iter(&self) -> impl Iterator<Item = (&Subchannel, &SubchannelState)> {
-        self.states.iter()
-    }
-}
-
-impl Default for SubchannelUpdate {
+impl Default for SubchannelState {
     fn default() -> Self {
         Self {
-            states: Default::default(),
+            connectivity_state: ConnectivityState::Idle,
+            last_connection_error: None,
         }
+    }
+}
+impl Display for SubchannelState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "connectivity_state: {}, last_connection_error: {}",
+            self.connectivity_state,
+            self.last_connection_error
+                .as_ref()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+        )
     }
 }
 
@@ -344,6 +333,29 @@ impl PickResult {
     }
 }
 
+impl PartialEq for PickResult {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            PickResult::Pick(pick) => match other {
+                PickResult::Pick(other_pick) => pick.subchannel == other_pick.subchannel,
+                _ => false,
+            },
+            PickResult::Queue => match other {
+                PickResult::Queue => true,
+                _ => false,
+            },
+            PickResult::Fail(status) => {
+                // TODO: implement me.
+                false
+            }
+            PickResult::Drop(status) => {
+                // TODO: implement me.
+                false
+            }
+        }
+    }
+}
+
 /// Data provided by the LB policy.
 #[derive(Clone)]
 pub struct LbState {
@@ -365,7 +377,7 @@ impl LbState {
 /// A collection of data used by the channel for routing a request.
 pub struct Pick {
     /// The Subchannel for the request.
-    pub subchannel: Subchannel,
+    pub subchannel: Arc<Subchannel>,
     // Metadata to be added to existing outgoing metadata.
     pub metadata: MetadataMap,
     // Callback to be invoked once the RPC completes.
@@ -383,16 +395,18 @@ pub struct Pick {
 ///
 /// - READY transitions to IDLE when the connection is lost.
 ///
-/// - TRANSIENT_FAILURE transitions to CONNECTING when the reconnect backoff
-///   timer has expired.  This timer scales exponentially and is reset when the
-///   subchannel becomes READY.
+/// - TRANSIENT_FAILURE transitions to IDLE when the reconnect backoff timer has
+///   expired.  This timer scales exponentially and is reset when the subchannel
+///   becomes READY.
 ///
 /// When a Subchannel is dropped, it is disconnected automatically, and no
 /// subsequent state updates will be provided for it to the LB policy.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Subchannel {
     id: u32,
-    notify: Arc<Notify>,
+    address: Address,
+    drop_notifier: Arc<dyn SubchannelDropNotifier>,
+    pub(super) isc: Arc<dyn SubchannelImpl>,
 }
 
 impl Display for Subchannel {
@@ -404,17 +418,22 @@ impl Display for Subchannel {
 static NEXT_SUBCHANNEL_ID: AtomicU32 = AtomicU32::new(0);
 
 impl Subchannel {
-    /// Creates a new Subchannel that doesn't do anything besides forward
-    /// connect calls to notify.
-    pub fn new(notify: Arc<Notify>) -> Self {
+    pub(super) fn new(
+        address: Address,
+        drop_notifier: Arc<dyn SubchannelDropNotifier>,
+        isc: Arc<dyn SubchannelImpl>,
+    ) -> Self {
         Self {
             id: NEXT_SUBCHANNEL_ID.fetch_add(1, Relaxed),
-            notify,
+            address,
+            drop_notifier,
+            isc,
         }
     }
+
     /// Notifies the Subchannel to connect.
     pub fn connect(&self) {
-        self.notify.notify_one();
+        self.isc.connect(false);
     }
 }
 
@@ -432,38 +451,15 @@ impl PartialEq for Subchannel {
 
 impl Eq for Subchannel {}
 
-pub trait LbPolicyBuilderCallbacks: Send {
-    /// Builds an LB policy instance, or returns an error.
-    fn build(
-        &self,
-        options: LbPolicyOptions,
-        channel_controller: Arc<dyn ChannelControllerCallbacks>,
-    ) -> Box<dyn LbPolicyCallbacks>;
-    /// Reports the name of the LB Policy.
-    fn name(&self) -> &'static str;
-    fn parse_config(&self, config: &str) -> Option<LbConfig> {
-        None
+impl Drop for Subchannel {
+    fn drop(&mut self) {
+        println!("dropping subchannel {}", self);
+        self.drop_notifier.drop_subchannel(&self.address);
     }
 }
 
-pub trait LbPolicyCallbacks: Send {
-    fn resolver_update(
-        &mut self,
-        update: ResolverUpdate,
-        config: Option<&LbConfig>,
-    ) -> Result<(), Box<dyn Error + Send + Sync>>;
-}
-
-pub type SubchannelUpdateFn = Box<dyn Fn(Subchannel, SubchannelState) + Send + Sync>;
-
-// May only be used at synchronization points -- when called from the work
-// scheduler or in a call to resolver_update or the SubchannelUpdateFn on a
-// subchannel.
-pub trait ChannelControllerCallbacks: Send + Sync {
-    /// Creates a new subchannel in IDLE state.
-    fn new_subchannel(&self, address: &Address, updates: SubchannelUpdateFn) -> Subchannel;
-    fn update_picker(&self, update: LbState);
-    fn request_resolution(&self);
+pub trait SubchannelDropNotifier: Send + Sync {
+    fn drop_subchannel(&self, address: &Address);
 }
 
 /// QueuingPicker always returns Queue.  LB policies that are not actively
@@ -473,5 +469,15 @@ pub struct QueuingPicker {}
 impl Picker for QueuingPicker {
     fn pick(&self, _request: &Request) -> PickResult {
         PickResult::Queue
+    }
+}
+
+pub struct ErroringPicker {
+    pub error: String,
+}
+
+impl Picker for ErroringPicker {
+    fn pick(&self, _: &Request) -> PickResult {
+        PickResult::Fail(Status::from_error(self.error.clone().into()))
     }
 }
