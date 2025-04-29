@@ -1,10 +1,12 @@
 use core::panic;
 use std::{
+    collections::HashMap,
     error::Error,
     fmt::Display,
     mem,
+    ops::Add,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
     vec,
 };
@@ -23,17 +25,22 @@ use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
 
-use super::load_balancing::{
-    self, pick_first, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicyRegistry, LbPolicySingle,
-    LbState, ParsedJsonLbConfig, PickResult, Picker, Subchannel, SubchannelState, WorkScheduler,
-    GLOBAL_LB_REGISTRY,
-};
 use super::name_resolution::{
     self, Address, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
     GLOBAL_RESOLVER_REGISTRY,
 };
-use super::subchannel::{InternalSubchannel, InternalSubchannelPool};
+use super::subchannel::{
+    ConnectivityStateWatcher, InternalSubchannelPool, NopBackoff, SubchannelImpl, SubchannelKey,
+};
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
+use super::{
+    load_balancing::{
+        self, pick_first, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicyRegistry, LbPolicySingle,
+        LbState, ParsedJsonLbConfig, PickResult, Picker, Subchannel, SubchannelState,
+        WorkScheduler, GLOBAL_LB_REGISTRY,
+    },
+    subchannel::InternalSubchannel,
+};
 
 #[non_exhaustive]
 pub struct ChannelOptions {
@@ -216,9 +223,22 @@ impl PersistentChannel {
     }
 }
 
+pub(crate) trait SubchannelPool: Send + Sync {
+    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<dyn SubchannelImpl>>;
+
+    fn register_subchannel(
+        &self,
+        key: SubchannelKey,
+        subchannel: Arc<dyn SubchannelImpl>,
+    ) -> Arc<dyn SubchannelImpl>;
+
+    fn unregister_subchannel(&self, key: &SubchannelKey);
+}
+
 struct ActiveChannel {
     cur_state: Mutex<ConnectivityState>,
     abort_handle: AbortHandle,
+    subchannel_pool: Arc<dyn SubchannelPool>,
     picker: Arc<Watcher<Arc<dyn Picker>>>,
     connectivity_state: Arc<Watcher<ConnectivityState>>,
 }
@@ -226,11 +246,11 @@ struct ActiveChannel {
 impl ActiveChannel {
     fn new(target: Url, options: &ChannelOptions) -> Arc<Self> {
         let (tx, mut rx) = mpsc::unbounded_channel::<WorkQueueItem>();
-        let tr = match &options.transport_registry {
+        let transport_registry = match &options.transport_registry {
             Some(tr) => tr.clone(),
             None => GLOBAL_TRANSPORT_REGISTRY.clone(),
         };
-        let scp = Arc::new(InternalSubchannelPool::new(tr, tx.clone()));
+        let scp = Arc::new(InternalSubchannelPool::new());
 
         let resolve_now = Arc::new(Notify::new());
 
@@ -238,7 +258,8 @@ impl ActiveChannel {
         let picker = Arc::new(Watcher::new());
         let mut channel_controller = InternalChannelController::new(
             target.clone(),
-            scp,
+            transport_registry,
+            scp.clone(),
             resolve_now.clone(),
             tx.clone(),
             picker.clone(),
@@ -264,6 +285,7 @@ impl ActiveChannel {
         Arc::new(Self {
             cur_state: Mutex::new(ConnectivityState::Connecting),
             abort_handle: jh.abort_handle(),
+            subchannel_pool: scp,
             picker: picker.clone(),
             connectivity_state: connectivity_state.clone(),
         })
@@ -275,6 +297,9 @@ impl ActiveChannel {
         // pick subchannel
         // perform attempt on transport
         let mut i = self.picker.iter();
+        // TODO(easwars): We should use the current picker if one exists instead
+        // of always trying to get the next one. There is a `cur` method on the
+        // watcher that we can use.
         loop {
             if let Some(p) = i.next().await {
                 let result = &p.pick(&request);
@@ -323,8 +348,10 @@ impl name_resolution::ChannelController for WorkQueueTx {
 
 pub(super) struct InternalChannelController {
     pub(super) lb: Arc<GracefulSwitchBalancer>, // called and passes mutable parent to it, so must be Arc.
-    scp: Arc<InternalSubchannelPool>,
+    subchannel_pool: Arc<dyn SubchannelPool>,
+    transport_registry: TransportRegistry,
     resolve_now: Arc<Notify>,
+    wqtx: WorkQueueTx,
     picker: Arc<Watcher<Arc<dyn Picker>>>,
     connectivity_state: Arc<Watcher<ConnectivityState>>,
 }
@@ -332,27 +359,78 @@ pub(super) struct InternalChannelController {
 impl InternalChannelController {
     fn new(
         target: Url,
-        scp: Arc<InternalSubchannelPool>,
+        transport_registry: TransportRegistry,
+        subchannel_pool: Arc<dyn SubchannelPool>,
         resolve_now: Arc<Notify>,
         wqtx: WorkQueueTx,
         picker: Arc<Watcher<Arc<dyn Picker>>>,
         connectivity_state: Arc<Watcher<ConnectivityState>>,
     ) -> Self {
-        let lb = Arc::new(GracefulSwitchBalancer::new(wqtx));
+        let lb = Arc::new(GracefulSwitchBalancer::new(wqtx.clone()));
 
         Self {
             lb,
-            scp,
+            subchannel_pool,
+            transport_registry,
             resolve_now,
+            wqtx,
             picker,
             connectivity_state,
         }
+    }
+
+    fn new_subchannel_with_watcher(
+        &mut self,
+        address: &Address,
+        isc: Arc<dyn SubchannelImpl>,
+    ) -> Arc<Subchannel> {
+        let drop_notify = Arc::new(Notify::new());
+        let sc = Subchannel::new(address.clone(), drop_notify.clone(), isc.clone());
+        let watcher = Arc::new(SubchannelStateWatcher {
+            subchannel: Arc::downgrade(&sc),
+            wqtx: self.wqtx.clone(),
+        });
+        isc.register_connectivity_state_watcher(watcher.clone());
+
+        // This task will exit when the subchannel is dropped.
+        tokio::task::spawn(async move {
+            drop_notify.notified().await;
+            isc.unregister_connectivity_state_watcher(watcher);
+        });
+        sc
     }
 }
 
 impl load_balancing::ChannelController for InternalChannelController {
     fn new_subchannel(&mut self, address: &Address) -> Arc<Subchannel> {
-        self.scp.new_subchannel(address.clone(), self.scp.clone())
+        let key = SubchannelKey::new(address.clone());
+        match self.subchannel_pool.lookup_subchannel(&key.clone()) {
+            Some(isc) => {
+                println!("found subchannel in pool for address: {:?}", &address);
+                return self.new_subchannel_with_watcher(address, isc);
+            }
+            None => {
+                // Create an internal subchannel and register it with the pool.
+                //
+                // Note that the subchannel returned from the pool could be
+                // different to what we passed in. This can happen when someone
+                // races with us and registered one before us. This though, is
+                // not possible with a subchannel pool that is not shared across
+                // channels, because calls to new_subchannel() are serialized.
+                let transport = self
+                    .transport_registry
+                    .get_transport(&address.address_type)
+                    .unwrap();
+                let isc = InternalSubchannel::new(
+                    key.clone(),
+                    self.subchannel_pool.clone(),
+                    transport,
+                    Arc::new(NopBackoff {}),
+                );
+                let isc_in_pool = self.subchannel_pool.register_subchannel(key, isc.clone());
+                return self.new_subchannel_with_watcher(address, isc_in_pool);
+            }
+        }
     }
 
     fn update_picker(&mut self, update: LbState) {
@@ -515,6 +593,32 @@ impl<T: Clone> WatcherIter<T> {
             if x.is_some() {
                 return x.clone();
             }
+        }
+    }
+}
+
+struct SubchannelStateWatcher {
+    subchannel: Weak<Subchannel>,
+    wqtx: WorkQueueTx,
+}
+
+impl ConnectivityStateWatcher for SubchannelStateWatcher {
+    fn on_state_change(&self, state: SubchannelState) {
+        // Ignore internal subchannel state changes if the external subchannel
+        // was dropped but its state watcher is still pending unregistration;
+        // such updates are inconsequential.
+        if let Some(sc) = self.subchannel.upgrade() {
+            let _ = self
+                .wqtx
+                .send(Box::new(move |c: &mut InternalChannelController| {
+                    c.lb.clone()
+                        .policy
+                        .lock()
+                        .unwrap()
+                        .as_mut()
+                        .unwrap()
+                        .subchannel_update(sc, &state, c);
+                }));
         }
     }
 }

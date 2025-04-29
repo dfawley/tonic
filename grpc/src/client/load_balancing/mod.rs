@@ -25,7 +25,7 @@ use std::{
     ops::{Add, Sub},
     sync::{
         atomic::{AtomicU32, Ordering::Relaxed},
-        Arc, Weak,
+        Arc, Mutex, Weak,
     },
 };
 use tokio::sync::{mpsc::Sender, Notify};
@@ -33,9 +33,7 @@ use tonic::{async_trait, metadata::MetadataMap, Status};
 
 use crate::service::{Request, Response};
 
-use crate::client::subchannel::{
-    InternalSubchannel, InternalSubchannelPool, InternalSubchannelState, SubchannelImpl,
-};
+use crate::client::subchannel::{ConnectivityStateWatcher, SubchannelImpl};
 use crate::client::{
     name_resolution::{Address, ResolverUpdate},
     ConnectivityState,
@@ -217,7 +215,7 @@ pub trait ChannelController: Send + Sync {
 }
 
 /// Represents the current state of a Subchannel.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SubchannelState {
     /// The connectivity state of the subchannel.  See SubChannel for a
     /// description of the various states and their valid transitions.
@@ -405,8 +403,8 @@ pub struct Pick {
 pub struct Subchannel {
     id: u32,
     address: Address,
-    drop_notifier: Arc<dyn SubchannelDropNotifier>,
-    pub(super) isc: Arc<dyn SubchannelImpl>,
+    dropped: Arc<Notify>,
+    pub(crate) isc: Arc<dyn SubchannelImpl>,
 }
 
 impl Display for Subchannel {
@@ -420,19 +418,20 @@ static NEXT_SUBCHANNEL_ID: AtomicU32 = AtomicU32::new(0);
 impl Subchannel {
     pub(super) fn new(
         address: Address,
-        drop_notifier: Arc<dyn SubchannelDropNotifier>,
+        dropped: Arc<Notify>,
         isc: Arc<dyn SubchannelImpl>,
-    ) -> Self {
-        Self {
+    ) -> Arc<Self> {
+        Arc::new(Subchannel {
             id: NEXT_SUBCHANNEL_ID.fetch_add(1, Relaxed),
             address,
-            drop_notifier,
+            dropped,
             isc,
-        }
+        })
     }
 
     /// Notifies the Subchannel to connect.
     pub fn connect(&self) {
+        println!("connect called for subchannel: {}", self);
         self.isc.connect(false);
     }
 }
@@ -454,12 +453,8 @@ impl Eq for Subchannel {}
 impl Drop for Subchannel {
     fn drop(&mut self) {
         println!("dropping subchannel {}", self);
-        self.drop_notifier.drop_subchannel(&self.address);
+        self.dropped.notify_one();
     }
-}
-
-pub trait SubchannelDropNotifier: Send + Sync {
-    fn drop_subchannel(&self, address: &Address);
 }
 
 /// QueuingPicker always returns Queue.  LB policies that are not actively

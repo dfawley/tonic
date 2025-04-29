@@ -113,7 +113,6 @@ impl LbPolicySingle for PickFirstPolicy {
         match update {
             ResolverUpdate::Data(data) => {
                 println!("received update from resolver with data: {:?}", data);
-                println!("received update from resolver with config: {:?}", config);
 
                 // Shuffle endpoints if requested.
                 let mut endpoints = data.endpoints.clone();
@@ -571,15 +570,15 @@ impl SubchannelList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::load_balancing::{
-        LbConfig, LbPolicyBuilderSingle, SubchannelDropNotifier, GLOBAL_LB_REGISTRY,
+    use crate::client::load_balancing::{LbConfig, LbPolicyBuilderSingle, GLOBAL_LB_REGISTRY};
+    use crate::client::subchannel::{
+        ConnectivityStateWatcher, InternalSubchannelPool, SubchannelImpl,
     };
-    use crate::client::subchannel::{InternalSubchannelPool, SubchannelImpl};
     use crate::client::transport::{Transport, GLOBAL_TRANSPORT_REGISTRY};
     use crate::service::{Request, Response, Service};
     use std::ops::Add;
     use std::sync::Arc;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, Notify};
     use tokio::task::AbortHandle;
 
     #[test]
@@ -666,137 +665,13 @@ mod tests {
         Ok(())
     }
 
-    type TestWorkQueueItem =
-        Box<dyn FnOnce(&mut TestChannelController, &mut Box<dyn LbPolicySingle>) + Send + Sync>;
-    type WorkQueueTx = mpsc::UnboundedSender<TestWorkQueueItem>;
-
-    struct TestHelper {
-        rx_new_subchannel: mpsc::UnboundedReceiver<Address>,
-        rx_subchannel: mpsc::UnboundedReceiver<Arc<Subchannel>>,
-        rx_update_picker: mpsc::UnboundedReceiver<LbState>,
-        rx_request_resolution: mpsc::UnboundedReceiver<()>,
-        rx_connect: mpsc::UnboundedReceiver<Address>,
-        wtx: WorkQueueTx,
-        abort_handle: AbortHandle,
-    }
-
-    impl TestHelper {
-        fn new(
-            rx_new_subchannel: mpsc::UnboundedReceiver<Address>,
-            rx_subchannel: mpsc::UnboundedReceiver<Arc<Subchannel>>,
-            rx_update_picker: mpsc::UnboundedReceiver<LbState>,
-            rx_request_resolution: mpsc::UnboundedReceiver<()>,
-            rx_connect: mpsc::UnboundedReceiver<Address>,
-            wtx: WorkQueueTx,
-            abort_handle: AbortHandle,
-        ) -> Self {
-            Self {
-                rx_new_subchannel,
-                rx_subchannel,
-                rx_update_picker,
-                rx_request_resolution,
-                rx_connect,
-                wtx,
-                abort_handle,
-            }
-        }
-
-        fn send_resolver_update(&self, update: ResolverUpdate, config: Option<LbConfig>) {
-            // let cfg = config.unwrap_or(LbConfig::new(ParsedJsonLbConfig(json!({}))));
-            let _ = self.wtx.send(Box::new(
-                move |tcc: &mut TestChannelController, lb_policy: &mut Box<dyn LbPolicySingle>| {
-                    // let _ = lb_policy.resolver_update(update, Some(&cfg), tcc);
-                    let _ = lb_policy.resolver_update(update, config.as_ref(), tcc);
-                },
-            ));
-        }
-
-        fn send_subchannel_update(&self, subchannel: Arc<Subchannel>, state: SubchannelState) {
-            let _ = self.wtx.send(Box::new(
-                move |tcc: &mut TestChannelController, lb_policy: &mut Box<dyn LbPolicySingle>| {
-                    lb_policy.subchannel_update(subchannel, &state, tcc);
-                },
-            ));
-            dbg!("sent subchannel update");
-        }
-    }
-
-    impl Drop for TestHelper {
-        fn drop(&mut self) {
-            self.abort_handle.abort();
-        }
-    }
-
-    struct TestChannelController {
-        tx_new_subchannel: mpsc::UnboundedSender<Address>,
-        tx_subchannel: mpsc::UnboundedSender<Arc<Subchannel>>,
-        tx_update_picker: mpsc::UnboundedSender<LbState>,
-        tx_request_resolution: mpsc::UnboundedSender<()>,
-        tx_connect: mpsc::UnboundedSender<Address>,
-    }
-
-    impl TestChannelController {
-        fn new(
-            tx_new_subchannel: mpsc::UnboundedSender<Address>,
-            tx_subchannel: mpsc::UnboundedSender<Arc<Subchannel>>,
-            tx_update_picker: mpsc::UnboundedSender<LbState>,
-            tx_request_resolution: mpsc::UnboundedSender<()>,
-            tx_connect: mpsc::UnboundedSender<Address>,
-        ) -> Self {
-            Self {
-                tx_new_subchannel,
-                tx_subchannel,
-                tx_update_picker,
-                tx_request_resolution,
-                tx_connect,
-            }
-        }
-    }
-
-    impl ChannelController for TestChannelController {
-        fn new_subchannel(&mut self, address: &Address) -> Arc<Subchannel> {
-            println!("new_subchannel called for address {}", address);
-            self.tx_new_subchannel.send(address.clone()).unwrap();
-            let subchannel = Arc::new(Subchannel::new(
-                address.clone(),
-                Arc::new(TestNopSubchannelDropNotifier {}),
-                Arc::new(TestNopSubchannelImpl::new(
-                    address.clone(),
-                    self.tx_connect.clone(),
-                )),
-            ));
-            self.tx_subchannel.send(subchannel.clone()).unwrap();
-            subchannel
-        }
-        fn update_picker(&mut self, update: LbState) {
-            self.tx_update_picker.send(update).unwrap();
-        }
-        fn request_resolution(&mut self) {
-            self.tx_request_resolution.send(()).unwrap();
-        }
-    }
-
-    struct TestWorkScheduler {
-        wtx: WorkQueueTx,
-    }
-
-    impl WorkScheduler for TestWorkScheduler {
-        fn schedule_work(&self) {
-            let _ = self.wtx.send(Box::new(
-                |tcc: &mut TestChannelController, lb: &mut Box<dyn LbPolicySingle>| {
-                    lb.work(tcc);
-                },
-            ));
-        }
-    }
-
     struct TestNopSubchannelImpl {
         address: Address,
-        tx_connect: mpsc::UnboundedSender<Address>,
+        tx_connect: mpsc::UnboundedSender<TestEvent>,
     }
 
     impl TestNopSubchannelImpl {
-        fn new(address: Address, tx_connect: mpsc::UnboundedSender<Address>) -> Self {
+        fn new(address: Address, tx_connect: mpsc::UnboundedSender<TestEvent>) -> Self {
             Self {
                 address,
                 tx_connect,
@@ -804,23 +679,22 @@ mod tests {
         }
     }
 
-    struct TestNopSubchannelDropNotifier {}
-    impl SubchannelDropNotifier for TestNopSubchannelDropNotifier {
-        fn drop_subchannel(&self, address: &Address) {}
-    }
-
     impl SubchannelImpl for TestNopSubchannelImpl {
         fn connect(&self, now: bool) {
-            self.tx_connect.send(self.address.clone()).unwrap();
+            self.tx_connect
+                .send(TestEvent::Connect(self.address.clone()))
+                .unwrap();
         }
 
-        fn subchannel_state(&self) -> SubchannelState {
-            SubchannelState {
-                connectivity_state: ConnectivityState::Ready,
-                last_connection_error: None,
-            }
+        fn register_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>) {}
+
+        fn unregister_connectivity_state_watcher(
+            &self,
+            watcher: Arc<dyn ConnectivityStateWatcher>,
+        ) {
         }
     }
+
     #[async_trait]
     impl Service for TestNopSubchannelImpl {
         async fn call(&self, request: Request) -> Response {
@@ -829,55 +703,73 @@ mod tests {
         }
     }
 
-    fn setup() -> TestHelper {
-        // Register the pick_first LB policy builder.
-        reg();
+    enum TestEvent {
+        NewSubchannel(Address, Arc<Subchannel>),
+        UpdatePicker(LbState),
+        RequestResolution,
+        Connect(Address),
+        ScheduleWork,
+    }
 
-        let (tx_new_subchannel, rx_new_subchannel) = mpsc::unbounded_channel::<Address>();
-        let (tx_subchannel, rx_subchannel) = mpsc::unbounded_channel::<Arc<Subchannel>>();
-        let (tx_update_picker, rx_update_picker) = mpsc::unbounded_channel::<LbState>();
-        let (tx_request_resolution, rx_request_resolution) = mpsc::unbounded_channel::<()>();
-        let (tx_connect, rx_connect) = mpsc::unbounded_channel::<Address>();
-        let (tx, mut rx) = mpsc::unbounded_channel::<TestWorkQueueItem>();
-        let work_scheduler = Arc::new(TestWorkScheduler { wtx: tx.clone() });
+    struct FakeChannel {
+        tx_events: mpsc::UnboundedSender<TestEvent>,
+    }
 
-        let builder: Arc<dyn LbPolicyBuilderSingle> =
-            GLOBAL_LB_REGISTRY.get_policy("pick_first").unwrap();
-        let mut lb_policy = builder.build(LbPolicyOptions {
-            work_scheduler: work_scheduler,
-        });
+    impl ChannelController for FakeChannel {
+        fn new_subchannel(&mut self, address: &Address) -> Arc<Subchannel> {
+            println!("new_subchannel called for address {}", address);
+            let notify = Arc::new(Notify::new());
+            let subchannel = Subchannel::new(
+                address.clone(),
+                notify.clone(),
+                Arc::new(TestNopSubchannelImpl::new(
+                    address.clone(),
+                    self.tx_events.clone(),
+                )),
+            );
+            self.tx_events
+                .send(TestEvent::NewSubchannel(
+                    address.clone(),
+                    subchannel.clone(),
+                ))
+                .unwrap();
+            subchannel
+        }
+        fn update_picker(&mut self, update: LbState) {
+            self.tx_events
+                .send(TestEvent::UpdatePicker(update))
+                .unwrap();
+        }
+        fn request_resolution(&mut self) {
+            self.tx_events.send(TestEvent::RequestResolution).unwrap();
+        }
+    }
 
-        let mut tcc = TestChannelController::new(
-            tx_new_subchannel,
-            tx_subchannel,
-            tx_update_picker,
-            tx_request_resolution,
-            tx_connect,
-        );
-        // Spawn a task to process the work queue.
-        let jh = tokio::task::spawn(async move {
-            while let Some(w) = rx.recv().await {
-                dbg!("processing work");
-                w(&mut tcc, &mut lb_policy);
-            }
-            dbg!("work queue done");
-        });
+    struct TestWorkScheduler {
+        tx_events: mpsc::UnboundedSender<TestEvent>,
+    }
 
-        TestHelper::new(
-            rx_new_subchannel,
-            rx_subchannel,
-            rx_update_picker,
-            rx_request_resolution,
-            rx_connect,
-            tx.clone(),
-            jh.abort_handle(),
-        )
+    impl WorkScheduler for TestWorkScheduler {
+        fn schedule_work(&self) {
+            self.tx_events.send(TestEvent::ScheduleWork).unwrap();
+        }
     }
 
     #[tokio::test]
     async fn pickfirst_connects_to_first_address() {
+        // Setup the test environment.
+        let (tx_events, mut rx_events) = mpsc::unbounded_channel::<TestEvent>();
+        let work_scheduler = Arc::new(TestWorkScheduler {
+            tx_events: tx_events.clone(),
+        });
+        let mut tcc = FakeChannel {
+            tx_events: tx_events.clone(),
+        };
+
         // Build the pick_first LB policy.
-        let mut test_helper = setup();
+        let builder: Arc<dyn LbPolicyBuilderSingle> =
+            GLOBAL_LB_REGISTRY.get_policy("pick_first").unwrap();
+        let mut lb_policy = builder.build(LbPolicyOptions { work_scheduler });
 
         // Send a resolver update with two addresses.
         const ADDRESS_1: &str = "1.1.1.1:1111";
@@ -897,68 +789,99 @@ mod tests {
             }],
             ..Default::default()
         });
-        test_helper.send_resolver_update(update, None);
+        assert!(lb_policy.resolver_update(update, None, &mut tcc).is_ok());
 
         // Verify that subchannels are created for the above addresses.
-        assert!(test_helper.rx_new_subchannel.recv().await.unwrap() == address1);
-        assert!(test_helper.rx_new_subchannel.recv().await.unwrap() == address2);
+        let sc1 = match rx_events.recv().await.unwrap() {
+            TestEvent::NewSubchannel(addr, sc) => {
+                assert!(addr == address1);
+                sc
+            }
+            _ => panic!("unexpected event"),
+        };
+        let sc2 = match rx_events.recv().await.unwrap() {
+            TestEvent::NewSubchannel(addr, sc) => {
+                assert!(addr == address2);
+                sc
+            }
+            _ => panic!("unexpected event"),
+        };
 
         // Send initial state of IDLE for the above subchannels.
-        let subchannel1 = test_helper.rx_subchannel.recv().await.unwrap();
-        test_helper.send_subchannel_update(subchannel1.clone(), SubchannelState::default());
-        let subchannel2 = test_helper.rx_subchannel.recv().await.unwrap();
-        test_helper.send_subchannel_update(subchannel2.clone(), SubchannelState::default());
+        lb_policy.subchannel_update(sc1.clone(), &SubchannelState::default(), &mut tcc);
+        lb_policy.subchannel_update(sc2.clone(), &SubchannelState::default(), &mut tcc);
 
         // Ensure that a connection is attempted to the first subchannel.
-        assert!(test_helper.rx_connect.recv().await.unwrap() == address1);
+        match rx_events.recv().await.unwrap() {
+            TestEvent::Connect(addr) => {
+                assert!(addr == address1);
+            }
+            _ => panic!("unexpected event"),
+        };
 
         // Move first subchannel to CONNECTING.
-        test_helper.send_subchannel_update(
-            subchannel1.clone(),
-            SubchannelState {
+        lb_policy.subchannel_update(
+            sc1.clone(),
+            &SubchannelState {
                 connectivity_state: ConnectivityState::Connecting,
                 ..Default::default()
             },
+            &mut tcc,
         );
 
         // Ensure that the channel becomes CONNECTING, with a queuing picker.
-        let picker_update = test_helper.rx_update_picker.recv().await.unwrap();
-        assert!(picker_update.connectivity_state == ConnectivityState::Connecting);
+        let picker = match rx_events.recv().await.unwrap() {
+            TestEvent::UpdatePicker(update) => {
+                assert!(update.connectivity_state == ConnectivityState::Connecting);
+                update.picker
+            }
+            _ => panic!("unexpected event"),
+        };
         let (req, _) = Request::new("/foo/bar", None);
-        assert!(picker_update.picker.pick(&req) == PickResult::Queue);
+        assert!(picker.pick(&req) == PickResult::Queue);
 
         // Move first subchannel to READY.
-        test_helper.send_subchannel_update(
-            subchannel1.clone(),
-            SubchannelState {
+        lb_policy.subchannel_update(
+            sc1.clone(),
+            &SubchannelState {
                 connectivity_state: ConnectivityState::Ready,
                 ..Default::default()
             },
+            &mut tcc,
         );
 
         // Ensure that the channel becomes READY, with a ready picker.
-        let picker_update = test_helper.rx_update_picker.recv().await.unwrap();
-        assert!(picker_update.connectivity_state == ConnectivityState::Ready);
+        let picker = match rx_events.recv().await.unwrap() {
+            TestEvent::UpdatePicker(update) => {
+                assert!(update.connectivity_state == ConnectivityState::Ready);
+                update.picker
+            }
+            _ => panic!("unexpected event"),
+        };
         let (req, _) = Request::new("/foo/bar", None);
-        let result = picker_update.picker.pick(&req);
-        match result {
+        match picker.pick(&req) {
             PickResult::Pick(pick) => {
-                assert!(pick.subchannel == subchannel1);
+                assert!(pick.subchannel == sc1);
             }
             _ => panic!("unexpected pick result"),
         }
 
         // Move first subchannel to Idle.
-        test_helper.send_subchannel_update(
-            subchannel1.clone(),
-            SubchannelState {
+        lb_policy.subchannel_update(
+            sc1.clone(),
+            &SubchannelState {
                 connectivity_state: ConnectivityState::Idle,
                 ..Default::default()
             },
+            &mut tcc,
         );
 
         // Ensure that the channel moves to IDLE.
-        let picker_update = test_helper.rx_update_picker.recv().await.unwrap();
-        assert!(picker_update.connectivity_state == ConnectivityState::Idle);
+        match rx_events.recv().await.unwrap() {
+            TestEvent::UpdatePicker(update) => {
+                assert!(update.connectivity_state == ConnectivityState::Idle);
+            }
+            _ => panic!("unexpected event"),
+        };
     }
 }

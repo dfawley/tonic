@@ -142,7 +142,7 @@ impl Hash for Endpoint {
 }
 
 /// An Address is an identifier that indicates how to connect to a server.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialOrd, Ord)]
 #[non_exhaustive]
 pub struct Address {
     /// The address type is used to identify what kind of transport to create

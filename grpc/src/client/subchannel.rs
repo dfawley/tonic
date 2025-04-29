@@ -1,121 +1,213 @@
-use std::collections::HashMap;
+use core::panic;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Into;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::hash::Hash;
 use std::ops::{Add, Sub};
 use std::sync::{
     atomic::{AtomicU32, Ordering::Relaxed},
     Arc, Mutex, Weak,
 };
-use std::time::Instant;
+use tokio::io::Join;
+use tokio::time::{Duration, Instant}; // TODO(easwars): Maybe use tokio::time::Instance as it has some useful testing utilities.
 
-use tokio::sync::{watch, Notify};
-use tokio::task::AbortHandle;
+use std::error::Error;
+use tokio::sync::{mpsc, watch, Notify};
+use tokio::task::{AbortHandle, JoinHandle};
 use tonic::async_trait;
 
 use super::channel::WorkQueueTx;
-use super::load_balancing::{self, Picker, Subchannel, SubchannelDropNotifier, SubchannelState};
+use super::load_balancing::{self, Picker, Subchannel, SubchannelState};
 use super::name_resolution::Address;
 use super::transport::{self, ConnectedTransport, Transport, TransportRegistry};
 use super::ConnectivityState;
-use crate::client::channel::InternalChannelController;
+use crate::client::channel::{InternalChannelController, SubchannelPool};
 use crate::service::{Request, Response, Service};
 
 struct TODO;
 
 type SharedService = Arc<dyn ConnectedTransport>;
 
-pub enum InternalSubchannelState {
+pub trait Backoff: Send + Sync {
+    fn backoff_until(&self) -> Instant;
+    fn reset(&self);
+    fn min_connect_timeout(&self) -> Duration;
+}
+
+// TODO(easwars): Move this somewhere else, where appropriate.
+pub(crate) struct NopBackoff {}
+impl Backoff for NopBackoff {
+    fn backoff_until(&self) -> Instant {
+        Instant::now()
+    }
+    fn reset(&self) {}
+    fn min_connect_timeout(&self) -> Duration {
+        Duration::from_secs(20)
+    }
+}
+
+enum InternalSubchannelState {
     Idle,
-    Connecting(AbortHandle),
-    Ready(SharedService),
-    TransientFailure(Instant),
+    Connecting(InternalSubchannelConnectingState),
+    Ready(InternalSubchannelReadyState),
+    TransientFailure(InternalSubchannelTransientFailureState),
+}
+
+struct InternalSubchannelConnectingState {
+    abort_handle: Option<AbortHandle>,
+}
+
+struct InternalSubchannelReadyState {
+    abort_handle: Option<AbortHandle>,
+    svc: SharedService,
+}
+
+struct InternalSubchannelTransientFailureState {
+    abort_handle: Option<AbortHandle>,
+    error: String,
 }
 
 impl InternalSubchannelState {
     fn connected_transport(&self) -> Option<SharedService> {
         match self {
-            Self::Ready(t) => Some(t.clone()),
+            Self::Ready(st) => Some(st.svc.clone()),
             _ => None,
         }
+    }
+
+    fn to_subchannel_state(&self) -> SubchannelState {
+        match self {
+            Self::Idle => SubchannelState {
+                connectivity_state: ConnectivityState::Idle,
+                last_connection_error: None,
+            },
+            Self::Connecting(_) => SubchannelState {
+                connectivity_state: ConnectivityState::Connecting,
+                last_connection_error: None,
+            },
+            Self::Ready(_) => SubchannelState {
+                connectivity_state: ConnectivityState::Ready,
+                last_connection_error: None,
+            },
+            Self::TransientFailure(st) => {
+                let box_err = Into::<Box<dyn Error + Send + Sync>>::into(st.error.clone());
+                let arc_err = Into::<Arc<dyn Error + Send + Sync>>::into(box_err);
+                SubchannelState {
+                    connectivity_state: ConnectivityState::TransientFailure,
+                    last_connection_error: Some(arc_err),
+                }
+            }
+        }
+    }
+}
+
+impl Display for InternalSubchannelState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Idle => write!(f, "Idle"),
+            Self::Connecting(_) => write!(f, "Connecting"),
+            Self::Ready(_) => write!(f, "Ready"),
+            Self::TransientFailure(_) => write!(f, "TransientFailure"),
+        }
+    }
+}
+
+impl Debug for InternalSubchannelState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Idle => write!(f, "Idle"),
+            Self::Connecting(_) => write!(f, "Connecting"),
+            Self::Ready(_) => write!(f, "Ready"),
+            Self::TransientFailure(_) => write!(f, "TransientFailure"),
+        }
+    }
+}
+
+impl PartialEq for InternalSubchannelState {
+    fn eq(&self, other: &Self) -> bool {
+        match &self {
+            Self::Idle => {
+                if let Self::Idle = other {
+                    return true;
+                }
+            }
+            Self::Connecting(_) => {
+                if let Self::Connecting(_) = other {
+                    return true;
+                }
+            }
+            Self::Ready(_) => {
+                if let Self::Ready(_) = other {
+                    return true;
+                }
+            }
+            Self::TransientFailure(_) => {
+                if let Self::TransientFailure(_) = other {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
 impl Drop for InternalSubchannelState {
     fn drop(&mut self) {
-        if let InternalSubchannelState::Connecting(ah) = self {
-            ah.abort();
+        match &self {
+            Self::Idle => {}
+            Self::Connecting(st) => {
+                if let Some(ah) = &st.abort_handle {
+                    ah.abort();
+                }
+            }
+            Self::Ready(st) => {
+                if let Some(ah) = &st.abort_handle {
+                    ah.abort();
+                }
+            }
+            Self::TransientFailure(st) => {
+                if let Some(ah) = &st.abort_handle {
+                    ah.abort();
+                }
+            }
         }
     }
 }
 
-pub trait SubchannelImpl: Service + Send + Sync {
+pub(crate) trait SubchannelImpl: Service + Send + Sync {
     fn connect(&self, now: bool);
-    fn subchannel_state(&self) -> SubchannelState;
+    fn register_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>);
+    fn unregister_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>);
 }
 
-pub(super) struct InternalSubchannel {
-    address: Address,
+pub(crate) struct InternalSubchannel {
+    key: SubchannelKey,
+    pool: Arc<dyn SubchannelPool>,
     transport: Arc<dyn Transport>,
-    pool: Arc<InternalSubchannelPool>,
-    backoff: TODO,
-    state: Mutex<InternalSubchannelState>,
+    backoff: Arc<dyn Backoff>,
+    work_queue_tx: Arc<mpsc::UnboundedSender<SubchannelStateMachineEvent>>,
+    inner: Arc<Mutex<InnerSubchannel>>,
 }
 
-impl InternalSubchannel {
-    /// Creates a new subchannel in idle state.
-    pub(crate) fn new(
-        address: Address,
-        transport: Arc<dyn Transport>,
-        pool: Arc<InternalSubchannelPool>,
-    ) -> Arc<dyn SubchannelImpl> {
-        Arc::new(Self {
-            address,
-            transport,
-            pool,
-            backoff: TODO,
-            state: Mutex::new(InternalSubchannelState::Idle),
-        })
-    }
-
-    /// Wait for any in-flight RPCs to terminate and then close the connection
-    /// and destroy the Subchannel.
-    async fn drain(self) {}
-
-    fn to_ready(&self, svc: Arc<dyn ConnectedTransport>) {
-        *self.state.lock().unwrap() = InternalSubchannelState::Ready(svc);
-        self.pool.send_connnectivity_state(
-            &self.address,
-            SubchannelState {
-                connectivity_state: ConnectivityState::Ready,
-                last_connection_error: None,
-            },
-        );
-    }
-
-    fn to_idle(&self) {
-        *self.state.lock().unwrap() = InternalSubchannelState::Idle;
-        self.pool.send_connnectivity_state(
-            &self.address,
-            SubchannelState {
-                connectivity_state: ConnectivityState::Idle,
-                last_connection_error: None,
-            },
-        );
-    }
+struct InnerSubchannel {
+    state: InternalSubchannelState,
+    watchers: Vec<Arc<dyn ConnectivityStateWatcher>>, // TODO(easwars): Revisit the choice for this data structure.
+    backoff_task: Option<JoinHandle<()>>,
+    disconnect_task: Option<JoinHandle<()>>,
 }
 
 #[async_trait]
 impl Service for InternalSubchannel {
     async fn call(&self, request: Request) -> Response {
-        let svc = self
-            .state
-            .lock()
-            .unwrap()
-            .connected_transport()
-            .expect("todo: handle !ready")
-            .clone();
-        svc.call(request).await
+        let svc = self.inner.lock().unwrap().state.connected_transport();
+        if svc.is_none() {
+            // TODO(easwars): Change the signature of this method to return a
+            // Result<Response, Error>
+            panic!("todo: handle !ready");
+        }
+
+        let svc = svc.unwrap().clone();
+        return svc.clone().call(request).await;
     }
 }
 
@@ -123,176 +215,307 @@ impl SubchannelImpl for InternalSubchannel {
     /// Begins connecting the subchannel asynchronously.  If now is set, does
     /// not wait for any pending connection backoff to complete.
     fn connect(&self, now: bool) {
-        let mut state = self.state.lock().unwrap();
-        match &*state {
+        let state = &self.inner.lock().unwrap().state;
+        match state {
             InternalSubchannelState::Idle => {
-                let n = Arc::new(Notify::new());
-                let n2 = n.clone();
-                // TODO: safe alternative? This task is aborted in drop so self
-                // can never outlive it.
-                let s = unsafe {
-                    std::mem::transmute::<&InternalSubchannel, &'static InternalSubchannel>(self)
-                };
-                let fut = async move {
-                    // Block until the Connecting state is set so we can't race
-                    // and set Ready first.
-                    n2.notified().await;
-                    let svc = s
-                        .transport
-                        .connect(s.address.address.clone())
-                        .await
-                        .expect("todo: handle error (go TF w/backoff)");
-                    let svc: Arc<dyn ConnectedTransport> = svc.into();
-                    s.to_ready(svc.clone());
-                    svc.disconnected().await;
-                    s.to_idle();
-                };
-                let jh = tokio::task::spawn(fut);
-                *state = InternalSubchannelState::Connecting(jh.abort_handle());
-                self.pool.send_connnectivity_state(
-                    &self.address,
-                    SubchannelState {
-                        connectivity_state: ConnectivityState::Connecting,
-                        last_connection_error: None,
-                    },
-                );
-                n.notify_one();
+                let _ = self
+                    .work_queue_tx
+                    .send(SubchannelStateMachineEvent::ConnectionRequested);
             }
-            InternalSubchannelState::TransientFailure(_) => {
-                // TODO: remember connect request and skip Idle when expires
-            }
-            InternalSubchannelState::Ready(_) => {} // Cannot connect while ready.
-            InternalSubchannelState::Connecting(_) => {} // Already connecting.
+            _ => {}
         }
     }
-    fn subchannel_state(&self) -> SubchannelState {
-        match *(self.state.lock().unwrap()) {
-            InternalSubchannelState::Idle => SubchannelState {
-                connectivity_state: ConnectivityState::Idle,
-                last_connection_error: None,
-            },
-            InternalSubchannelState::Connecting(_) => SubchannelState {
-                connectivity_state: ConnectivityState::Connecting,
-                last_connection_error: None,
-            },
-            InternalSubchannelState::Ready(_) => SubchannelState {
-                connectivity_state: ConnectivityState::Ready,
-                last_connection_error: None,
-            },
-            // TODO(easwars): Capture the last connection error in the
-            // TransientFailure variant and use that to set it here.
-            InternalSubchannelState::TransientFailure(t) => SubchannelState {
-                connectivity_state: ConnectivityState::TransientFailure,
-                last_connection_error: None,
-            },
+
+    fn register_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.watchers.push(watcher.clone());
+        watcher.on_state_change(inner.state.to_subchannel_state());
+    }
+
+    fn unregister_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>) {
+        self.inner
+            .lock()
+            .unwrap()
+            .watchers
+            .retain(|x| !Arc::ptr_eq(x, &watcher));
+    }
+}
+
+enum SubchannelStateMachineEvent {
+    ConnectionRequested,
+    ConnectionSucceeded(SharedService),
+    ConnectionTimedOut,
+    ConnectionFailed(String),
+    ConnectionTerminated,
+    BackoffExpired,
+}
+impl Debug for SubchannelStateMachineEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConnectionRequested => write!(f, "ConnectionRequested"),
+            Self::ConnectionSucceeded(_) => write!(f, "ConnectionSucceeded"),
+            Self::ConnectionTimedOut => write!(f, "ConnectionTimedOut"),
+            Self::ConnectionFailed(_) => write!(f, "ConnectionFailed"),
+            Self::ConnectionTerminated => write!(f, "ConnectionTerminated"),
+            Self::BackoffExpired => write!(f, "BackoffExpired"),
         }
     }
 }
 
-type NewSuchannelImplFn = fn(
-    Address,
-    Arc<dyn Transport>,
-    Arc<InternalSubchannelPool>,
-) -> Arc<dyn SubchannelImpl + Send + Sync>;
+impl InternalSubchannel {
+    pub(crate) fn new(
+        key: SubchannelKey,
+        pool: Arc<dyn SubchannelPool>,
+        transport: Arc<dyn Transport>,
+        backoff: Arc<dyn Backoff>,
+    ) -> Arc<InternalSubchannel> {
+        println!("creating new internal subchannel for: {:?}", &key);
+        let (tx, mut rx) = mpsc::unbounded_channel::<SubchannelStateMachineEvent>();
+        let isc = Arc::new(Self {
+            key: key.clone(),
+            pool,
+            transport,
+            backoff: backoff.clone(),
+            work_queue_tx: Arc::new(tx.clone()),
+            inner: Arc::new(Mutex::new(InnerSubchannel {
+                state: InternalSubchannelState::Idle,
+                watchers: Vec::new(),
+                backoff_task: None,
+                disconnect_task: None,
+            })),
+        });
+
+        // This long running task implements the subchannel state machine. When
+        // the subchannel is dropped, the channel from which this task reads is
+        // closed, and therefore this task exits because rx.recv() returns None
+        // in that case.
+        let arc_to_self = Arc::clone(&isc);
+        tokio::task::spawn(async move {
+            println!("starting subchannel state machine for: {:?}", &key);
+            while let Some(m) = rx.recv().await {
+                println!("subchannel {:?} received event {:?}", &key, &m);
+                match m {
+                    SubchannelStateMachineEvent::ConnectionRequested => {
+                        arc_to_self.move_to_connecting();
+                    }
+                    SubchannelStateMachineEvent::ConnectionSucceeded(svc) => {
+                        arc_to_self.move_to_ready(svc);
+                    }
+                    SubchannelStateMachineEvent::ConnectionTimedOut => {
+                        arc_to_self.move_to_transient_failure("connect timeout expired".into());
+                    }
+                    SubchannelStateMachineEvent::ConnectionFailed(err) => {
+                        arc_to_self.move_to_transient_failure(err);
+                    }
+                    SubchannelStateMachineEvent::ConnectionTerminated => {
+                        arc_to_self.move_to_idle();
+                    }
+                    SubchannelStateMachineEvent::BackoffExpired => {
+                        arc_to_self.move_to_idle();
+                    }
+                }
+            }
+            println!("exiting work queue task in subchannel");
+        });
+        isc
+    }
+
+    fn move_to_idle(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.state = InternalSubchannelState::Idle;
+        for w in &inner.watchers {
+            w.on_state_change(SubchannelState {
+                connectivity_state: ConnectivityState::Idle,
+                last_connection_error: None,
+            });
+        }
+    }
+
+    fn move_to_connecting(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.state = InternalSubchannelState::Connecting(InternalSubchannelConnectingState {
+            abort_handle: None,
+        });
+        for w in &inner.watchers {
+            w.on_state_change(SubchannelState {
+                connectivity_state: ConnectivityState::Connecting,
+                last_connection_error: None,
+            });
+        }
+
+        let min_connect_timeout = self.backoff.min_connect_timeout();
+        let t = self.transport.clone();
+        let address = self.key.address.address.clone();
+        let work_queue_tx = self.work_queue_tx.clone();
+        let connect_task = tokio::task::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(min_connect_timeout) => {
+                    let _ = work_queue_tx.send(SubchannelStateMachineEvent::ConnectionTimedOut);
+                }
+                result = t.connect(address.clone()) => {
+                    match result {
+                        Ok(s) => {
+                            let _ = work_queue_tx.send(SubchannelStateMachineEvent::ConnectionSucceeded(Arc::from(s)));
+                        }
+                        Err(e) => {
+                            let _ = work_queue_tx.send(SubchannelStateMachineEvent::ConnectionFailed(e));
+                        }
+                    }
+                },
+            }
+        });
+        inner.state = InternalSubchannelState::Connecting(InternalSubchannelConnectingState {
+            abort_handle: Some(connect_task.abort_handle()),
+        });
+    }
+
+    fn move_to_ready(&self, svc: SharedService) {
+        let mut inner = self.inner.lock().unwrap();
+        let svc2 = svc.clone();
+        inner.state = InternalSubchannelState::Ready(InternalSubchannelReadyState {
+            abort_handle: None,
+            svc: svc2.clone(),
+        });
+        for w in &inner.watchers {
+            w.on_state_change(SubchannelState {
+                connectivity_state: ConnectivityState::Ready,
+                last_connection_error: None,
+            });
+        }
+
+        let work_queue_tx = self.work_queue_tx.clone();
+        let disconnect_task = tokio::task::spawn(async move {
+            // TODO(easwars): Does it make sense for disconnected() to return an
+            // error string containing information about why the connection
+            // terminated? But what can we do with that error other than logging
+            // it, which the transport can do as well?
+            svc.disconnected().await;
+            let _ = work_queue_tx.send(SubchannelStateMachineEvent::ConnectionTerminated);
+        });
+        inner.state = InternalSubchannelState::Ready(InternalSubchannelReadyState {
+            abort_handle: Some(disconnect_task.abort_handle()),
+            svc: svc2.clone(),
+        });
+    }
+
+    fn move_to_transient_failure(&self, err: String) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.state =
+            InternalSubchannelState::TransientFailure(InternalSubchannelTransientFailureState {
+                abort_handle: None,
+                error: err.clone(),
+            });
+
+        // TODO(easwars): Is there a nicer way to go from String to
+        // Arc<dyn Error + Send + Sync>.
+        let box_err = Into::<Box<dyn Error + Send + Sync>>::into(err.clone());
+        let arc_err = Into::<Arc<dyn Error + Send + Sync>>::into(box_err);
+        for w in &inner.watchers {
+            w.on_state_change(SubchannelState {
+                connectivity_state: ConnectivityState::TransientFailure,
+                last_connection_error: Some(arc_err.clone()),
+            });
+        }
+
+        let backoff_interval = self.backoff.backoff_until();
+        let work_queue_tx = self.work_queue_tx.clone();
+        let backoff_task = tokio::task::spawn(async move {
+            tokio::time::sleep_until(backoff_interval).await;
+            let _ = work_queue_tx.send(SubchannelStateMachineEvent::BackoffExpired);
+        });
+        inner.state =
+            InternalSubchannelState::TransientFailure(InternalSubchannelTransientFailureState {
+                abort_handle: Some(backoff_task.abort_handle()),
+                error: err.clone(),
+            });
+    }
+
+    /// Wait for any in-flight RPCs to terminate and then close the connection
+    /// and destroy the Subchannel.
+    async fn drain(self) {}
+}
+
+impl Drop for InternalSubchannel {
+    fn drop(&mut self) {
+        println!("dropping internal subchannel {:?}", self.key);
+        self.pool.unregister_subchannel(&self.key);
+    }
+}
+pub(crate) trait ConnectivityStateWatcher: Send + Sync {
+    fn on_state_change(&self, state: SubchannelState);
+}
+
+// SubchannelKey uniiquely identifies a subchannel in the pool.
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone)]
+
+pub(crate) struct SubchannelKey {
+    address: Address,
+}
+
+impl SubchannelKey {
+    pub(crate) fn new(address: Address) -> Self {
+        Self { address }
+    }
+}
 
 pub(crate) struct InternalSubchannelPool {
-    transport_registry: TransportRegistry,
-    // TODO(easwars): Ensure that attributes are taken into consideration for
-    // equality on the Address type.
-    subchannels: Mutex<HashMap<Address, Vec<Weak<Subchannel>>>>,
-    wtx: WorkQueueTx,
+    subchannels: Mutex<BTreeMap<SubchannelKey, Weak<dyn SubchannelImpl>>>,
 }
 
 impl InternalSubchannelPool {
-    pub(crate) fn new(transport_registry: TransportRegistry, wtx: WorkQueueTx) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            transport_registry,
-            wtx,
-            subchannels: Mutex::default(),
-        }
-    }
-
-    pub fn send_connnectivity_state(&self, address: &Address, state: SubchannelState) {
-        let subchannels = self
-            .subchannels
-            .lock()
-            .unwrap()
-            .get(&address)
-            .unwrap()
-            .clone();
-        let _ = self
-            .wtx
-            .send(Box::new(move |c: &mut InternalChannelController| {
-                for sc in subchannels.iter() {
-                    c.lb.clone()
-                        .subchannel_update(sc.upgrade().unwrap(), &state, c);
-                }
-            }));
-    }
-
-    pub(super) fn new_subchannel(
-        &self,
-        address: Address,
-        arc_to_self: Arc<InternalSubchannelPool>,
-    ) -> Arc<Subchannel> {
-        let mut subchannels = self.subchannels.lock().unwrap();
-        if let Some(scs) = subchannels.get_mut(&address) {
-            // We expect subchannels in the vector to be promotable, as dropping
-            // of subchannels results in pruning of the vector. We also expect
-            // map entries to have non-empty vectors.
-            let isc: Arc<dyn SubchannelImpl> = scs.first().unwrap().upgrade().unwrap().isc.clone();
-            let sc = Arc::new(Subchannel::new(address, arc_to_self.clone(), isc));
-            scs.push(Arc::downgrade(&sc));
-
-            let state = sc.isc.subchannel_state();
-            let sc2 = Arc::clone(&sc);
-            let _ = self
-                .wtx
-                .send(Box::new(move |c: &mut InternalChannelController| {
-                    c.lb.clone().subchannel_update(sc2, &state, c);
-                }));
-            return sc;
-        } else {
-            // Create the internal subchannel.
-            println!("creating subchannel for {address}");
-            let t = self
-                .transport_registry
-                .get_transport(&address.address_type)
-                .unwrap();
-
-            let isc = InternalSubchannel::new(address.clone(), t, arc_to_self.clone());
-            let sc = Arc::new(Subchannel::new(address.clone(), arc_to_self.clone(), isc));
-            subchannels.insert(address, vec![Arc::downgrade(&sc)]);
-
-            let sc2 = Arc::clone(&sc);
-            let _ = self
-                .wtx
-                .send(Box::new(move |c: &mut InternalChannelController| {
-                    c.lb.clone().subchannel_update(
-                        sc2,
-                        &SubchannelState {
-                            connectivity_state: ConnectivityState::Idle,
-                            last_connection_error: None,
-                        },
-                        c,
-                    );
-                }));
-            return sc;
+            subchannels: Mutex::new(BTreeMap::new()),
         }
     }
 }
 
-impl SubchannelDropNotifier for InternalSubchannelPool {
-    fn drop_subchannel(&self, address: &Address) {
-        // Remove subchannels whose strong_count is 0.
-        let mut subchannels = self.subchannels.lock().unwrap();
-        let scs = subchannels.get_mut(address).unwrap();
-        scs.retain(|sc| sc.strong_count() > 0);
-
-        // If there are no more subchannels for the given address, remove the
-        // map entry as well.
-        if scs.len() == 0 {
-            subchannels.remove(address);
+impl SubchannelPool for InternalSubchannelPool {
+    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<dyn SubchannelImpl>> {
+        let subchannels = self.subchannels.lock().unwrap();
+        println!("looking up subchannel for: {:?}", key);
+        if let Some(weak_isc) = subchannels.get(key) {
+            if let Some(isc) = weak_isc.upgrade() {
+                return Some(isc);
+            }
         }
+
+        // This addresses two scenarios:
+        // 1. a missing key in the map
+        // 2. an unpromotable value, which can occur if its internal subchannel
+        // has been dropped but unregister_subchannel() hasn't been called yet.
+        None
+    }
+
+    fn register_subchannel(
+        &self,
+        key: SubchannelKey,
+        subchannel: Arc<dyn SubchannelImpl>,
+    ) -> Arc<dyn SubchannelImpl> {
+        println!("registering subchannel for: {:?}", key);
+        let mut subchannels = self.subchannels.lock().unwrap();
+        if let Some(weak_isc) = subchannels.get(&key) {
+            if let Some(isc) = weak_isc.upgrade() {
+                // Handles the race where multiple subchannels are created for
+                // an address simultaneously, each might try to create and
+                // register a new internal subchannel. Only the first one to
+                // register succeeds.
+                return isc;
+            }
+        }
+        subchannels.insert(key, Arc::downgrade(&subchannel));
+        subchannel
+    }
+
+    fn unregister_subchannel(&self, key: &SubchannelKey) {
+        let mut subchannels = self.subchannels.lock().unwrap();
+        if let Some(weak_isc) = subchannels.get(&key) {
+            if let Some(isc) = weak_isc.upgrade() {
+                return;
+            }
+            subchannels.remove(&key);
+            return;
+        }
+        panic!("attempt to unregister subchannel for unknown key {:?}", key);
     }
 }
