@@ -14,25 +14,11 @@ struct Handler {
 #[derive(Debug)]
 struct MyReqMessage(String);
 
-impl Message for MyReqMessage {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
-}
+impl Message for MyReqMessage {}
 
 #[derive(Debug)]
 struct MyResMessage(String);
-impl Message for MyResMessage {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
-}
+impl Message for MyResMessage {}
 
 #[async_trait]
 impl Service for Handler {

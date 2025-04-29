@@ -40,7 +40,7 @@ impl Request {
         )
     }
     pub async fn next<T: Message + 'static>(&mut self) -> Option<Box<T>> {
-        self.rx.recv().await?.into_any().downcast::<T>().ok()
+        (self.rx.recv().await? as Box<dyn Any>).downcast::<T>().ok()
     }
     fn headers(&mut self) -> Headers {
         Headers {}
@@ -58,7 +58,7 @@ impl Response {
         (Self { rx }, tx)
     }
     pub async fn next<T: Message + 'static>(&mut self) -> Option<Box<T>> {
-        self.rx.recv().await?.into_any().downcast::<T>().ok()
+        (self.rx.recv().await? as Box<dyn Any>).downcast::<T>().ok()
     }
     pub async fn headers(&mut self) -> Headers {
         Headers {}
@@ -79,7 +79,4 @@ pub trait Service: Send + Sync {
     async fn call(&self, request: Request) -> Response;
 }
 
-pub trait Message: Send {
-    fn as_any(&self) -> &dyn Any;
-    fn into_any(self: Box<Self>) -> Box<dyn Any>;
-}
+pub trait Message: Any + Send {}
