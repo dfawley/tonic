@@ -150,7 +150,7 @@ struct NopResolver {
 
 #[async_trait]
 impl Resolver for NopResolver {
-    async fn start(&mut self, channel_controller: Box<dyn ChannelController>) {
+    async fn run(&mut self, channel_controller: Box<dyn ChannelController>) {
         let _ = channel_controller
             .update(ResolverUpdate::Data(ResolverData {
                 endpoints: vec![Endpoint {

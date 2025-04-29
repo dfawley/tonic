@@ -16,7 +16,8 @@
  *
  */
 
-/// An in-memory representation of a service config, usually provided to gRPC as
-/// a JSON object.
-#[derive(Debug, Default)]
-pub struct ServiceConfig;
+/// A gRPC Request.
+pub struct Request;
+
+/// A gRPC Response.
+pub struct Response;
