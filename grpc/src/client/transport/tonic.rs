@@ -42,7 +42,7 @@ impl TonicTransportBuilder {
 struct Svc {
     conn: TcpStream,
 }
-
+/*
 impl<ReqBody, ResBody: http_body::Body> tower_service::Service<http::Request<ReqBody>> for Svc {
     type Response = http::Response<ResBody>;
     type Error = String;
@@ -59,7 +59,7 @@ impl<ReqBody, ResBody: http_body::Body> tower_service::Service<http::Request<Req
         todo!()
     }
 }
-
+*/
 struct ConnectedTonicTransport {
     grpc: Grpc<Svc>,
 }
