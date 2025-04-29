@@ -1,5 +1,3 @@
-use std::any::Any;
-
 use grpc::client::load_balancing::pick_first;
 use grpc::client::transport;
 use grpc::service::{Message, Request, Response, Service};
