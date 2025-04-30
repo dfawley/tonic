@@ -21,7 +21,7 @@ impl Message for MyResMessage {}
 #[async_trait]
 impl Service for Handler {
     async fn call(&self, mut request: Request) -> Response {
-        let (res, tx) = Response::new();
+        let (res, tx) = Response::new(());
         let id = self.id.clone();
         tokio::task::spawn(async move {
             while let Some(req) = request.next::<MyReqMessage>().await {
@@ -79,7 +79,7 @@ async fn main() {
         ChannelOptions::default().transport_registry(transport::GLOBAL_TRANSPORT_REGISTRY.clone());
     let chan = grpc::client::Channel::new(target.as_str(), None, None, chan_opts);
 
-    let (req, tx) = Request::new("hi", None);
+    let (req, tx) = Request::new(());
     let mut res = chan.call(req).await;
 
     let _ = tx

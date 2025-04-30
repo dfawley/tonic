@@ -576,11 +576,20 @@ mod tests {
     };
     use crate::client::subchannel::{InternalSubchannelPool, SubchannelImpl};
     use crate::client::transport::{Transport, GLOBAL_TRANSPORT_REGISTRY};
-    use crate::service::{Request, Response, Service};
+    use crate::service::{Message, Request, Response, Service};
     use std::ops::Add;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::task::AbortHandle;
+
+    struct EmptyMessage {}
+    impl Message for EmptyMessage {}
+    fn new_empty_request() -> Request {
+        Request::new(Box::new(tokio_stream::once(Box::new(EmptyMessage {}))))
+    }
+    fn new_empty_response() -> Response {
+        Response::new(Box::new(tokio_stream::once(Box::new(EmptyMessage {}))))
+    }
 
     #[test]
     fn pickfirst_builder_name() -> Result<(), String> {
@@ -824,8 +833,7 @@ mod tests {
     #[async_trait]
     impl Service for TestNopSubchannelImpl {
         async fn call(&self, request: Request) -> Response {
-            let (r, _) = Response::new();
-            r
+            new_empty_response()
         }
     }
 
@@ -924,7 +932,7 @@ mod tests {
         // Ensure that the channel becomes CONNECTING, with a queuing picker.
         let picker_update = test_helper.rx_update_picker.recv().await.unwrap();
         assert!(picker_update.connectivity_state == ConnectivityState::Connecting);
-        let (req, _) = Request::new("/foo/bar", None);
+        let req = new_empty_request();
         assert!(picker_update.picker.pick(&req) == PickResult::Queue);
 
         // Move first subchannel to READY.
@@ -939,7 +947,7 @@ mod tests {
         // Ensure that the channel becomes READY, with a ready picker.
         let picker_update = test_helper.rx_update_picker.recv().await.unwrap();
         assert!(picker_update.connectivity_state == ConnectivityState::Ready);
-        let (req, _) = Request::new("/foo/bar", None);
+        let req = new_empty_request();
         let result = picker_update.picker.pick(&req);
         match result {
             PickResult::Pick(pick) => {
