@@ -219,7 +219,6 @@ impl PersistentChannel {
 struct ActiveChannel {
     cur_state: Mutex<ConnectivityState>,
     abort_handle: AbortHandle,
-    subchannel_pool: Arc<InternalSubchannelPool>,
     picker: Arc<Watcher<Arc<dyn Picker>>>,
     connectivity_state: Arc<Watcher<ConnectivityState>>,
 }
@@ -239,7 +238,7 @@ impl ActiveChannel {
         let picker = Arc::new(Watcher::new());
         let mut channel_controller = InternalChannelController::new(
             target.clone(),
-            scp.clone(),
+            scp,
             resolve_now.clone(),
             tx.clone(),
             picker.clone(),
@@ -265,7 +264,6 @@ impl ActiveChannel {
         Arc::new(Self {
             cur_state: Mutex::new(ConnectivityState::Connecting),
             abort_handle: jh.abort_handle(),
-            subchannel_pool: scp,
             picker: picker.clone(),
             connectivity_state: connectivity_state.clone(),
         })
