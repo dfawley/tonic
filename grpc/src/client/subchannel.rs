@@ -107,7 +107,7 @@ impl InternalSubchannel {
 
 #[async_trait]
 impl Service for InternalSubchannel {
-    async fn call(&self, request: Request) -> Response {
+    async fn call(&self, method: String, request: Request) -> Response {
         let svc = self
             .state
             .lock()
@@ -115,7 +115,7 @@ impl Service for InternalSubchannel {
             .connected_transport()
             .expect("todo: handle !ready")
             .clone();
-        svc.call(request).await
+        svc.call(method, request).await
     }
 }
 

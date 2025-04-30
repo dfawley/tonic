@@ -66,7 +66,7 @@ struct ConnectedTonicTransport {
 
 #[async_trait]
 impl Service for ConnectedTonicTransport {
-    async fn call(&self, request: Request) -> Response {
+    async fn call(&self, method: String, request: Request) -> Response {
         todo!()
     }
 }

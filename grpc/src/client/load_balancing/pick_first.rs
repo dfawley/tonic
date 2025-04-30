@@ -577,6 +577,7 @@ mod tests {
     use crate::client::subchannel::{InternalSubchannelPool, SubchannelImpl};
     use crate::client::transport::{Transport, GLOBAL_TRANSPORT_REGISTRY};
     use crate::service::{Message, Request, Response, Service};
+    use std::io::Empty;
     use std::ops::Add;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -585,10 +586,14 @@ mod tests {
     struct EmptyMessage {}
     impl Message for EmptyMessage {}
     fn new_empty_request() -> Request {
-        Request::new(Box::new(tokio_stream::once(Box::new(EmptyMessage {}))))
+        Request::new(Box::new(tokio_stream::once(
+            Box::new(EmptyMessage {}) as Box<dyn Message>
+        )))
     }
     fn new_empty_response() -> Response {
-        Response::new(Box::new(tokio_stream::once(Box::new(EmptyMessage {}))))
+        Response::new(Box::new(tokio_stream::once(Ok(
+            Box::new(EmptyMessage {}) as Box<dyn Message>
+        ))))
     }
 
     #[test]
@@ -832,7 +837,7 @@ mod tests {
     }
     #[async_trait]
     impl Service for TestNopSubchannelImpl {
-        async fn call(&self, request: Request) -> Response {
+        async fn call(&self, _method: String, request: Request) -> Response {
             new_empty_response()
         }
     }
