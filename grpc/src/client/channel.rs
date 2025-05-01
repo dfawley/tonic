@@ -25,10 +25,6 @@ use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
 
-use super::name_resolution::{
-    self, Address, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
-    GLOBAL_RESOLVER_REGISTRY,
-};
 use super::subchannel::{
     ConnectivityStateWatcher, InternalSubchannelPool, NopBackoff, SubchannelImpl, SubchannelKey,
 };
@@ -40,6 +36,13 @@ use super::{
         GLOBAL_LB_REGISTRY,
     },
     subchannel::InternalSubchannel,
+};
+use super::{
+    name_resolution::{
+        self, Address, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
+        GLOBAL_RESOLVER_REGISTRY,
+    },
+    subchannel,
 };
 
 #[non_exhaustive]
@@ -238,7 +241,6 @@ pub(crate) trait SubchannelPool: Send + Sync {
 struct ActiveChannel {
     cur_state: Mutex<ConnectivityState>,
     abort_handle: AbortHandle,
-    subchannel_pool: Arc<dyn SubchannelPool>,
     picker: Arc<Watcher<Arc<dyn Picker>>>,
     connectivity_state: Arc<Watcher<ConnectivityState>>,
 }
@@ -250,16 +252,14 @@ impl ActiveChannel {
             Some(tr) => tr.clone(),
             None => GLOBAL_TRANSPORT_REGISTRY.clone(),
         };
-        let scp = Arc::new(InternalSubchannelPool::new());
 
         let resolve_now = Arc::new(Notify::new());
-
         let connectivity_state = Arc::new(Watcher::new());
         let picker = Arc::new(Watcher::new());
         let mut channel_controller = InternalChannelController::new(
             target.clone(),
             transport_registry,
-            scp.clone(),
+            Arc::new(InternalSubchannelPool::new()),
             resolve_now.clone(),
             tx.clone(),
             picker.clone(),
@@ -285,7 +285,6 @@ impl ActiveChannel {
         Arc::new(Self {
             cur_state: Mutex::new(ConnectivityState::Connecting),
             abort_handle: jh.abort_handle(),
-            subchannel_pool: scp,
             picker: picker.clone(),
             connectivity_state: connectivity_state.clone(),
         })
