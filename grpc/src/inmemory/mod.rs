@@ -97,7 +97,7 @@ impl crate::server::Listener for Arc<Listener> {
 }
 
 static LISTENERS: Lazy<std::sync::Mutex<HashMap<String, Arc<Listener>>>> =
-    Lazy::new(|| std::sync::Mutex::default());
+    Lazy::new(std::sync::Mutex::default);
 
 struct ClientTransport {}
 

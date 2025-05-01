@@ -27,10 +27,16 @@ impl LbPolicyRegistry {
     }
     /// Retrieve a LB policy from the registry, or None if not found.
     pub fn get_policy(&self, name: &str) -> Option<Arc<dyn LbPolicyBuilder>> {
-        self.m.lock().unwrap().get(name).map(|f| f.clone())
+        self.m.lock().unwrap().get(name).cloned()
+    }
+}
+
+impl Default for LbPolicyRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 /// The registry used if a local registry is not provided to a channel or if it
 /// does not exist in the local registry.
-pub static GLOBAL_LB_REGISTRY: Lazy<LbPolicyRegistry> = Lazy::new(|| LbPolicyRegistry::new());
+pub static GLOBAL_LB_REGISTRY: Lazy<LbPolicyRegistry> = Lazy::new(LbPolicyRegistry::new);

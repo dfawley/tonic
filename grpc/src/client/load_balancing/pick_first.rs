@@ -149,7 +149,7 @@ impl LbPolicy for PickFirstPolicy {
                 if self.addresses.is_empty()
                     || self.connectivity_state == ConnectivityState::TransientFailure
                 {
-                    self.to_transient_failure(channel_controller);
+                    self.move_to_transient_failure(channel_controller);
                 }
 
                 // Continue using the previous good update, if one exists.
@@ -171,7 +171,7 @@ impl LbPolicy for PickFirstPolicy {
         if let Some(subchannel_list) = &self.subchannel_list {
             if subchannel_list.contains(subchannel.clone()) {
                 if state.connectivity_state == ConnectivityState::Ready {
-                    self.to_ready(subchannel, channel_controller);
+                    self.move_to_ready(subchannel, channel_controller);
                 } else {
                     self.update_tracked_subchannel(subchannel, state, channel_controller);
                 }
@@ -184,7 +184,7 @@ impl LbPolicy for PickFirstPolicy {
             if *selected_sc == subchannel {
                 // Any state change for the currently connected subchannel means
                 // that we are no longer connected.
-                self.to_idle(channel_controller);
+                self.move_to_idle(channel_controller);
                 return;
             }
         }
@@ -208,11 +208,9 @@ impl PickFirstPolicy {
     fn shuffle_endpoints(
         &self,
         config: Option<&LbConfig>,
-        endpoints: &mut Vec<Endpoint>,
+        endpoints: &mut [Endpoint],
     ) -> Option<Box<dyn Error + Send + Sync>> {
-        if config.is_none() {
-            return None;
-        }
+        config?;
 
         let cfg: Arc<PickFirstConfig> = match config.unwrap().convert_to() {
             Ok(cfg) => cfg,
@@ -235,15 +233,12 @@ impl PickFirstPolicy {
         None
     }
 
-    fn address_list_from_endpoints(&self, endpoints: &Vec<Endpoint>) -> Vec<Address> {
+    fn address_list_from_endpoints(&self, endpoints: &[Endpoint]) -> Vec<Address> {
         // Flatten the endpoints list by concatenating the ordered list of
         // addresses for each of the endpoints.
         let mut addresses: Vec<Address> = endpoints
-            .clone()
-            .into_iter()
-            .map(|ep| ep.addresses)
-            .into_iter()
-            .flatten()
+            .iter()
+            .flat_map(|ep| ep.addresses.clone())
             .collect();
 
         // Remove duplicates.
@@ -253,7 +248,7 @@ impl PickFirstPolicy {
         // TODO(easwars): Implement address family interleaving as part of
         // the dualstack implementation.
 
-        return addresses;
+        addresses
     }
 
     fn handle_empty_endpoints(&mut self, channel_controller: &mut dyn ChannelController) {
@@ -262,7 +257,7 @@ impl PickFirstPolicy {
         self.addresses = vec![];
         self.last_resolver_error =
             Some("received empty address list from the name resolver".into());
-        self.to_transient_failure(channel_controller);
+        self.move_to_transient_failure(channel_controller);
         channel_controller.request_resolution();
     }
 
@@ -291,7 +286,7 @@ impl PickFirstPolicy {
                 // longer part of the most recent update from the resolver. We
                 // handle subchannel state transitions to READY much earlier in
                 // subchannel_update().
-                self.to_idle(channel_controller);
+                self.move_to_idle(channel_controller);
             } else {
                 // Start connecting from the first subchannel.
                 if !subchannel_list.connect_to_next_subchannel(channel_controller) {
@@ -314,7 +309,7 @@ impl PickFirstPolicy {
                 if self.connectivity_state != ConnectivityState::TransientFailure {
                     // TODO(easwars): Prevent duplicate picker updates when the
                     // policy is in CONNECTING.
-                    self.to_connecting(channel_controller);
+                    self.move_to_connecting(channel_controller);
                 }
             }
             ConnectivityState::TransientFailure => {
@@ -335,9 +330,7 @@ impl PickFirstPolicy {
                         );
                         channel_controller.update_picker(LbState {
                             connectivity_state: ConnectivityState::TransientFailure,
-                            picker: Arc::new(ErroringPicker {
-                                error: format!("{}", err),
-                            }),
+                            picker: Arc::new(ErroringPicker { error: err }),
                         });
                         channel_controller.request_resolution();
                         subchannel_list.connect_to_all_subchannels(channel_controller);
@@ -346,7 +339,7 @@ impl PickFirstPolicy {
                     self.num_transient_failures += 1;
                     if self.num_transient_failures == subchannel_list.len() {
                         // Request re-resolution and update the error picker.
-                        self.to_transient_failure(channel_controller);
+                        self.move_to_transient_failure(channel_controller);
                         self.num_transient_failures = 0;
                     }
                 }
@@ -363,7 +356,7 @@ impl PickFirstPolicy {
         }
     }
 
-    fn to_idle(&mut self, channel_controller: &mut dyn ChannelController) {
+    fn move_to_idle(&mut self, channel_controller: &mut dyn ChannelController) {
         self.connectivity_state = ConnectivityState::Idle;
         self.subchannel_list = None;
         self.selected_subchannel = None;
@@ -376,7 +369,7 @@ impl PickFirstPolicy {
         channel_controller.request_resolution();
     }
 
-    fn to_connecting(&mut self, channel_controller: &mut dyn ChannelController) {
+    fn move_to_connecting(&mut self, channel_controller: &mut dyn ChannelController) {
         self.connectivity_state = ConnectivityState::Connecting;
         channel_controller.update_picker(LbState {
             connectivity_state: ConnectivityState::Connecting,
@@ -384,7 +377,11 @@ impl PickFirstPolicy {
         });
     }
 
-    fn to_ready(&mut self, sc: Arc<Subchannel>, channel_controller: &mut dyn ChannelController) {
+    fn move_to_ready(
+        &mut self,
+        sc: Arc<Subchannel>,
+        channel_controller: &mut dyn ChannelController,
+    ) {
         self.connectivity_state = ConnectivityState::Ready;
         self.selected_subchannel = Some(sc.clone());
         self.subchannel_list = None;
@@ -396,7 +393,7 @@ impl PickFirstPolicy {
         });
     }
 
-    fn to_transient_failure(&mut self, channel_controller: &mut dyn ChannelController) {
+    fn move_to_transient_failure(&mut self, channel_controller: &mut dyn ChannelController) {
         self.connectivity_state = ConnectivityState::TransientFailure;
         let err = format!(
             "last seen resolver error: {:?}, last seen connection error: {:?}",
@@ -404,9 +401,7 @@ impl PickFirstPolicy {
         );
         channel_controller.update_picker(LbState {
             connectivity_state: ConnectivityState::TransientFailure,
-            picker: Arc::new(ErroringPicker {
-                error: format!("{}", err),
-            }),
+            picker: Arc::new(ErroringPicker { error: err }),
         });
         channel_controller.request_resolution();
     }
@@ -498,7 +493,7 @@ impl SubchannelList {
             _ => {}
         }
 
-        return old_state;
+        old_state
     }
 
     fn all_subchannels_seen_initial_state(&self) -> bool {
@@ -543,19 +538,19 @@ impl SubchannelList {
             }
             self.current_idx += 1;
         }
-        return false;
+        false
     }
 
     fn is_first_pass_complete(&self) -> bool {
         if self.current_idx < self.ordered_subchannels.len() {
             return false;
         }
-        for (_, data) in &self.subchannels {
+        for data in self.subchannels.values() {
             if !data.seen_transient_failure {
                 return false;
             }
         }
-        return true;
+        true
     }
 
     fn connect_to_all_subchannels(&mut self, channel_controller: &mut dyn ChannelController) {
@@ -655,10 +650,7 @@ mod tests {
                 }
             };
             let got_config: Arc<PickFirstConfig> = config.convert_to().unwrap();
-            assert_eq!(
-                got_config.shuffle_address_list == tc.want_shuffle_addresses,
-                true
-            );
+            assert!(got_config.shuffle_address_list == tc.want_shuffle_addresses);
         }
         Ok(())
     }

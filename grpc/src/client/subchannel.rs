@@ -216,13 +216,10 @@ impl SubchannelImpl for InternalSubchannel {
     /// not wait for any pending connection backoff to complete.
     fn connect(&self, now: bool) {
         let state = &self.inner.lock().unwrap().state;
-        match state {
-            InternalSubchannelState::Idle => {
-                let _ = self
-                    .work_queue_tx
-                    .send(SubchannelStateMachineEvent::ConnectionRequested);
-            }
-            _ => {}
+        if let InternalSubchannelState::Idle = state {
+            let _ = self
+                .work_queue_tx
+                .send(SubchannelStateMachineEvent::ConnectionRequested);
         }
     }
 
@@ -509,11 +506,11 @@ impl SubchannelPool for InternalSubchannelPool {
 
     fn unregister_subchannel(&self, key: &SubchannelKey) {
         let mut subchannels = self.subchannels.lock().unwrap();
-        if let Some(weak_isc) = subchannels.get(&key) {
+        if let Some(weak_isc) = subchannels.get(key) {
             if let Some(isc) = weak_isc.upgrade() {
                 return;
             }
-            subchannels.remove(&key);
+            subchannels.remove(key);
             return;
         }
         panic!("attempt to unregister subchannel for unknown key {:?}", key);

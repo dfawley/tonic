@@ -17,7 +17,7 @@ pub struct TransportRegistry {
 impl std::fmt::Debug for TransportRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let m = self.m.lock().unwrap();
-        for (key, _) in &*m {
+        for key in m.keys() {
             write!(f, "k: {:?}", key)?
         }
         Ok(())
@@ -47,11 +47,16 @@ impl TransportRegistry {
             .ok_or(format!(
                 "no transport found for address type {address_type}"
             ))
-            .map(|t| t.clone())
+            .cloned()
+    }
+}
+
+impl Default for TransportRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 /// The registry used if a local registry is not provided to a channel or if it
 /// does not exist in the local registry.
-pub static GLOBAL_TRANSPORT_REGISTRY: Lazy<TransportRegistry> =
-    Lazy::new(|| TransportRegistry::new());
+pub static GLOBAL_TRANSPORT_REGISTRY: Lazy<TransportRegistry> = Lazy::new(TransportRegistry::new);

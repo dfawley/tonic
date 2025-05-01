@@ -338,10 +338,7 @@ impl PartialEq for PickResult {
                 PickResult::Pick(other_pick) => pick.subchannel == other_pick.subchannel,
                 _ => false,
             },
-            PickResult::Queue => match other {
-                PickResult::Queue => true,
-                _ => false,
-            },
+            PickResult::Queue => matches!(other, PickResult::Queue),
             PickResult::Fail(status) => {
                 // TODO: implement me.
                 false

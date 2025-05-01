@@ -407,7 +407,7 @@ impl load_balancing::ChannelController for InternalChannelController {
         match self.subchannel_pool.lookup_subchannel(&key.clone()) {
             Some(isc) => {
                 println!("found subchannel in pool for address: {:?}", &address);
-                return self.new_subchannel_with_watcher(address, isc);
+                self.new_subchannel_with_watcher(address, isc)
             }
             None => {
                 // Create an internal subchannel and register it with the pool.
@@ -428,7 +428,7 @@ impl load_balancing::ChannelController for InternalChannelController {
                     Arc::new(NopBackoff {}),
                 );
                 let isc_in_pool = self.subchannel_pool.register_subchannel(key, isc.clone());
-                return self.new_subchannel_with_watcher(address, isc_in_pool);
+                self.new_subchannel_with_watcher(address, isc_in_pool)
             }
         }
     }
