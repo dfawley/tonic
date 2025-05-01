@@ -196,12 +196,12 @@ impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
 
     fn subchannel_update(
         &mut self,
-        subchannel: &Subchannel,
+        subchannel: Arc<Subchannel>,
         state: &SubchannelState,
         channel_controller: &mut dyn ChannelController,
     ) {
         // Determine which child created this subchannel.
-        let child_idx = *self.subchannel_child_map.get(subchannel).unwrap();
+        let child_idx = *self.subchannel_child_map.get(&subchannel).unwrap();
         let policy = &mut self.children[child_idx].policy;
         // Wrap the channel_controller to track the child's operations.
         let mut channel_controller = WrappedController::new(channel_controller);

@@ -21,8 +21,8 @@ use crate::{
 };
 
 use super::{
-    ChannelController, LbConfig, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicySingle,
-    ParsedJsonLbConfig, Pick, PickResult, Picker, Subchannel, SubchannelState, WorkScheduler,
+    ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, ParsedJsonLbConfig,
+    Pick, PickResult, Picker, Subchannel, SubchannelState, WorkScheduler,
 };
 
 use serde::{Deserialize, Serialize};
@@ -35,8 +35,8 @@ pub static POLICY_NAME: &str = "pick_first";
 
 struct Builder {}
 
-impl LbPolicyBuilderSingle for Builder {
-    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicySingle> {
+impl LbPolicyBuilder for Builder {
+    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy> {
         Box::new(PickFirstPolicy {
             work_scheduler: options.work_scheduler,
             subchannel_list: None,
@@ -103,7 +103,7 @@ struct PickFirstPolicy {
     num_transient_failures: usize, // Number of transient failures after the end of the first pass.
 }
 
-impl LbPolicySingle for PickFirstPolicy {
+impl LbPolicy for PickFirstPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
@@ -570,7 +570,7 @@ impl SubchannelList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::load_balancing::{LbConfig, LbPolicyBuilderSingle, GLOBAL_LB_REGISTRY};
+    use crate::client::load_balancing::{LbConfig, LbPolicyBuilder, GLOBAL_LB_REGISTRY};
     use crate::client::subchannel::{
         ConnectivityStateWatcher, InternalSubchannelPool, SubchannelImpl,
     };
@@ -585,13 +585,12 @@ mod tests {
     fn pickfirst_builder_name() -> Result<(), String> {
         reg();
 
-        let builder: Arc<dyn LbPolicyBuilderSingle> =
-            match GLOBAL_LB_REGISTRY.get_policy("pick_first") {
-                Some(b) => b,
-                None => {
-                    return Err(String::from("pick_first LB policy not registered"));
-                }
-            };
+        let builder: Arc<dyn LbPolicyBuilder> = match GLOBAL_LB_REGISTRY.get_policy("pick_first") {
+            Some(b) => b,
+            None => {
+                return Err(String::from("pick_first LB policy not registered"));
+            }
+        };
         assert_eq!(builder.name(), "pick_first");
         Ok(())
     }
@@ -600,13 +599,12 @@ mod tests {
     fn pickfirst_builder_parse_config_failure() -> Result<(), String> {
         reg();
 
-        let builder: Arc<dyn LbPolicyBuilderSingle> =
-            match GLOBAL_LB_REGISTRY.get_policy("pick_first") {
-                Some(b) => b,
-                None => {
-                    return Err(String::from("pick_first LB policy not registered"));
-                }
-            };
+        let builder: Arc<dyn LbPolicyBuilder> = match GLOBAL_LB_REGISTRY.get_policy("pick_first") {
+            Some(b) => b,
+            None => {
+                return Err(String::from("pick_first LB policy not registered"));
+            }
+        };
 
         // Success cases.
         struct TestCase {
@@ -767,7 +765,7 @@ mod tests {
         };
 
         // Build the pick_first LB policy.
-        let builder: Arc<dyn LbPolicyBuilderSingle> =
+        let builder: Arc<dyn LbPolicyBuilder> =
             GLOBAL_LB_REGISTRY.get_policy("pick_first").unwrap();
         let mut lb_policy = builder.build(LbPolicyOptions { work_scheduler });
 

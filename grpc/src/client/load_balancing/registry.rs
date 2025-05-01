@@ -5,12 +5,12 @@ use std::{
 
 use once_cell::sync::Lazy;
 
-use super::LbPolicyBuilderSingle;
+use super::LbPolicyBuilder;
 
 /// A registry to store and retrieve LB policies.  LB policies are indexed by
 /// their names.
 pub struct LbPolicyRegistry {
-    m: Arc<Mutex<HashMap<String, Arc<dyn LbPolicyBuilderSingle>>>>,
+    m: Arc<Mutex<HashMap<String, Arc<dyn LbPolicyBuilder>>>>,
 }
 
 impl LbPolicyRegistry {
@@ -19,14 +19,14 @@ impl LbPolicyRegistry {
         Self { m: Arc::default() }
     }
     /// Add a LB policy into the registry.
-    pub fn add_builder(&self, builder: impl LbPolicyBuilderSingle + 'static) {
+    pub fn add_builder(&self, builder: impl LbPolicyBuilder + 'static) {
         self.m
             .lock()
             .unwrap()
             .insert(builder.name().to_string(), Arc::new(builder));
     }
     /// Retrieve a LB policy from the registry, or None if not found.
-    pub fn get_policy(&self, name: &str) -> Option<Arc<dyn LbPolicyBuilderSingle>> {
+    pub fn get_policy(&self, name: &str) -> Option<Arc<dyn LbPolicyBuilder>> {
         self.m.lock().unwrap().get(name).map(|f| f.clone())
     }
 }

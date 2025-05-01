@@ -35,9 +35,9 @@ use super::subchannel::{
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 use super::{
     load_balancing::{
-        self, pick_first, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicyRegistry, LbPolicySingle,
-        LbState, ParsedJsonLbConfig, PickResult, Picker, Subchannel, SubchannelState,
-        WorkScheduler, GLOBAL_LB_REGISTRY,
+        self, pick_first, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyRegistry, LbState,
+        ParsedJsonLbConfig, PickResult, Picker, Subchannel, SubchannelState, WorkScheduler,
+        GLOBAL_LB_REGISTRY,
     },
     subchannel::InternalSubchannel,
 };
@@ -449,8 +449,8 @@ impl load_balancing::ChannelController for InternalChannelController {
 
 // A channel that is not idle (connecting, ready, or erroring).
 pub(super) struct GracefulSwitchBalancer {
-    policy: Mutex<Option<Box<dyn LbPolicySingle>>>,
-    policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilderSingle>>>,
+    policy: Mutex<Option<Box<dyn LbPolicy>>>,
+    policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
     work_scheduler: WorkQueueTx,
     pending: Mutex<bool>,
 }

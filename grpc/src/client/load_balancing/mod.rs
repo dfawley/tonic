@@ -123,7 +123,7 @@ pub trait LbPolicyBuilder: Send + Sync {
     /// default implementation returns Ok(None).
     fn parse_config(
         &self,
-        _config: &str,
+        config: &ParsedJsonLbConfig,
     ) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
         Ok(None)
     }
@@ -164,7 +164,7 @@ pub trait LbPolicy: Send {
     /// changes state.
     fn subchannel_update(
         &mut self,
-        subchannel: &Subchannel,
+        subchannel: Arc<Subchannel>,
         state: &SubchannelState,
         channel_controller: &mut dyn ChannelController,
     );
