@@ -197,9 +197,9 @@ impl Channel {
         s.clone().unwrap()
     }
 
-    pub async fn call(&self, request: Request) -> Response {
+    pub async fn call(&self, method: String, request: Request) -> Response {
         let ac = self.get_or_create_active_channel();
-        ac.call(request).await
+        ac.call(method, request).await
     }
 }
 
@@ -290,7 +290,7 @@ impl ActiveChannel {
         })
     }
 
-    async fn call(&self, request: Request) -> Response {
+    async fn call(&self, method: String, request: Request) -> Response {
         // pre-pick tasks (e.g. deadlines, interceptors, retry)
         // start attempt
         // pick subchannel
@@ -305,7 +305,7 @@ impl ActiveChannel {
                 // TODO: handle picker errors (queue or fail RPC)
                 match result {
                     PickResult::Pick(pr) => {
-                        return pr.subchannel.isc.call(request).await;
+                        return pr.subchannel.isc.call(method, request).await;
                     }
                     PickResult::Queue => {
                         // Continue and retry the RPC with the next picker.

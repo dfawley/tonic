@@ -584,9 +584,9 @@ mod tests {
         )))
     }
     fn new_response() -> Response {
-        Response::new(Box::pin(tokio_stream::once(
+        Response::new(Box::pin(tokio_stream::once(Ok(
             Box::new(EmptyMessage {}) as Box<dyn Message>
-        )))
+        ))))
     }
 
     #[test]
@@ -700,7 +700,7 @@ mod tests {
 
     #[async_trait]
     impl Service for TestNopSubchannelImpl {
-        async fn call(&self, request: Request) -> Response {
+        async fn call(&self, method: String, request: Request) -> Response {
             new_response()
         }
     }

@@ -198,7 +198,7 @@ struct InnerSubchannel {
 
 #[async_trait]
 impl Service for InternalSubchannel {
-    async fn call(&self, request: Request) -> Response {
+    async fn call(&self, method: String, request: Request) -> Response {
         let svc = self.inner.lock().unwrap().state.connected_transport();
         if svc.is_none() {
             // TODO(easwars): Change the signature of this method to return a
@@ -207,7 +207,7 @@ impl Service for InternalSubchannel {
         }
 
         let svc = svc.unwrap().clone();
-        return svc.clone().call(request).await;
+        return svc.clone().call(method, request).await;
     }
 }
 

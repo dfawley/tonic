@@ -67,11 +67,11 @@ impl Drop for Listener {
 
 #[async_trait]
 impl Service for Arc<Listener> {
-    async fn call(&self, request: Request) -> Response {
+    async fn call(&self, method: String, request: Request) -> Response {
         // 1. unblock accept, giving it a func back to me
         // 2. return what that func had
         let (s, r) = oneshot::channel();
-        self.s.send(Some((request, s))).await.unwrap();
+        self.s.send(Some((method, request, s))).await.unwrap();
         r.await.unwrap()
     }
 }

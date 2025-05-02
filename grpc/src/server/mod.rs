@@ -9,7 +9,7 @@ pub struct Server {
     handler: Option<Arc<dyn Service>>,
 }
 
-pub type Call = (Request, oneshot::Sender<Response>);
+pub type Call = (String, Request, oneshot::Sender<Response>);
 
 #[async_trait]
 pub trait Listener {
@@ -26,9 +26,9 @@ impl Server {
     }
 
     pub async fn serve(&self, l: &impl Listener) {
-        while let Some((req, reply_on)) = l.accept().await {
+        while let Some((method, req, reply_on)) = l.accept().await {
             reply_on
-                .send(self.handler.as_ref().unwrap().call(req).await)
+                .send(self.handler.as_ref().unwrap().call(method, req).await)
                 .ok(); // TODO: log error
         }
     }
