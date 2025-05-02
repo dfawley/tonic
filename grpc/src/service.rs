@@ -7,9 +7,6 @@ use tonic::{async_trait, Request as TonicRequest, Response as TonicResponse, Sta
 #[derive(Debug)]
 struct TODO;
 
-pub struct Headers {}
-pub struct Trailers {}
-
 pub type Request = TonicRequest<Pin<Box<dyn Stream<Item = Box<dyn Message>> + Send + Sync>>>;
 pub type Response =
     TonicResponse<Pin<Box<dyn Stream<Item = Result<Box<dyn Message>, Status>> + Send + Sync>>>;
