@@ -570,11 +570,24 @@ mod tests {
         ConnectivityStateWatcher, InternalSubchannelPool, SubchannelImpl,
     };
     use crate::client::transport::{Transport, GLOBAL_TRANSPORT_REGISTRY};
-    use crate::service::{Request, Response, Service};
+    use crate::service::{Message, Request, Response, Service};
     use std::ops::Add;
     use std::sync::Arc;
     use tokio::sync::{mpsc, Notify};
     use tokio::task::AbortHandle;
+
+    struct EmptyMessage {}
+    impl Message for EmptyMessage {}
+    fn new_request() -> Request {
+        Request::new(Box::pin(tokio_stream::once(
+            Box::new(EmptyMessage {}) as Box<dyn Message>
+        )))
+    }
+    fn new_response() -> Response {
+        Response::new(Box::pin(tokio_stream::once(
+            Box::new(EmptyMessage {}) as Box<dyn Message>
+        )))
+    }
 
     #[test]
     fn pickfirst_builder_name() -> Result<(), String> {
@@ -688,8 +701,7 @@ mod tests {
     #[async_trait]
     impl Service for TestNopSubchannelImpl {
         async fn call(&self, request: Request) -> Response {
-            let (r, _) = Response::new();
-            r
+            new_response()
         }
     }
 
@@ -827,7 +839,7 @@ mod tests {
             }
             _ => panic!("unexpected event"),
         };
-        let (req, _) = Request::new("/foo/bar", None);
+        let req = new_request();
         assert!(picker.pick(&req) == PickResult::Queue);
 
         // Move first subchannel to READY.
@@ -848,7 +860,7 @@ mod tests {
             }
             _ => panic!("unexpected event"),
         };
-        let (req, _) = Request::new("/foo/bar", None);
+        let req = new_request();
         match picker.pick(&req) {
             PickResult::Pick(pick) => {
                 assert!(pick.subchannel == sc1);
