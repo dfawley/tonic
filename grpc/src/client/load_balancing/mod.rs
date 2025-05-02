@@ -40,10 +40,6 @@ use crate::client::{
 };
 
 pub mod child_manager;
-pub mod child_manager_batched;
-pub mod child_manager_broadcast;
-pub mod child_manager_cb;
-pub mod child_manager_single;
 pub mod pick_first;
 
 mod registry;
@@ -87,21 +83,6 @@ impl ParsedJsonLbConfig {
     }
 }
 
-/// An LB policy factory
-pub trait LbPolicyBuilderSingle: Send + Sync {
-    /// Builds an LB policy instance, or returns an error.
-    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicySingle>;
-    /// Reports the name of the LB Policy.
-    fn name(&self) -> &'static str;
-    // Parses the JSON LB policy configuration into an internal representation.
-    fn parse_config(
-        &self,
-        config: &ParsedJsonLbConfig,
-    ) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
-        Ok(None)
-    }
-}
-
 /// An LB policy factory that produces LbPolicy instances used by the channel
 /// to manage connections and pick connections for RPCs.
 pub trait LbPolicyBuilder: Send + Sync {
@@ -127,22 +108,6 @@ pub trait LbPolicyBuilder: Send + Sync {
     ) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
         Ok(None)
     }
-}
-
-pub trait LbPolicySingle: Send {
-    fn resolver_update(
-        &mut self,
-        update: ResolverUpdate,
-        config: Option<&LbConfig>,
-        channel_controller: &mut dyn ChannelController,
-    ) -> Result<(), Box<dyn Error + Send + Sync>>;
-    fn subchannel_update(
-        &mut self,
-        subchannel: Arc<Subchannel>,
-        state: &SubchannelState,
-        channel_controller: &mut dyn ChannelController,
-    );
-    fn work(&mut self, channel_controller: &mut dyn ChannelController);
 }
 
 /// An LB policy instance.
@@ -171,32 +136,6 @@ pub trait LbPolicy: Send {
 
     /// Called by the channel in response to a call from the LB policy to the
     /// WorkScheduler's request_work method.
-    fn work(&mut self, channel_controller: &mut dyn ChannelController);
-}
-
-/// An LB policy factory
-pub trait LbPolicyBuilderBatched: Send + Sync {
-    /// Builds an LB policy instance, or returns an error.
-    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicyBatched>;
-    /// Reports the name of the LB Policy.
-    fn name(&self) -> &'static str;
-    fn parse_config(&self, config: &str) -> Option<LbConfig> {
-        None
-    }
-}
-
-pub trait LbPolicyBatched: Send {
-    fn resolver_update(
-        &mut self,
-        update: ResolverUpdate,
-        config: Option<&LbConfig>,
-        channel_controller: &mut dyn ChannelController,
-    ) -> Result<(), Box<dyn Error + Send + Sync>>;
-    fn subchannel_update(
-        &mut self,
-        update: &SubchannelState,
-        channel_controller: &mut dyn ChannelController,
-    );
     fn work(&mut self, channel_controller: &mut dyn ChannelController);
 }
 

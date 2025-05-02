@@ -165,7 +165,7 @@ impl Resolver for NopResolver {
         let _ = channel_controller
             .update(ResolverUpdate::Data(ResolverData {
                 endpoints: vec![Endpoint {
-                    addresses: addresses,
+                    addresses,
                     ..Default::default()
                 }],
                 ..Default::default()
