@@ -26,16 +26,16 @@ use crate::rt;
 use crate::service::{Request, Response, Service};
 
 use super::subchannel::{
-    ConnectivityStateWatcher, InternalSubchannelPool, NopBackoff, SubchannelImpl, SubchannelKey,
+    ConnectivityStateWatcher, InternalSubchannel, InternalSubchannelPool, NopBackoff, SubchannelKey,
 };
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 use super::{
     load_balancing::{
         self, pick_first, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyRegistry, LbState,
-        ParsedJsonLbConfig, PickResult, Picker, Subchannel, SubchannelState, WorkScheduler,
-        GLOBAL_LB_REGISTRY,
+        ParsedJsonLbConfig, PickResult, Picker, Subchannel, SubchannelImpl, SubchannelState,
+        WorkScheduler, GLOBAL_LB_REGISTRY,
     },
-    subchannel::InternalSubchannel,
+    subchannel::InternalSubchannelImpl,
 };
 use super::{
     name_resolution::{
@@ -227,13 +227,13 @@ impl PersistentChannel {
 }
 
 pub(crate) trait SubchannelPool: Send + Sync {
-    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<dyn SubchannelImpl>>;
+    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<dyn InternalSubchannel>>;
 
     fn register_subchannel(
         &self,
         key: SubchannelKey,
-        subchannel: Arc<dyn SubchannelImpl>,
-    ) -> Arc<dyn SubchannelImpl>;
+        subchannel: Arc<dyn InternalSubchannel>,
+    ) -> Arc<dyn InternalSubchannel>;
 
     fn unregister_subchannel(&self, key: &SubchannelKey);
 }
@@ -305,7 +305,7 @@ impl ActiveChannel {
                 // TODO: handle picker errors (queue or fail RPC)
                 match result {
                     PickResult::Pick(pr) => {
-                        return pr.subchannel.isc.call(method, request).await;
+                        return pr.subchannel.call(method, request).await;
                     }
                     PickResult::Queue => {
                         // Continue and retry the RPC with the next picker.
@@ -381,10 +381,14 @@ impl InternalChannelController {
     fn new_subchannel_with_watcher(
         &mut self,
         address: &Address,
-        isc: Arc<dyn SubchannelImpl>,
-    ) -> Arc<Subchannel> {
+        isc: Arc<dyn InternalSubchannel>,
+    ) -> Arc<dyn Subchannel> {
         let drop_notify = Arc::new(Notify::new());
-        let sc = Subchannel::new(address.clone(), drop_notify.clone(), isc.clone());
+        let sc: Arc<dyn Subchannel> = Arc::new(SubchannelImpl::new(
+            address.clone(),
+            drop_notify.clone(),
+            isc.clone(),
+        ));
         let watcher = Arc::new(SubchannelStateWatcher {
             subchannel: Arc::downgrade(&sc),
             wqtx: self.wqtx.clone(),
@@ -401,7 +405,7 @@ impl InternalChannelController {
 }
 
 impl load_balancing::ChannelController for InternalChannelController {
-    fn new_subchannel(&mut self, address: &Address) -> Arc<Subchannel> {
+    fn new_subchannel(&mut self, address: &Address) -> Arc<dyn Subchannel> {
         let key = SubchannelKey::new(address.clone());
         match self.subchannel_pool.lookup_subchannel(&key.clone()) {
             Some(isc) => {
@@ -420,7 +424,7 @@ impl load_balancing::ChannelController for InternalChannelController {
                     .transport_registry
                     .get_transport(&address.address_type)
                     .unwrap();
-                let isc = InternalSubchannel::new(
+                let isc = InternalSubchannelImpl::new(
                     key.clone(),
                     self.subchannel_pool.clone(),
                     transport,
@@ -528,7 +532,7 @@ impl GracefulSwitchBalancer {
     }
     pub(super) fn subchannel_update(
         &self,
-        subchannel: Arc<Subchannel>,
+        subchannel: Arc<dyn Subchannel>,
         state: &SubchannelState,
         channel_controller: &mut dyn load_balancing::ChannelController,
     ) {
@@ -597,7 +601,7 @@ impl<T: Clone> WatcherIter<T> {
 }
 
 struct SubchannelStateWatcher {
-    subchannel: Weak<Subchannel>,
+    subchannel: Weak<dyn Subchannel>,
     wqtx: WorkQueueTx,
 }
 

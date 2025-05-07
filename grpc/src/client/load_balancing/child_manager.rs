@@ -30,11 +30,11 @@ use crate::client::load_balancing::{
 };
 use crate::client::name_resolution::{Address, ResolverUpdate};
 
-use super::{Subchannel, SubchannelState};
+use super::{Subchannel, SubchannelKey, SubchannelState};
 
 // An LbPolicy implementation that manages multiple children.
 pub struct ChildManager<T> {
-    subchannel_child_map: HashMap<Arc<Subchannel>, usize>,
+    subchannel_child_map: HashMap<SubchannelKey, usize>,
     children: Vec<Child<T>>,
     shard_update: Box<ResolverUpdateSharder<T>>,
 }
@@ -97,7 +97,8 @@ impl<T: PartialEq + Hash + Eq> ChildManager<T> {
     ) {
         // Add all created subchannels into the subchannel_child_map.
         for csc in channel_controller.created_subchannels {
-            self.subchannel_child_map.insert(csc, child_idx);
+            self.subchannel_child_map
+                .insert(SubchannelKey(csc), child_idx);
         }
         // Update the tracked state if the child produced an update.
         if let Some(state) = channel_controller.picker_update {
@@ -117,17 +118,13 @@ impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
         let child_updates = (self.shard_update)(resolver_update)?;
 
         // Replace self.children with an empty vec.
-        let mut old_children = vec![];
-        mem::swap(&mut self.children, &mut old_children);
+        let old_children = mem::take(&mut self.children);
 
         // Replace the subchannel map with an empty map.
-        let mut old_subchannel_child_map = HashMap::new();
-        mem::swap(
-            &mut self.subchannel_child_map,
-            &mut old_subchannel_child_map,
-        );
+        let old_subchannel_child_map = mem::take(&mut self.subchannel_child_map);
+
         // Reverse the old subchannel map.
-        let mut old_child_subchannels_map: HashMap<usize, Vec<Arc<Subchannel>>> = HashMap::new();
+        let mut old_child_subchannels_map: HashMap<usize, Vec<SubchannelKey>> = HashMap::new();
         for (subchannel, child_idx) in old_subchannel_child_map {
             old_child_subchannels_map
                 .entry(child_idx)
@@ -196,12 +193,15 @@ impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
 
     fn subchannel_update(
         &mut self,
-        subchannel: Arc<Subchannel>,
+        subchannel: Arc<dyn Subchannel>,
         state: &SubchannelState,
         channel_controller: &mut dyn ChannelController,
     ) {
         // Determine which child created this subchannel.
-        let child_idx = *self.subchannel_child_map.get(&subchannel).unwrap();
+        let child_idx = *self
+            .subchannel_child_map
+            .get(&SubchannelKey(subchannel.clone()))
+            .unwrap();
         let policy = &mut self.children[child_idx].policy;
         // Wrap the channel_controller to track the child's operations.
         let mut channel_controller = WrappedController::new(channel_controller);
@@ -217,7 +217,7 @@ impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
 
 struct WrappedController<'a> {
     channel_controller: &'a mut dyn ChannelController,
-    created_subchannels: Vec<Arc<Subchannel>>,
+    created_subchannels: Vec<Arc<dyn Subchannel>>,
     picker_update: Option<LbState>,
 }
 
@@ -232,7 +232,7 @@ impl<'a> WrappedController<'a> {
 }
 
 impl ChannelController for WrappedController<'_> {
-    fn new_subchannel(&mut self, address: &Address) -> Arc<Subchannel> {
+    fn new_subchannel(&mut self, address: &Address) -> Arc<dyn Subchannel> {
         let subchannel = self.channel_controller.new_subchannel(address);
         self.created_subchannels.push(subchannel.clone());
         subchannel

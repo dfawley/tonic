@@ -16,6 +16,7 @@
  *
  */
 
+use serde::de;
 use std::{
     any::Any,
     collections::HashMap,
@@ -24,7 +25,7 @@ use std::{
     hash::Hash,
     ops::{Add, Sub},
     sync::{
-        atomic::{AtomicU32, Ordering::Relaxed},
+        atomic::{AtomicI64, Ordering::Relaxed},
         Arc, Mutex, Weak,
     },
 };
@@ -33,7 +34,7 @@ use tonic::{async_trait, metadata::MetadataMap, Status};
 
 use crate::service::{Request, Response};
 
-use crate::client::subchannel::{ConnectivityStateWatcher, SubchannelImpl};
+use crate::client::subchannel::{ConnectivityStateWatcher, InternalSubchannel};
 use crate::client::{
     name_resolution::{Address, ResolverUpdate},
     ConnectivityState,
@@ -129,7 +130,7 @@ pub trait LbPolicy: Send {
     /// changes state.
     fn subchannel_update(
         &mut self,
-        subchannel: Arc<Subchannel>,
+        subchannel: Arc<dyn Subchannel>,
         state: &SubchannelState,
         channel_controller: &mut dyn ChannelController,
     );
@@ -142,7 +143,7 @@ pub trait LbPolicy: Send {
 /// Controls channel behaviors.
 pub trait ChannelController: Send + Sync {
     /// Creates a new subchannel in IDLE state.
-    fn new_subchannel(&mut self, address: &Address) -> Arc<Subchannel>;
+    fn new_subchannel(&mut self, address: &Address) -> Arc<dyn Subchannel>;
 
     /// Provides a new snapshot of the LB policy's state to the channel.
     fn update_picker(&mut self, update: LbState);
@@ -274,7 +275,9 @@ impl PartialEq for PickResult {
     fn eq(&self, other: &Self) -> bool {
         match self {
             PickResult::Pick(pick) => match other {
-                PickResult::Pick(other_pick) => pick.subchannel == other_pick.subchannel,
+                PickResult::Pick(other_pick) => {
+                    pick.subchannel.dyn_eq(other_pick.subchannel.as_ref())
+                }
                 _ => false,
             },
             PickResult::Queue => matches!(other, PickResult::Queue),
@@ -311,7 +314,7 @@ impl LbState {
 /// A collection of data used by the channel for routing a request.
 pub struct Pick {
     /// The Subchannel for the request.
-    pub subchannel: Arc<Subchannel>,
+    pub subchannel: Arc<dyn Subchannel>,
     // Metadata to be added to existing outgoing metadata.
     pub metadata: MetadataMap,
     // Callback to be invoked once the RPC completes.
@@ -335,61 +338,129 @@ pub struct Pick {
 ///
 /// When a Subchannel is dropped, it is disconnected automatically, and no
 /// subsequent state updates will be provided for it to the LB policy.
-#[derive(Clone)]
-pub struct Subchannel {
-    id: u32,
-    address: Address,
-    dropped: Arc<Notify>,
-    pub(crate) isc: Arc<dyn SubchannelImpl>,
+#[async_trait]
+pub trait Subchannel: Any + Display + Send + Sync {
+    /// Returns the Subchannel's unique identifier. This ID may be used by
+    /// hashing algorithms when the Subchannel is employed as a key in a map.
+    fn id(&self) -> i64;
+
+    /// Returns the address of the Subchannel.
+    fn address(&self) -> &Address;
+
+    /// Notifies the Subchannel to connect.
+    fn connect(&self);
+
+    // Compares Subchannels in an object-safe way.
+    fn dyn_eq(&self, other: &dyn Subchannel) -> bool;
+
+    async fn call(&self, method: String, request: Request) -> Response;
 }
 
-impl Display for Subchannel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel {}", self.id)
+impl dyn Subchannel {
+    pub fn downcast_ref<T>(&self) -> Option<&T>
+    where
+        T: 'static,
+    {
+        (self as &dyn Any).downcast_ref()
     }
 }
 
-static NEXT_SUBCHANNEL_ID: AtomicU32 = AtomicU32::new(0);
+#[derive(Clone)]
+pub struct SubchannelKey(Arc<dyn Subchannel>);
 
-impl Subchannel {
+impl Hash for SubchannelKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.id().hash(state);
+    }
+}
+
+impl PartialEq for SubchannelKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.dyn_eq(other.0.as_ref())
+    }
+}
+
+impl Eq for SubchannelKey {}
+
+impl Display for SubchannelKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Subchannel {}", self.0.id())
+    }
+}
+
+static NEXT_SUBCHANNEL_ID: AtomicI64 = AtomicI64::new(0);
+
+pub(crate) struct SubchannelImpl {
+    id: i64,
+    address: Address,
+    dropped: Arc<Notify>,
+    pub(crate) isc: Arc<dyn InternalSubchannel>,
+}
+
+impl SubchannelImpl {
     pub(super) fn new(
         address: Address,
         dropped: Arc<Notify>,
-        isc: Arc<dyn SubchannelImpl>,
-    ) -> Arc<Self> {
-        Arc::new(Subchannel {
+        isc: Arc<dyn InternalSubchannel>,
+    ) -> Self {
+        SubchannelImpl {
             id: NEXT_SUBCHANNEL_ID.fetch_add(1, Relaxed),
             address,
             dropped,
             isc,
-        })
+        }
+    }
+}
+
+#[async_trait]
+impl Subchannel for SubchannelImpl {
+    fn id(&self) -> i64 {
+        self.id as i64
     }
 
-    /// Notifies the Subchannel to connect.
-    pub fn connect(&self) {
+    fn address(&self) -> &Address {
+        &self.address
+    }
+
+    fn connect(&self) {
         println!("connect called for subchannel: {}", self);
         self.isc.connect(false);
     }
-}
 
-impl Hash for Subchannel {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
+    fn dyn_eq(&self, other: &dyn Subchannel) -> bool {
+        if let Some(other_subchannel) = other.downcast_ref::<SubchannelImpl>() {
+            self.id == other_subchannel.id
+        } else {
+            false
+        }
+    }
+
+    async fn call(&self, method: String, request: Request) -> Response {
+        println!("call called for subchannel: {}", self);
+        self.isc.call(method, request).await
     }
 }
 
-impl PartialEq for Subchannel {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl Eq for Subchannel {}
-
-impl Drop for Subchannel {
+impl Drop for SubchannelImpl {
     fn drop(&mut self) {
         println!("dropping subchannel {}", self);
         self.dropped.notify_one();
+    }
+}
+
+impl Debug for SubchannelImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Subchannel {{ id: {}, address: {} }}",
+            self.id, self.address
+        )
+    }
+}
+
+impl Display for SubchannelImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Subchannel {}", self.id)
     }
 }
 

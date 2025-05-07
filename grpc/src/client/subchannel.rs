@@ -17,7 +17,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tonic::async_trait;
 
 use super::channel::WorkQueueTx;
-use super::load_balancing::{self, Picker, Subchannel, SubchannelState};
+use super::load_balancing::{self, Picker, SubchannelState};
 use super::name_resolution::Address;
 use super::transport::{self, ConnectedTransport, Transport, TransportRegistry};
 use super::ConnectivityState;
@@ -174,13 +174,13 @@ impl Drop for InternalSubchannelState {
     }
 }
 
-pub(crate) trait SubchannelImpl: Service + Send + Sync {
+pub(crate) trait InternalSubchannel: Service + Send + Sync {
     fn connect(&self, now: bool);
     fn register_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>);
     fn unregister_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>);
 }
 
-pub(crate) struct InternalSubchannel {
+pub(crate) struct InternalSubchannelImpl {
     key: SubchannelKey,
     pool: Arc<dyn SubchannelPool>,
     transport: Arc<dyn Transport>,
@@ -197,7 +197,7 @@ struct InnerSubchannel {
 }
 
 #[async_trait]
-impl Service for InternalSubchannel {
+impl Service for InternalSubchannelImpl {
     async fn call(&self, method: String, request: Request) -> Response {
         let svc = self.inner.lock().unwrap().state.connected_transport();
         if svc.is_none() {
@@ -211,7 +211,7 @@ impl Service for InternalSubchannel {
     }
 }
 
-impl SubchannelImpl for InternalSubchannel {
+impl InternalSubchannel for InternalSubchannelImpl {
     /// Begins connecting the subchannel asynchronously.  If now is set, does
     /// not wait for any pending connection backoff to complete.
     fn connect(&self, now: bool) {
@@ -259,13 +259,13 @@ impl Debug for SubchannelStateMachineEvent {
     }
 }
 
-impl InternalSubchannel {
+impl InternalSubchannelImpl {
     pub(crate) fn new(
         key: SubchannelKey,
         pool: Arc<dyn SubchannelPool>,
         transport: Arc<dyn Transport>,
         backoff: Arc<dyn Backoff>,
-    ) -> Arc<InternalSubchannel> {
+    ) -> Arc<InternalSubchannelImpl> {
         println!("creating new internal subchannel for: {:?}", &key);
         let (tx, mut rx) = mpsc::unbounded_channel::<SubchannelStateMachineEvent>();
         let isc = Arc::new(Self {
@@ -432,7 +432,7 @@ impl InternalSubchannel {
     async fn drain(self) {}
 }
 
-impl Drop for InternalSubchannel {
+impl Drop for InternalSubchannelImpl {
     fn drop(&mut self) {
         println!("dropping internal subchannel {:?}", self.key);
         self.pool.unregister_subchannel(&self.key);
@@ -456,7 +456,7 @@ impl SubchannelKey {
 }
 
 pub(crate) struct InternalSubchannelPool {
-    subchannels: Mutex<BTreeMap<SubchannelKey, Weak<dyn SubchannelImpl>>>,
+    subchannels: Mutex<BTreeMap<SubchannelKey, Weak<dyn InternalSubchannel>>>,
 }
 
 impl InternalSubchannelPool {
@@ -468,7 +468,7 @@ impl InternalSubchannelPool {
 }
 
 impl SubchannelPool for InternalSubchannelPool {
-    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<dyn SubchannelImpl>> {
+    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<dyn InternalSubchannel>> {
         let subchannels = self.subchannels.lock().unwrap();
         println!("looking up subchannel for: {:?}", key);
         if let Some(weak_isc) = subchannels.get(key) {
@@ -487,8 +487,8 @@ impl SubchannelPool for InternalSubchannelPool {
     fn register_subchannel(
         &self,
         key: SubchannelKey,
-        subchannel: Arc<dyn SubchannelImpl>,
-    ) -> Arc<dyn SubchannelImpl> {
+        subchannel: Arc<dyn InternalSubchannel>,
+    ) -> Arc<dyn InternalSubchannel> {
         println!("registering subchannel for: {:?}", key);
         let mut subchannels = self.subchannels.lock().unwrap();
         if let Some(weak_isc) = subchannels.get(&key) {
