@@ -30,25 +30,30 @@ use crate::client::load_balancing::{
 };
 use crate::client::name_resolution::{Address, ResolverUpdate};
 
-use super::{Subchannel, SubchannelKey, SubchannelState};
+use super::{Subchannel, SubchannelState};
+
+use tokio::sync::{mpsc, watch, Notify};
+use tokio::task::{AbortHandle, JoinHandle};
 
 // An LbPolicy implementation that manages multiple children.
 pub struct ChildManager<T> {
-    subchannel_child_map: HashMap<SubchannelKey, usize>,
-    children: Vec<Child<T>>,
-    shard_update: Box<ResolverUpdateSharder<T>>,
+    // TODO(easwars): This should contain a weak reference to the subchannel,
+    // and we should cleanup keys with no strong references everytime in
+    // resolve_child_controller().
+    subchannels: HashMap<Arc<dyn Subchannel>, Arc<T>>,
+    children: HashMap<Arc<T>, Child>,
+    sharder: Box<dyn ResolverUpdateSharder<T>>,
+    from_children_tx: mpsc::UnboundedSender<Arc<T>>,
+    to_parent_rx: mpsc::Receiver<Arc<T>>,
 }
 
-struct Child<T> {
-    identifier: T,
+struct Child {
     policy: Box<dyn LbPolicy>,
     state: LbState,
 }
 
 /// A collection of data sent to a child of the ChildManager.
-pub struct ChildUpdate<T> {
-    /// The identifier the ChildManager should use for this child.
-    pub child_identifier: T,
+pub struct ChildUpdate {
     /// The builder the ChildManager should use to create this child if it does
     /// not exist.
     pub child_policy_builder: Box<dyn LbPolicyBuilder>,
@@ -56,23 +61,44 @@ pub struct ChildUpdate<T> {
     pub child_update: ResolverUpdate,
 }
 
-// TODO: convert to a trait?
-/// Performs the operation of sharding an aggregate ResolverUpdate into one or
-/// more ChildUpdates.  Called automatically by the ChildManager when its
-/// resolver_update method is called.
-pub type ResolverUpdateSharder<T> =
-    fn(
-        ResolverUpdate,
-    ) -> Result<Box<dyn Iterator<Item = ChildUpdate<T>>>, Box<dyn Error + Send + Sync>>;
+pub trait ResolverUpdateSharder<T: PartialEq + Hash + Eq + Send>: Send {
+    /// Performs the operation of sharding an aggregate ResolverUpdate into one
+    /// or more ChildUpdates.  Called automatically by the ChildManager when its
+    /// resolver_update method is called.  The key in the returned map is the
+    /// identifier the ChildManager should use for this child.
+    fn shard_update(
+        &self,
+        resolver_update: ResolverUpdate,
+    ) -> Result<HashMap<T, ChildUpdate>, Box<dyn Error + Send + Sync>>;
+}
 
-impl<T: PartialEq + Hash + Eq> ChildManager<T> {
+impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> ChildManager<T> {
     /// Creates a new ChildManager LB policy.  shard_update is called whenever a
     /// resolver_update operation occurs.
-    pub fn new(shard_update: Box<ResolverUpdateSharder<T>>) -> Self {
-        Self {
-            subchannel_child_map: HashMap::default(),
-            children: Vec::default(),
-            shard_update,
+    pub fn new(
+        work_scheduler: Arc<dyn WorkScheduler>,
+        sharder: Box<dyn ResolverUpdateSharder<T>>,
+    ) -> Self {
+        let (from_children_tx, mut from_children_rx) = mpsc::unbounded_channel::<Arc<T>>();
+        let (to_parent_tx, to_parent_rx) = mpsc::channel::<Arc<T>>(1);
+        let ws = work_scheduler.clone();
+        tokio::task::spawn(async move {
+            println!("starting schedule_work() handler task");
+            while let Some(m) = from_children_rx.recv().await {
+                to_parent_tx
+                    .send(m.clone())
+                    .await
+                    .expect("Failed to send work to parent");
+                ws.schedule_work();
+            }
+            println!("exiting schedule_work() handler task");
+        });
+        ChildManager {
+            subchannels: HashMap::default(),
+            children: HashMap::default(),
+            sharder,
+            from_children_tx,
+            to_parent_rx,
         }
     }
 
@@ -80,12 +106,12 @@ impl<T: PartialEq + Hash + Eq> ChildManager<T> {
     pub fn child_states(&mut self) -> impl Iterator<Item = (&T, &LbState)> {
         self.children
             .iter()
-            .map(|child| (&child.identifier, &child.state))
+            .map(|(id, child)| (id.as_ref(), &child.state))
     }
 
     // Called to update all accounting in the ChildManager from operations
     // performed by a child policy on the WrappedController that was created for
-    // it.  child_idx is an index into the children map for the relevant child.
+    // it.
     //
     // TODO: this post-processing step can be eliminated by capturing the right
     // state inside the WrappedController, however it is fairly complex.  Decide
@@ -93,21 +119,20 @@ impl<T: PartialEq + Hash + Eq> ChildManager<T> {
     fn resolve_child_controller(
         &mut self,
         channel_controller: WrappedController,
-        child_idx: usize,
+        child_id: Arc<T>,
     ) {
         // Add all created subchannels into the subchannel_child_map.
         for csc in channel_controller.created_subchannels {
-            self.subchannel_child_map
-                .insert(SubchannelKey(csc), child_idx);
+            self.subchannels.insert(csc, child_id.clone());
         }
         // Update the tracked state if the child produced an update.
         if let Some(state) = channel_controller.picker_update {
-            self.children[child_idx].state = state;
+            self.children.get_mut(&child_id.clone()).unwrap().state = state;
         };
     }
 }
 
-impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
+impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> LbPolicy for ChildManager<T> {
     fn resolver_update(
         &mut self,
         resolver_update: ResolverUpdate,
@@ -115,79 +140,46 @@ impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // First determine if the incoming update is valid.
-        let child_updates = (self.shard_update)(resolver_update)?;
+        let child_updates = self.sharder.shard_update(resolver_update)?;
 
-        // Replace self.children with an empty vec.
-        let old_children = mem::take(&mut self.children);
+        // Remove children that are no longer active.
+        self.children
+            .retain(|child_id, _| child_updates.contains_key(child_id));
 
-        // Replace the subchannel map with an empty map.
-        let old_subchannel_child_map = mem::take(&mut self.subchannel_child_map);
-
-        // Reverse the old subchannel map.
-        let mut old_child_subchannels_map: HashMap<usize, Vec<SubchannelKey>> = HashMap::new();
-        for (subchannel, child_idx) in old_subchannel_child_map {
-            old_child_subchannels_map
-                .entry(child_idx)
-                .or_default()
-                .push(subchannel);
-        }
-
-        // Build a map of the old children from their IDs for efficient lookups.
-        let old_children = old_children
-            .into_iter()
-            .enumerate()
-            .map(|(old_idx, e)| (e.identifier, (e.policy, e.state, old_idx)));
-        let mut old_children: HashMap<T, _> = old_children.collect();
-
-        // Split the child updates into the IDs and builders, and the
-        // ResolverUpdates.
-        let (ids_builders, updates): (Vec<_>, Vec<_>) = child_updates
-            .map(|e| ((e.child_identifier, e.child_policy_builder), e.child_update))
-            .unzip();
-
-        // Transfer children whose identifiers appear before and after the
-        // update, and create new children.  Add entries back into the
-        // subchannel map.
-        for (new_idx, (identifier, builder)) in ids_builders.into_iter().enumerate() {
-            if let Some((policy, state, old_idx)) = old_children.remove(&identifier) {
-                for subchannel in old_child_subchannels_map
-                    .remove(&old_idx)
-                    .into_iter()
-                    .flatten()
-                {
-                    self.subchannel_child_map.insert(subchannel, new_idx);
+        // Apply child updates to respective policies, instantiating new ones as
+        // needed.
+        for (id, update) in child_updates.into_iter() {
+            let child_id: Arc<T> = Arc::new(id);
+            let child_policy: &mut dyn LbPolicy = match self.children.get_mut(&child_id) {
+                Some(child) => child.policy.as_mut(),
+                None => {
+                    self.children.insert(
+                        child_id.clone(),
+                        Child {
+                            policy: update.child_policy_builder.build(LbPolicyOptions {
+                                work_scheduler: Arc::new(WrappedWorkScheduler::new(
+                                    child_id.clone(),
+                                    self.from_children_tx.clone(),
+                                )),
+                            }),
+                            state: LbState::initial(),
+                        },
+                    );
+                    self.children.get_mut(&child_id).unwrap().policy.as_mut()
                 }
-                self.children.push(Child {
-                    identifier,
-                    state,
-                    policy,
-                });
-            } else {
-                let policy = builder.build(LbPolicyOptions {
-                    work_scheduler: Arc::new(UnimplWorkScheduler {}),
-                });
-                let state = LbState::initial();
-                self.children.push(Child {
-                    identifier,
-                    state,
-                    policy,
-                });
             };
-        }
-
-        // Anything left in old_children will just be Dropped and cleaned up.
-
-        // Call resolver_update on all children.
-        let mut updates = updates.into_iter();
-        for child_idx in 0..self.children.len() {
-            let child = &mut self.children[child_idx];
-            let child_update = updates.next().unwrap();
             let mut channel_controller = WrappedController::new(channel_controller);
-            let _ = child
-                .policy
-                .resolver_update(child_update, config, &mut channel_controller);
-            self.resolve_child_controller(channel_controller, child_idx);
+            let _ = child_policy.resolver_update(
+                update.child_update.clone(),
+                config,
+                &mut channel_controller,
+            );
+            self.resolve_child_controller(channel_controller, child_id.clone());
         }
+
+        // Keep only the subchannels associated with currently active children.
+        self.subchannels
+            .retain(|_, child_id| self.children.contains_key(child_id));
         Ok(())
     }
 
@@ -198,20 +190,34 @@ impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
         channel_controller: &mut dyn ChannelController,
     ) {
         // Determine which child created this subchannel.
-        let child_idx = *self
-            .subchannel_child_map
-            .get(&SubchannelKey(subchannel.clone()))
-            .unwrap();
-        let policy = &mut self.children[child_idx].policy;
+        let child_id = self.subchannels.get(&subchannel).unwrap_or_else(|| {
+            panic!("Subchannel not found in child manager: {}", subchannel);
+        });
+        let policy = &mut self.children.get_mut(&child_id.clone()).unwrap().policy;
+
         // Wrap the channel_controller to track the child's operations.
         let mut channel_controller = WrappedController::new(channel_controller);
         // Call the proper child.
         policy.subchannel_update(subchannel, state, &mut channel_controller);
-        self.resolve_child_controller(channel_controller, child_idx);
+        self.resolve_child_controller(channel_controller, child_id.clone());
     }
 
     fn work(&mut self, _channel_controller: &mut dyn ChannelController) {
-        todo!();
+        // The schedule_work() handler task writes to this channel before
+        // calling schedule_work() on the parent. So, when we get here, we know
+        // for a fact that the channel is not empty. We can't do a recv()
+        // because we can't call .await from a non-async context. But, we do
+        // know that we can safely unwrap the result from try_recv().
+        let child_id = self.to_parent_rx.try_recv().unwrap();
+
+        // It is possible that work was queued for a child that got removed as
+        // part of a subsequent resolver_update. So, it is safe to ignore such a
+        // child here.
+        if let Some(child) = self.children.get_mut(&child_id) {
+            let mut channel_controller = WrappedController::new(_channel_controller);
+            child.policy.work(&mut channel_controller);
+            self.resolve_child_controller(channel_controller, child_id.clone());
+        }
     }
 }
 
@@ -247,10 +253,24 @@ impl ChannelController for WrappedController<'_> {
     }
 }
 
-pub struct UnimplWorkScheduler;
+struct WrappedWorkScheduler<T: Send + Sync + 'static> {
+    child_identifier: Arc<T>,
+    from_children_tx: mpsc::UnboundedSender<Arc<T>>,
+}
 
-impl WorkScheduler for UnimplWorkScheduler {
+impl<T: Send + Sync + 'static> WrappedWorkScheduler<T> {
+    fn new(child_identifier: Arc<T>, from_children_tx: mpsc::UnboundedSender<Arc<T>>) -> Self {
+        Self {
+            child_identifier,
+            from_children_tx,
+        }
+    }
+}
+
+impl<T: Send + Sync> WorkScheduler for WrappedWorkScheduler<T> {
     fn schedule_work(&self) {
-        todo!();
+        self.from_children_tx
+            .send(self.child_identifier.clone())
+            .expect("Failed to send work to child manager");
     }
 }

@@ -22,8 +22,7 @@ use crate::{
 
 use super::{
     ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, ParsedJsonLbConfig,
-    Pick, PickResult, Picker, Subchannel, SubchannelImpl, SubchannelKey, SubchannelState,
-    WorkScheduler,
+    Pick, PickResult, Picker, Subchannel, SubchannelImpl, SubchannelState, WorkScheduler,
 };
 
 use serde::{Deserialize, Serialize};
@@ -98,7 +97,7 @@ struct PickFirstPolicy {
     subchannel_list: Option<SubchannelList>, // List of subchannels, that we are currently connecting to.
     selected_subchannel: Option<Arc<dyn Subchannel>>, // The currently selected subchannel.
     addresses: Vec<Address>,                 // Most recent addresses from the name resolver.
-    last_resolver_error: Option<Box<dyn Error + Send + Sync>>, // Most recent error from the name resolver.
+    last_resolver_error: Option<Arc<dyn Error + Send + Sync>>, // Most recent error from the name resolver.
     last_connection_error: Option<Arc<dyn Error + Send + Sync>>, // Most recent error from any subchannel.
     connectivity_state: ConnectivityState, // Overall connectivity state of the channel.
     num_transient_failures: usize, // Number of transient failures after the end of the first pass.
@@ -170,7 +169,7 @@ impl LbPolicy for PickFirstPolicy {
         // Handle the update for this subchannel, provided it's included in the
         // subchannel list (if the list exists).
         if let Some(subchannel_list) = &self.subchannel_list {
-            if subchannel_list.contains(subchannel.clone()) {
+            if subchannel_list.contains(&subchannel) {
                 if state.connectivity_state == ConnectivityState::Ready {
                     self.move_to_ready(subchannel, channel_controller);
                 } else {
@@ -182,7 +181,7 @@ impl LbPolicy for PickFirstPolicy {
 
         // Handle updates for the currently selected subchannel.
         if let Some(selected_sc) = &self.selected_subchannel {
-            if selected_sc.dyn_eq(subchannel.as_ref()) {
+            if *selected_sc == subchannel.clone() {
                 // Any state change for the currently connected subchannel means
                 // that we are no longer connected.
                 self.move_to_idle(channel_controller);
@@ -256,8 +255,10 @@ impl PickFirstPolicy {
         self.subchannel_list = None;
         self.selected_subchannel = None;
         self.addresses = vec![];
-        self.last_resolver_error =
-            Some("received empty address list from the name resolver".into());
+        let arc_err = Arc::from(Box::from(
+            "received empty address list from the name resolver",
+        ));
+        self.last_resolver_error = Some(arc_err);
         self.move_to_transient_failure(channel_controller);
         channel_controller.request_resolution();
     }
@@ -273,7 +274,7 @@ impl PickFirstPolicy {
 
         // Update subchannel data. Return early if not all subchannels have seen
         // their first state update.
-        let old_state = subchannel_list.update_subchannel_data(sc.clone(), state);
+        let old_state = subchannel_list.update_subchannel_data(&sc, state);
         if !subchannel_list.all_subchannels_seen_initial_state() {
             return;
         }
@@ -307,9 +308,10 @@ impl PickFirstPolicy {
                 }
             }
             ConnectivityState::Connecting => {
+                // TODO(easwars): Prevent duplicate picker updates when the
+                // policy is in CONNECTING. Note that the policy starts out in
+                // CONNECTING.
                 if self.connectivity_state != ConnectivityState::TransientFailure {
-                    // TODO(easwars): Prevent duplicate picker updates when the
-                    // policy is in CONNECTING.
                     self.move_to_connecting(channel_controller);
                 }
             }
@@ -434,7 +436,7 @@ impl Picker for IdlePicker {
 }
 
 struct SubchannelList {
-    subchannels: HashMap<SubchannelKey, SubchannelData>,
+    subchannels: HashMap<Arc<dyn Subchannel>, SubchannelData>,
     ordered_subchannels: Vec<Arc<dyn Subchannel>>,
     current_idx: usize,
     num_initial_notifications_seen: usize,
@@ -451,8 +453,7 @@ impl SubchannelList {
         for address in addresses {
             let sc = channel_controller.new_subchannel(address);
             scl.ordered_subchannels.push(sc.clone());
-            scl.subchannels
-                .insert(SubchannelKey(sc), SubchannelData::new());
+            scl.subchannels.insert(sc, SubchannelData::new());
         }
 
         println!("created new subchannel list with {} subchannels", scl.len());
@@ -463,12 +464,12 @@ impl SubchannelList {
         self.ordered_subchannels.len()
     }
 
-    fn subchannel_data(&self, sc: Arc<dyn Subchannel>) -> Option<SubchannelData> {
-        self.subchannels.get(&SubchannelKey(sc.clone())).cloned()
+    fn subchannel_data(&self, sc: &Arc<dyn Subchannel>) -> Option<SubchannelData> {
+        self.subchannels.get(sc).cloned()
     }
 
-    fn contains(&self, sc: Arc<dyn Subchannel>) -> bool {
-        self.subchannels.contains_key(&SubchannelKey(sc.clone()))
+    fn contains(&self, sc: &Arc<dyn Subchannel>) -> bool {
+        self.subchannels.contains_key(sc)
     }
 
     // Updates internal state of the subchannel with the new state. Callers must
@@ -477,13 +478,10 @@ impl SubchannelList {
     // Returns old state corresponding to the subchannel, if one exists.
     fn update_subchannel_data(
         &mut self,
-        subchannel: Arc<dyn Subchannel>,
+        sc: &Arc<dyn Subchannel>,
         state: &SubchannelState,
     ) -> Option<SubchannelState> {
-        let sc_data = self
-            .subchannels
-            .get_mut(&SubchannelKey(subchannel))
-            .unwrap();
+        let sc_data = self.subchannels.get_mut(sc).unwrap();
 
         // Increment the counter when seeing the first update.
         if sc_data.state.is_none() {
@@ -520,7 +518,7 @@ impl SubchannelList {
         for idx in self.current_idx..self.ordered_subchannels.len() {
             // Grab the next subchannel and its data.
             let sc = &self.ordered_subchannels[idx];
-            let sc_data = self.subchannels.get(&SubchannelKey(sc.clone())).unwrap();
+            let sc_data = self.subchannels.get(sc).unwrap();
 
             match &sc_data.state {
                 Some(state) => {
@@ -561,7 +559,7 @@ impl SubchannelList {
     fn connect_to_all_subchannels(&mut self, channel_controller: &mut dyn ChannelController) {
         for (sc, data) in &mut self.subchannels {
             if data.state.as_ref().unwrap().connectivity_state == ConnectivityState::Idle {
-                sc.0.connect();
+                sc.connect();
             }
         }
     }
@@ -765,6 +763,7 @@ mod tests {
     #[tokio::test]
     async fn pickfirst_connects_to_first_address() {
         // Setup the test environment.
+        reg();
         let (tx_events, mut rx_events) = mpsc::unbounded_channel::<TestEvent>();
         let work_scheduler = Arc::new(TestWorkScheduler {
             tx_events: tx_events.clone(),
@@ -868,7 +867,7 @@ mod tests {
         let req = new_request();
         match picker.pick(&req) {
             PickResult::Pick(pick) => {
-                assert!(pick.subchannel.dyn_eq(sc1.as_ref()));
+                assert!(pick.subchannel == sc1.clone());
             }
             _ => panic!("unexpected pick result"),
         }

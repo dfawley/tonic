@@ -90,8 +90,7 @@ impl InternalSubchannelState {
                 last_connection_error: None,
             },
             Self::TransientFailure(st) => {
-                let box_err = Into::<Box<dyn Error + Send + Sync>>::into(st.error.clone());
-                let arc_err = Into::<Arc<dyn Error + Send + Sync>>::into(box_err);
+                let arc_err: Arc<dyn Error + Send + Sync> = Arc::from(Box::from(st.error.clone()));
                 SubchannelState {
                     connectivity_state: ConnectivityState::TransientFailure,
                     last_connection_error: Some(arc_err),
@@ -403,10 +402,7 @@ impl InternalSubchannelImpl {
                 error: err.clone(),
             });
 
-        // TODO(easwars): Is there a nicer way to go from String to
-        // Arc<dyn Error + Send + Sync>.
-        let box_err = Into::<Box<dyn Error + Send + Sync>>::into(err.clone());
-        let arc_err = Into::<Arc<dyn Error + Send + Sync>>::into(box_err);
+        let arc_err: Arc<dyn Error + Send + Sync> = Arc::from(Box::from(err.clone()));
         for w in &inner.watchers {
             w.on_state_change(SubchannelState {
                 connectivity_state: ConnectivityState::TransientFailure,

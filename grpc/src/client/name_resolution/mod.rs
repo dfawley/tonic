@@ -94,15 +94,16 @@ pub trait ChannelController: Send + Sync {
 }
 
 /// A name resolver update expresses the current state of the resolver.
+#[derive(Clone)]
 pub enum ResolverUpdate {
     /// Indicates the name resolver encountered an error.
-    Err(Box<dyn Error + Send + Sync>),
+    Err(Arc<dyn Error + Send + Sync>),
     /// Indicates the name resolver produced a valid result.
     Data(ResolverData),
 }
 
 /// Data provided by the name resolver to the channel.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct ResolverData {
     /// A list of endpoints which each identify a logical host serving the

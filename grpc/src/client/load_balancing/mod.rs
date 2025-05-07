@@ -22,7 +22,7 @@ use std::{
     collections::HashMap,
     error::Error,
     fmt::{Debug, Display},
-    hash::Hash,
+    hash::{Hash, Hasher},
     ops::{Add, Sub},
     sync::{
         atomic::{AtomicI64, Ordering::Relaxed},
@@ -275,9 +275,7 @@ impl PartialEq for PickResult {
     fn eq(&self, other: &Self) -> bool {
         match self {
             PickResult::Pick(pick) => match other {
-                PickResult::Pick(other_pick) => {
-                    pick.subchannel.dyn_eq(other_pick.subchannel.as_ref())
-                }
+                PickResult::Pick(other_pick) => pick.subchannel == other_pick.subchannel.clone(),
                 _ => false,
             },
             PickResult::Queue => matches!(other, PickResult::Queue),
@@ -321,6 +319,30 @@ pub struct Pick {
     pub on_complete: Option<Box<dyn Fn(&Response) + Send + Sync>>,
 }
 
+pub trait DynHash {
+    fn dyn_hash(&self, state: &mut Box<&mut dyn Hasher>);
+}
+
+impl<T: Hash> DynHash for T {
+    fn dyn_hash(&self, state: &mut Box<&mut dyn Hasher>) {
+        self.hash(state);
+    }
+}
+
+pub trait DynPartialEq {
+    fn dyn_eq(&self, other: &&dyn Any) -> bool;
+}
+
+impl<T: Eq + PartialEq + 'static> DynPartialEq for T {
+    fn dyn_eq(&self, other: &&dyn Any) -> bool {
+        let other = other.downcast_ref::<T>();
+        let Some(other) = other else {
+            return false;
+        };
+        self.eq(other)
+    }
+}
+
 /// A Subchannel represents a method of communicating with a server which may be
 /// connected or disconnected many times across its lifetime.
 ///
@@ -339,19 +361,12 @@ pub struct Pick {
 /// When a Subchannel is dropped, it is disconnected automatically, and no
 /// subsequent state updates will be provided for it to the LB policy.
 #[async_trait]
-pub trait Subchannel: Any + Display + Send + Sync {
-    /// Returns the Subchannel's unique identifier. This ID may be used by
-    /// hashing algorithms when the Subchannel is employed as a key in a map.
-    fn id(&self) -> i64;
-
+pub trait Subchannel: DynHash + DynPartialEq + Any + Send + Sync {
     /// Returns the address of the Subchannel.
     fn address(&self) -> &Address;
 
     /// Notifies the Subchannel to connect.
     fn connect(&self);
-
-    // Compares Subchannels in an object-safe way.
-    fn dyn_eq(&self, other: &dyn Subchannel) -> bool;
 
     async fn call(&self, method: String, request: Request) -> Response;
 }
@@ -365,26 +380,29 @@ impl dyn Subchannel {
     }
 }
 
-#[derive(Clone)]
-pub struct SubchannelKey(Arc<dyn Subchannel>);
-
-impl Hash for SubchannelKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.id().hash(state);
+impl Hash for dyn Subchannel {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.dyn_hash(&mut Box::new(state as &mut dyn Hasher));
     }
 }
 
-impl PartialEq for SubchannelKey {
+impl PartialEq for dyn Subchannel {
     fn eq(&self, other: &Self) -> bool {
-        self.0.dyn_eq(other.0.as_ref())
+        self.dyn_eq(&Box::new(other as &dyn Any))
     }
 }
 
-impl Eq for SubchannelKey {}
+impl Eq for dyn Subchannel {}
 
-impl Display for SubchannelKey {
+impl Debug for dyn Subchannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel {}", self.0.id())
+        write!(f, "Subchannel for address: {}", self.address())
+    }
+}
+
+impl Display for dyn Subchannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Subchannel for address: {}", self.address())
     }
 }
 
@@ -412,12 +430,22 @@ impl SubchannelImpl {
     }
 }
 
+impl Hash for SubchannelImpl {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl PartialEq for SubchannelImpl {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.address == other.address
+    }
+}
+
+impl Eq for SubchannelImpl {}
+
 #[async_trait]
 impl Subchannel for SubchannelImpl {
-    fn id(&self) -> i64 {
-        self.id as i64
-    }
-
     fn address(&self) -> &Address {
         &self.address
     }
@@ -425,14 +453,6 @@ impl Subchannel for SubchannelImpl {
     fn connect(&self) {
         println!("connect called for subchannel: {}", self);
         self.isc.connect(false);
-    }
-
-    fn dyn_eq(&self, other: &dyn Subchannel) -> bool {
-        if let Some(other_subchannel) = other.downcast_ref::<SubchannelImpl>() {
-            self.id == other_subchannel.id
-        } else {
-            false
-        }
     }
 
     async fn call(&self, method: String, request: Request) -> Response {
