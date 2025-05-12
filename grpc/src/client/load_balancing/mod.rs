@@ -42,6 +42,7 @@ use crate::client::{
 
 pub mod child_manager;
 pub mod pick_first;
+pub mod test_utils;
 
 mod registry;
 pub use registry::{LbPolicyRegistry, GLOBAL_LB_REGISTRY};

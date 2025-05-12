@@ -7,29 +7,24 @@ use std::{
     time::Duration,
 };
 
-use tokio::time::sleep;
-use tonic::async_trait;
-use tonic::metadata::MetadataMap;
-
 use crate::{
     client::{
-        load_balancing::{ErroringPicker, LbState, QueuingPicker},
+        load_balancing::{
+            ChannelController, ErroringPicker, LbConfig, LbPolicy, LbPolicyBuilder,
+            LbPolicyOptions, LbState, ParsedJsonLbConfig, Pick, PickResult, Picker, QueuingPicker,
+            Subchannel, SubchannelImpl, SubchannelState, WorkScheduler,
+        },
         name_resolution::{Address, Endpoint, ResolverData, ResolverUpdate},
         subchannel, ConnectivityState,
     },
     service::{Request, Response, Service},
 };
 
-use super::{
-    ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, ParsedJsonLbConfig,
-    Pick, PickResult, Picker, Subchannel, SubchannelImpl, SubchannelState, WorkScheduler,
-};
-
+use rand::{self, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-
-use rand;
-use rand::seq::SliceRandom;
+use tokio::time::sleep;
+use tonic::{async_trait, metadata::MetadataMap};
 
 mod tests;
 
@@ -71,7 +66,7 @@ impl LbPolicyBuilder for Builder {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-struct PickFirstConfig {
+pub(super) struct PickFirstConfig {
     shuffle_address_list: Option<bool>,
 }
 
