@@ -44,6 +44,7 @@ pub mod child_manager;
 pub mod pick_first;
 
 mod registry;
+use super::service_config::LbConfig;
 pub use registry::{LbPolicyRegistry, GLOBAL_LB_REGISTRY};
 
 /// A collection of data configured on the channel that is constructing this
@@ -184,29 +185,6 @@ impl Display for SubchannelState {
                 .map(|e| e.to_string())
                 .unwrap_or_default()
         )
-    }
-}
-
-/// A convenience wrapper for an LB policy's configuration object.
-#[derive(Debug)]
-pub struct LbConfig {
-    config: Arc<dyn Any + Send + Sync>,
-}
-
-impl LbConfig {
-    /// Create a new LbConfig wrapper containing the provided config.
-    pub fn new<T: 'static + Send + Sync>(config: T) -> Self {
-        LbConfig {
-            config: Arc::new(config),
-        }
-    }
-
-    /// Convenience method to extract the LB policy's configuration object.
-    fn convert_to<T: 'static + Send + Sync>(&self) -> Result<Arc<T>, Box<dyn Error + Send + Sync>> {
-        match self.config.clone().downcast::<T>() {
-            Ok(c) => Ok(c),
-            Err(e) => Err("failed to downcast to config type".into()),
-        }
     }
 }
 
