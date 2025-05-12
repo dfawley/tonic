@@ -26,6 +26,7 @@ use serde_json::json;
 use tokio::time::sleep;
 use tonic::{async_trait, metadata::MetadataMap};
 
+#[cfg(test)]
 mod tests;
 
 pub static POLICY_NAME: &str = "pick_first";
