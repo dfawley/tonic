@@ -16,6 +16,7 @@
  *
  */
 
+use core::panic;
 use serde::de;
 use std::{
     any::Any,
@@ -408,6 +409,38 @@ impl Display for dyn Subchannel {
         write!(f, "Subchannel for address: {}", self.address())
     }
 }
+
+struct WeakSubchannel(Weak<dyn Subchannel>);
+
+impl WeakSubchannel {
+    pub fn new(subchannel: Arc<dyn Subchannel>) -> Self {
+        WeakSubchannel(Arc::downgrade(&subchannel))
+    }
+
+    pub fn upgrade(&self) -> Option<Arc<dyn Subchannel>> {
+        self.0.upgrade()
+    }
+}
+
+impl Hash for WeakSubchannel {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        if let Some(strong) = self.upgrade() {
+            return strong.dyn_hash(&mut Box::new(state as &mut dyn Hasher));
+        }
+        panic!("WeakSubchannel is not valid");
+    }
+}
+
+impl PartialEq for WeakSubchannel {
+    fn eq(&self, other: &Self) -> bool {
+        if let Some(strong) = self.upgrade() {
+            return strong.dyn_eq(&Box::new(other as &dyn Any));
+        }
+        false
+    }
+}
+
+impl Eq for WeakSubchannel {}
 
 static NEXT_SUBCHANNEL_ID: AtomicI64 = AtomicI64::new(0);
 

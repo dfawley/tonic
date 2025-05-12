@@ -26,7 +26,8 @@
 use std::{collections::HashMap, error::Error, hash::Hash, mem, sync::Arc};
 
 use crate::client::load_balancing::{
-    ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState, WorkScheduler,
+    ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState,
+    WeakSubchannel, WorkScheduler,
 };
 use crate::client::name_resolution::{Address, ResolverUpdate};
 
@@ -37,10 +38,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 
 // An LbPolicy implementation that manages multiple children.
 pub struct ChildManager<T> {
-    // TODO(easwars): This should contain a weak reference to the subchannel,
-    // and we should cleanup keys with no strong references everytime in
-    // resolve_child_controller().
-    subchannels: HashMap<Arc<dyn Subchannel>, Arc<T>>,
+    subchannels: HashMap<WeakSubchannel, Arc<T>>,
     children: HashMap<Arc<T>, Child>,
     sharder: Box<dyn ResolverUpdateSharder<T>>,
     from_children_tx: mpsc::UnboundedSender<Arc<T>>,
@@ -123,12 +121,24 @@ impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> ChildManager<T> {
     ) {
         // Add all created subchannels into the subchannel_child_map.
         for csc in channel_controller.created_subchannels {
-            self.subchannels.insert(csc, child_id.clone());
+            self.subchannels
+                .insert(WeakSubchannel::new(csc), child_id.clone());
         }
         // Update the tracked state if the child produced an update.
         if let Some(state) = channel_controller.picker_update {
             self.children.get_mut(&child_id.clone()).unwrap().state = state;
         };
+        // Prune subchannels created by this child that are no longer
+        // referenced.
+        self.subchannels.retain(|sc, cid| {
+            if cid != &child_id {
+                return true;
+            }
+            if sc.upgrade().is_none() {
+                return false;
+            }
+            true
+        });
     }
 }
 
@@ -190,9 +200,12 @@ impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> LbPolicy for ChildManager
         channel_controller: &mut dyn ChannelController,
     ) {
         // Determine which child created this subchannel.
-        let child_id = self.subchannels.get(&subchannel).unwrap_or_else(|| {
-            panic!("Subchannel not found in child manager: {}", subchannel);
-        });
+        let child_id = self
+            .subchannels
+            .get(&WeakSubchannel::new(subchannel.clone()))
+            .unwrap_or_else(|| {
+                panic!("Subchannel not found in child manager: {}", subchannel);
+            });
         let policy = &mut self.children.get_mut(&child_id.clone()).unwrap().policy;
 
         // Wrap the channel_controller to track the child's operations.
