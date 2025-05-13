@@ -339,8 +339,7 @@ pub trait DynPartialEq {
 
 impl<T: Eq + PartialEq + 'static> DynPartialEq for T {
     fn dyn_eq(&self, other: &&dyn Any) -> bool {
-        let other = other.downcast_ref::<T>();
-        let Some(other) = other else {
+        let Some(other) = other.downcast_ref::<T>() else {
             return false;
         };
         self.eq(other)
@@ -447,7 +446,6 @@ static NEXT_SUBCHANNEL_ID: AtomicI64 = AtomicI64::new(0);
 pub(crate) struct SubchannelImpl {
     id: i64,
     address: Address,
-    dropped: Arc<Notify>,
     pub(crate) isc: Arc<dyn InternalSubchannel>,
 }
 
@@ -460,7 +458,6 @@ impl SubchannelImpl {
         SubchannelImpl {
             id: NEXT_SUBCHANNEL_ID.fetch_add(1, Relaxed),
             address,
-            dropped,
             isc,
         }
     }
@@ -497,13 +494,6 @@ impl Subchannel for SubchannelImpl {
     }
 }
 
-impl Drop for SubchannelImpl {
-    fn drop(&mut self) {
-        println!("dropping subchannel {}", self);
-        self.dropped.notify_one();
-    }
-}
-
 impl Debug for SubchannelImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -530,12 +520,12 @@ impl Picker for QueuingPicker {
     }
 }
 
-pub struct ErroringPicker {
+pub struct Failing {
     pub error: String,
 }
 
-impl Picker for ErroringPicker {
+impl Picker for Failing {
     fn pick(&self, _: &Request) -> PickResult {
-        PickResult::Fail(Status::from_error(self.error.clone().into()))
+        PickResult::Fail(Status::unavailable(self.error.clone()))
     }
 }
