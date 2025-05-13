@@ -446,6 +446,7 @@ static NEXT_SUBCHANNEL_ID: AtomicI64 = AtomicI64::new(0);
 pub(crate) struct SubchannelImpl {
     id: i64,
     address: Address,
+    dropped: Arc<Notify>,
     pub(crate) isc: Arc<dyn InternalSubchannel>,
 }
 
@@ -458,6 +459,7 @@ impl SubchannelImpl {
         SubchannelImpl {
             id: NEXT_SUBCHANNEL_ID.fetch_add(1, Relaxed),
             address,
+            dropped,
             isc,
         }
     }
@@ -491,6 +493,13 @@ impl Subchannel for SubchannelImpl {
     async fn call(&self, method: String, request: Request) -> Response {
         println!("call called for subchannel: {}", self);
         self.isc.call(method, request).await
+    }
+}
+
+impl Drop for SubchannelImpl {
+    fn drop(&mut self) {
+        println!("dropping subchannel {}", self);
+        self.dropped.notify_one();
     }
 }
 
