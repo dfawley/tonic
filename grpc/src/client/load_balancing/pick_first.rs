@@ -10,9 +10,9 @@ use std::{
 use crate::{
     client::{
         load_balancing::{
-            ChannelController, ErroringPicker, LbConfig, LbPolicy, LbPolicyBuilder,
-            LbPolicyOptions, LbState, ParsedJsonLbConfig, Pick, PickResult, Picker, QueuingPicker,
-            Subchannel, SubchannelImpl, SubchannelState, WorkScheduler,
+            ChannelController, Failing, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions,
+            LbState, ParsedJsonLbConfig, Pick, PickResult, Picker, QueuingPicker, Subchannel,
+            SubchannelImpl, SubchannelState, WorkScheduler,
         },
         name_resolution::{Address, Endpoint, ResolverData, ResolverUpdate},
         subchannel, ConnectivityState,
@@ -331,7 +331,7 @@ impl PickFirstPolicy {
                         );
                         channel_controller.update_picker(LbState {
                             connectivity_state: ConnectivityState::TransientFailure,
-                            picker: Arc::new(ErroringPicker { error: err }),
+                            picker: Arc::new(Failing { error: err }),
                         });
                         channel_controller.request_resolution();
                         subchannel_list.connect_to_all_subchannels(channel_controller);
@@ -402,7 +402,7 @@ impl PickFirstPolicy {
         );
         channel_controller.update_picker(LbState {
             connectivity_state: ConnectivityState::TransientFailure,
-            picker: Arc::new(ErroringPicker { error: err }),
+            picker: Arc::new(Failing { error: err }),
         });
         channel_controller.request_resolution();
     }

@@ -2,9 +2,9 @@ use crate::client::{
     load_balancing::{
         pick_first::{self, PickFirstConfig},
         test_utils::{self, FakeChannel, TestEvent, TestNopSubchannelImpl, TestWorkScheduler},
-        ChannelController, ErroringPicker, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions,
-        LbState, ParsedJsonLbConfig, PickResult, QueuingPicker, Subchannel, SubchannelImpl,
-        SubchannelState, WorkScheduler, GLOBAL_LB_REGISTRY,
+        ChannelController, Failing, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState,
+        ParsedJsonLbConfig, PickResult, QueuingPicker, Subchannel, SubchannelImpl, SubchannelState,
+        WorkScheduler, GLOBAL_LB_REGISTRY,
     },
     name_resolution::{Address, Endpoint, ResolverData, ResolverUpdate},
     subchannel::{ConnectivityStateWatcher, InternalSubchannel, InternalSubchannelPool},
@@ -156,6 +156,16 @@ fn send_resolver_update_to_policy(
     assert!(lb_policy.resolver_update(update, None, tcc).is_ok());
 }
 
+// Sends a resolver error to the LB policy with the specified error message.
+fn send_resolver_error_to_policy(
+    lb_policy: &mut dyn LbPolicy,
+    err: String,
+    tcc: &mut dyn ChannelController,
+) {
+    let update = ResolverUpdate::Err(Arc::from(Box::from(err)));
+    assert!(lb_policy.resolver_update(update, None, tcc).is_ok());
+}
+
 // Verifies that the subchannels are created for the given addresses in the
 // given order. Returns the subchannels created.
 async fn verify_subchannel_creation_from_policy(
@@ -278,6 +288,26 @@ async fn verify_ready_picker_from_policy(
     };
 }
 
+async fn verify_transient_failure_picker_from_policy(
+    rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
+    want_error: String,
+) {
+    match rx_events.recv().await.unwrap() {
+        TestEvent::UpdatePicker(update) => {
+            assert!(update.connectivity_state == ConnectivityState::TransientFailure);
+            let req = test_utils::new_request();
+            match update.picker.pick(&req) {
+                PickResult::Fail(status) => {
+                    assert!(status.code() == tonic::Code::Unavailable);
+                    assert!(status.message().contains(&want_error));
+                }
+                _ => panic!("unexpected pick result"),
+            }
+        }
+        _ => panic!("unexpected event"),
+    };
+}
+
 // Verifies that the channel moves to IDLE state.
 async fn verify_channel_moves_to_idle(rx_events: &mut mpsc::UnboundedReceiver<TestEvent>) {
     match rx_events.recv().await.unwrap() {
@@ -288,14 +318,62 @@ async fn verify_channel_moves_to_idle(rx_events: &mut mpsc::UnboundedReceiver<Te
     };
 }
 
+const DEFAULT_TEST_SHORT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
+async fn verify_no_activity_from_policy(rx_events: &mut mpsc::UnboundedReceiver<TestEvent>) {
+    tokio::select! {
+        _ = tokio::time::sleep(DEFAULT_TEST_SHORT_TIMEOUT) => {}
+        event = rx_events.recv() => {
+            panic!("unexpected test event");
+        }
+    }
+}
+
+#[tokio::test]
+async fn pickfirst_resolver_error_before_a_valid_update() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+    let resolver_error = String::from("resolver error");
+    send_resolver_error_to_policy(lb_policy, resolver_error.clone(), tcc);
+    verify_transient_failure_picker_from_policy(&mut rx_events, resolver_error).await;
+}
+
+#[tokio::test]
+async fn pickfirst_resolver_error_after_a_valid_update_in_ready() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+    let endpoint = create_endpoint_with_n_addresses(2);
+    send_resolver_update_to_policy(lb_policy, endpoint.clone(), tcc);
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
+
+    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+
+    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
+
+    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+
+    let resolver_error = String::from("resolver error");
+    send_resolver_error_to_policy(lb_policy, resolver_error.clone(), tcc);
+    verify_no_activity_from_policy(&mut rx_events).await;
+}
+
 #[tokio::test]
 async fn pickfirst_connects_to_first_address() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
 
-    // Send a resolver update with two addresses, and verify that
-    // subchannels are created for the those addresses.
     let endpoint = create_endpoint_with_n_addresses(2);
     send_resolver_update_to_policy(lb_policy, endpoint.clone(), tcc);
     let subchannels =
