@@ -1,7 +1,7 @@
 use crate::client::{
     load_balancing::{
         pick_first::{self, PickFirstConfig},
-        test_utils::{self, FakeChannel, TestEvent, TestNopSubchannelImpl, TestWorkScheduler},
+        test_utils::{self, FakeChannel, TestEvent, TestWorkScheduler},
         ChannelController, Failing, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState,
         ParsedJsonLbConfig, PickResult, QueuingPicker, Subchannel, SubchannelImpl, SubchannelState,
         WorkScheduler, GLOBAL_LB_REGISTRY,

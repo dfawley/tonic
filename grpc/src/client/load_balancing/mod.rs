@@ -31,7 +31,7 @@ use std::{
     },
 };
 use tokio::sync::{mpsc::Sender, Notify};
-use tonic::{async_trait, metadata::MetadataMap, Status};
+use tonic::{metadata::MetadataMap, Status};
 
 use crate::service::{Request, Response, Service};
 
@@ -363,15 +363,12 @@ impl<T: Eq + PartialEq + 'static> DynPartialEq for T {
 ///
 /// When a Subchannel is dropped, it is disconnected automatically, and no
 /// subsequent state updates will be provided for it to the LB policy.
-#[async_trait]
 pub trait Subchannel: DynHash + DynPartialEq + Any + Send + Sync {
     /// Returns the address of the Subchannel.
     fn address(&self) -> &Address;
 
     /// Notifies the Subchannel to connect.
     fn connect(&self);
-
-    async fn call(&self, method: String, request: Request) -> Response;
 }
 
 impl dyn Subchannel {
@@ -466,7 +463,6 @@ impl PartialEq for SubchannelImpl {
 
 impl Eq for SubchannelImpl {}
 
-#[async_trait]
 impl Subchannel for SubchannelImpl {
     fn address(&self) -> &Address {
         self.isc.address()
@@ -475,11 +471,6 @@ impl Subchannel for SubchannelImpl {
     fn connect(&self) {
         println!("connect called for subchannel: {}", self);
         self.isc.connect(false);
-    }
-
-    async fn call(&self, method: String, request: Request) -> Response {
-        println!("call called for subchannel: {}", self);
-        self.isc.call(method, request).await
     }
 }
 

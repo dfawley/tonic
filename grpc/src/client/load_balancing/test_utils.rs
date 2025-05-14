@@ -4,12 +4,12 @@ use crate::client::{
     subchannel::{ConnectivityStateWatcher, InternalSubchannel},
 };
 use crate::service::{Message, Request, Response, Service};
+use std::hash::{Hash, Hasher};
 use std::{ops::Add, sync::Arc};
 use tokio::{
     sync::{mpsc, Notify},
     task::AbortHandle,
 };
-use tonic::async_trait;
 
 pub(crate) struct EmptyMessage {}
 impl Message for EmptyMessage {}
@@ -18,18 +18,13 @@ pub(crate) fn new_request() -> Request {
         Box::new(EmptyMessage {}) as Box<dyn Message>
     )))
 }
-pub(crate) fn new_response() -> Response {
-    Response::new(Box::pin(tokio_stream::once(Ok(
-        Box::new(EmptyMessage {}) as Box<dyn Message>
-    ))))
-}
 
-pub(crate) struct TestNopSubchannelImpl {
+pub(crate) struct TestSubchannel {
     address: Address,
     tx_connect: mpsc::UnboundedSender<TestEvent>,
 }
 
-impl TestNopSubchannelImpl {
+impl TestSubchannel {
     fn new(address: Address, tx_connect: mpsc::UnboundedSender<TestEvent>) -> Self {
         Self {
             address,
@@ -38,24 +33,30 @@ impl TestNopSubchannelImpl {
     }
 }
 
-impl InternalSubchannel for TestNopSubchannelImpl {
-    fn connect(&self, now: bool) {
+impl Subchannel for TestSubchannel {
+    fn address(&self) -> &Address {
+        &self.address
+    }
+
+    fn connect(&self) {
         self.tx_connect
             .send(TestEvent::Connect(self.address.clone()))
             .unwrap();
     }
-
-    fn register_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>) {}
-
-    fn unregister_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>) {}
 }
 
-#[async_trait]
-impl Service for TestNopSubchannelImpl {
-    async fn call(&self, method: String, request: Request) -> Response {
-        new_response()
+impl Hash for TestSubchannel {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.address.hash(state);
     }
 }
+
+impl PartialEq for TestSubchannel {
+    fn eq(&self, other: &Self) -> bool {
+        self.address == other.address
+    }
+}
+impl Eq for TestSubchannel {}
 
 pub(crate) enum TestEvent {
     NewSubchannel(Address, Arc<dyn Subchannel>),
@@ -73,14 +74,8 @@ impl ChannelController for FakeChannel {
     fn new_subchannel(&mut self, address: &Address) -> Arc<dyn Subchannel> {
         println!("new_subchannel called for address {}", address);
         let notify = Arc::new(Notify::new());
-        let subchannel: Arc<dyn Subchannel> = Arc::new(SubchannelImpl::new(
-            address.clone(),
-            notify.clone(),
-            Arc::new(TestNopSubchannelImpl::new(
-                address.clone(),
-                self.tx_events.clone(),
-            )),
-        ));
+        let subchannel: Arc<dyn Subchannel> =
+            Arc::new(TestSubchannel::new(address.clone(), self.tx_events.clone()));
         self.tx_events
             .send(TestEvent::NewSubchannel(
                 address.clone(),

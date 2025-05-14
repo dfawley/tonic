@@ -1,5 +1,6 @@
 use core::panic;
 use std::{
+    any::Any,
     collections::HashMap,
     error::Error,
     fmt::Display,
@@ -305,7 +306,13 @@ impl ActiveChannel {
                 // TODO: handle picker errors (queue or fail RPC)
                 match result {
                     PickResult::Pick(pr) => {
-                        return pr.subchannel.call(method, request).await;
+                        if let Some(sc) =
+                            (pr.subchannel.as_ref() as &dyn Any).downcast_ref::<SubchannelImpl>()
+                        {
+                            return sc.isc.call(method, request).await;
+                        } else {
+                            panic!("picked subchannel is not an implementation provided by the channel");
+                        }
                     }
                     PickResult::Queue => {
                         // Continue and retry the RPC with the next picker.
