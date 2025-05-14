@@ -26,10 +26,11 @@
 use std::{collections::HashMap, error::Error, hash::Hash, mem, sync::Arc};
 
 use crate::client::load_balancing::{
-    ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState,
-    WeakSubchannel, WorkScheduler,
+    ChannelController, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState, WeakSubchannel,
+    WorkScheduler,
 };
 use crate::client::name_resolution::{Address, ResolverUpdate};
+use crate::client::service_config::LbConfig;
 
 use super::{Subchannel, SubchannelState};
 
