@@ -15,14 +15,15 @@ use crate::{
     client::{
         load_balancing::{ErroringPicker, LbState, QueuingPicker},
         name_resolution::{Address, Endpoint, ResolverData, ResolverUpdate},
+        service_config::LbConfig,
         subchannel, ConnectivityState,
     },
     service::{Request, Response, Service},
 };
 
 use super::{
-    ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, ParsedJsonLbConfig,
-    Pick, PickResult, Picker, Subchannel, SubchannelImpl, SubchannelState, WorkScheduler,
+    ChannelController, LbPolicy, LbPolicyBuilder, LbPolicyOptions, ParsedJsonLbConfig, Pick,
+    PickResult, Picker, Subchannel, SubchannelImpl, SubchannelState, WorkScheduler,
 };
 
 use serde::{Deserialize, Serialize};
