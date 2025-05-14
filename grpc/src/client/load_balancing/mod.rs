@@ -16,6 +16,7 @@
  *
  */
 
+use core::panic;
 use serde::de;
 use std::{
     any::Any,
@@ -30,18 +31,21 @@ use std::{
     },
 };
 use tokio::sync::{mpsc::Sender, Notify};
-use tonic::{async_trait, metadata::MetadataMap, Status};
+use tonic::{metadata::MetadataMap, Status};
 
-use crate::service::{Request, Response};
+use crate::service::{Request, Response, Service};
 
-use crate::client::subchannel::{ConnectivityStateWatcher, InternalSubchannel};
 use crate::client::{
     name_resolution::{Address, ResolverUpdate},
+    subchannel::{ConnectivityStateWatcher, InternalSubchannel},
     ConnectivityState,
 };
 
 pub mod child_manager;
 pub mod pick_first;
+
+#[cfg(test)]
+pub mod test_utils;
 
 mod registry;
 use super::service_config::LbConfig;
@@ -313,8 +317,7 @@ pub trait DynPartialEq {
 
 impl<T: Eq + PartialEq + 'static> DynPartialEq for T {
     fn dyn_eq(&self, other: &&dyn Any) -> bool {
-        let other = other.downcast_ref::<T>();
-        let Some(other) = other else {
+        let Some(other) = other.downcast_ref::<T>() else {
             return false;
         };
         self.eq(other)
@@ -338,15 +341,12 @@ impl<T: Eq + PartialEq + 'static> DynPartialEq for T {
 ///
 /// When a Subchannel is dropped, it is disconnected automatically, and no
 /// subsequent state updates will be provided for it to the LB policy.
-#[async_trait]
 pub trait Subchannel: DynHash + DynPartialEq + Any + Send + Sync {
     /// Returns the address of the Subchannel.
     fn address(&self) -> &Address;
 
     /// Notifies the Subchannel to connect.
     fn connect(&self);
-
-    async fn call(&self, method: String, request: Request) -> Response;
 }
 
 impl dyn Subchannel {
@@ -384,58 +384,71 @@ impl Display for dyn Subchannel {
     }
 }
 
-static NEXT_SUBCHANNEL_ID: AtomicI64 = AtomicI64::new(0);
+struct WeakSubchannel(Weak<dyn Subchannel>);
+
+impl WeakSubchannel {
+    pub fn new(subchannel: Arc<dyn Subchannel>) -> Self {
+        WeakSubchannel(Arc::downgrade(&subchannel))
+    }
+
+    pub fn upgrade(&self) -> Option<Arc<dyn Subchannel>> {
+        self.0.upgrade()
+    }
+}
+
+impl Hash for WeakSubchannel {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        if let Some(strong) = self.upgrade() {
+            return strong.dyn_hash(&mut Box::new(state as &mut dyn Hasher));
+        }
+        panic!("WeakSubchannel is not valid");
+    }
+}
+
+impl PartialEq for WeakSubchannel {
+    fn eq(&self, other: &Self) -> bool {
+        if let Some(strong) = self.upgrade() {
+            return strong.dyn_eq(&Box::new(other as &dyn Any));
+        }
+        false
+    }
+}
+
+impl Eq for WeakSubchannel {}
 
 pub(crate) struct SubchannelImpl {
-    id: i64,
-    address: Address,
     dropped: Arc<Notify>,
-    pub(crate) isc: Arc<dyn InternalSubchannel>,
+    pub(crate) isc: Arc<InternalSubchannel>,
 }
 
 impl SubchannelImpl {
-    pub(super) fn new(
-        address: Address,
-        dropped: Arc<Notify>,
-        isc: Arc<dyn InternalSubchannel>,
-    ) -> Self {
-        SubchannelImpl {
-            id: NEXT_SUBCHANNEL_ID.fetch_add(1, Relaxed),
-            address,
-            dropped,
-            isc,
-        }
+    pub(super) fn new(dropped: Arc<Notify>, isc: Arc<InternalSubchannel>) -> Self {
+        SubchannelImpl { dropped, isc }
     }
 }
 
 impl Hash for SubchannelImpl {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
+        self.isc.address().hash(state);
     }
 }
 
 impl PartialEq for SubchannelImpl {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && self.address == other.address
+        self.isc.address() == other.isc.address()
     }
 }
 
 impl Eq for SubchannelImpl {}
 
-#[async_trait]
 impl Subchannel for SubchannelImpl {
     fn address(&self) -> &Address {
-        &self.address
+        self.isc.address()
     }
 
     fn connect(&self) {
         println!("connect called for subchannel: {}", self);
         self.isc.connect(false);
-    }
-
-    async fn call(&self, method: String, request: Request) -> Response {
-        println!("call called for subchannel: {}", self);
-        self.isc.call(method, request).await
     }
 }
 
@@ -448,17 +461,13 @@ impl Drop for SubchannelImpl {
 
 impl Debug for SubchannelImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Subchannel {{ id: {}, address: {} }}",
-            self.id, self.address
-        )
+        write!(f, "Subchannel {}", self.isc.address())
     }
 }
 
 impl Display for SubchannelImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel {}", self.id)
+        write!(f, "Subchannel {}", self.isc.address())
     }
 }
 
@@ -472,12 +481,12 @@ impl Picker for QueuingPicker {
     }
 }
 
-pub struct ErroringPicker {
+pub struct Failing {
     pub error: String,
 }
 
-impl Picker for ErroringPicker {
+impl Picker for Failing {
     fn pick(&self, _: &Request) -> PickResult {
-        PickResult::Fail(Status::from_error(self.error.clone().into()))
+        PickResult::Fail(Status::unavailable(self.error.clone()))
     }
 }

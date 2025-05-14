@@ -1,5 +1,6 @@
 use core::panic;
 use std::{
+    any::Any,
     collections::HashMap,
     error::Error,
     fmt::Display,
@@ -25,9 +26,6 @@ use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
 
-use super::subchannel::{
-    ConnectivityStateWatcher, InternalSubchannel, InternalSubchannelPool, NopBackoff, SubchannelKey,
-};
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 use super::{
     load_balancing::{
@@ -35,7 +33,10 @@ use super::{
         ParsedJsonLbConfig, PickResult, Picker, Subchannel, SubchannelImpl, SubchannelState,
         WorkScheduler, GLOBAL_LB_REGISTRY,
     },
-    subchannel::InternalSubchannelImpl,
+    subchannel::{
+        ConnectivityStateWatcher, InternalSubchannel, InternalSubchannelPool, NopBackoff,
+        SubchannelKey,
+    },
 };
 use super::{
     name_resolution::{
@@ -227,13 +228,13 @@ impl PersistentChannel {
 }
 
 pub(crate) trait SubchannelPool: Send + Sync {
-    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<dyn InternalSubchannel>>;
+    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<InternalSubchannel>>;
 
     fn register_subchannel(
         &self,
         key: SubchannelKey,
-        subchannel: Arc<dyn InternalSubchannel>,
-    ) -> Arc<dyn InternalSubchannel>;
+        subchannel: Arc<InternalSubchannel>,
+    ) -> Arc<InternalSubchannel>;
 
     fn unregister_subchannel(&self, key: &SubchannelKey);
 }
@@ -305,7 +306,13 @@ impl ActiveChannel {
                 // TODO: handle picker errors (queue or fail RPC)
                 match result {
                     PickResult::Pick(pr) => {
-                        return pr.subchannel.call(method, request).await;
+                        if let Some(sc) =
+                            (pr.subchannel.as_ref() as &dyn Any).downcast_ref::<SubchannelImpl>()
+                        {
+                            return sc.isc.call(method, request).await;
+                        } else {
+                            panic!("picked subchannel is not an implementation provided by the channel");
+                        }
                     }
                     PickResult::Queue => {
                         // Continue and retry the RPC with the next picker.
@@ -378,17 +385,10 @@ impl InternalChannelController {
         }
     }
 
-    fn new_subchannel_with_watcher(
-        &mut self,
-        address: &Address,
-        isc: Arc<dyn InternalSubchannel>,
-    ) -> Arc<dyn Subchannel> {
+    fn new_subchannel_with_watcher(&mut self, isc: Arc<InternalSubchannel>) -> Arc<dyn Subchannel> {
         let drop_notify = Arc::new(Notify::new());
-        let sc: Arc<dyn Subchannel> = Arc::new(SubchannelImpl::new(
-            address.clone(),
-            drop_notify.clone(),
-            isc.clone(),
-        ));
+        let sc: Arc<dyn Subchannel> =
+            Arc::new(SubchannelImpl::new(drop_notify.clone(), isc.clone()));
         let watcher = Arc::new(SubchannelStateWatcher {
             subchannel: Arc::downgrade(&sc),
             wqtx: self.wqtx.clone(),
@@ -410,7 +410,7 @@ impl load_balancing::ChannelController for InternalChannelController {
         match self.subchannel_pool.lookup_subchannel(&key.clone()) {
             Some(isc) => {
                 println!("found subchannel in pool for address: {:?}", &address);
-                self.new_subchannel_with_watcher(address, isc)
+                self.new_subchannel_with_watcher(isc)
             }
             None => {
                 // Create an internal subchannel and register it with the pool.
@@ -424,14 +424,14 @@ impl load_balancing::ChannelController for InternalChannelController {
                     .transport_registry
                     .get_transport(&address.address_type)
                     .unwrap();
-                let isc = InternalSubchannelImpl::new(
+                let isc = InternalSubchannel::new(
                     key.clone(),
                     self.subchannel_pool.clone(),
                     transport,
                     Arc::new(NopBackoff {}),
                 );
                 let isc_in_pool = self.subchannel_pool.register_subchannel(key, isc.clone());
-                self.new_subchannel_with_watcher(address, isc_in_pool)
+                self.new_subchannel_with_watcher(isc_in_pool)
             }
         }
     }

@@ -173,13 +173,7 @@ impl Drop for InternalSubchannelState {
     }
 }
 
-pub(crate) trait InternalSubchannel: Service + Send + Sync {
-    fn connect(&self, now: bool);
-    fn register_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>);
-    fn unregister_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>);
-}
-
-pub(crate) struct InternalSubchannelImpl {
+pub(crate) struct InternalSubchannel {
     key: SubchannelKey,
     pool: Arc<dyn SubchannelPool>,
     transport: Arc<dyn Transport>,
@@ -196,7 +190,7 @@ struct InnerSubchannel {
 }
 
 #[async_trait]
-impl Service for InternalSubchannelImpl {
+impl Service for InternalSubchannel {
     async fn call(&self, method: String, request: Request) -> Response {
         let svc = self.inner.lock().unwrap().state.connected_transport();
         if svc.is_none() {
@@ -207,33 +201,6 @@ impl Service for InternalSubchannelImpl {
 
         let svc = svc.unwrap().clone();
         return svc.clone().call(method, request).await;
-    }
-}
-
-impl InternalSubchannel for InternalSubchannelImpl {
-    /// Begins connecting the subchannel asynchronously.  If now is set, does
-    /// not wait for any pending connection backoff to complete.
-    fn connect(&self, now: bool) {
-        let state = &self.inner.lock().unwrap().state;
-        if let InternalSubchannelState::Idle = state {
-            let _ = self
-                .work_queue_tx
-                .send(SubchannelStateMachineEvent::ConnectionRequested);
-        }
-    }
-
-    fn register_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.watchers.push(watcher.clone());
-        watcher.on_state_change(inner.state.to_subchannel_state());
-    }
-
-    fn unregister_connectivity_state_watcher(&self, watcher: Arc<dyn ConnectivityStateWatcher>) {
-        self.inner
-            .lock()
-            .unwrap()
-            .watchers
-            .retain(|x| !Arc::ptr_eq(x, &watcher));
     }
 }
 
@@ -258,13 +225,13 @@ impl Debug for SubchannelStateMachineEvent {
     }
 }
 
-impl InternalSubchannelImpl {
+impl InternalSubchannel {
     pub(crate) fn new(
         key: SubchannelKey,
         pool: Arc<dyn SubchannelPool>,
         transport: Arc<dyn Transport>,
         backoff: Arc<dyn Backoff>,
-    ) -> Arc<InternalSubchannelImpl> {
+    ) -> Arc<InternalSubchannel> {
         println!("creating new internal subchannel for: {:?}", &key);
         let (tx, mut rx) = mpsc::unbounded_channel::<SubchannelStateMachineEvent>();
         let isc = Arc::new(Self {
@@ -316,6 +283,41 @@ impl InternalSubchannelImpl {
         isc
     }
 
+    pub(crate) fn address(&self) -> &Address {
+        &self.key.address
+    }
+
+    /// Begins connecting the subchannel asynchronously.  If now is set, does
+    /// not wait for any pending connection backoff to complete.
+    pub(crate) fn connect(&self, now: bool) {
+        let state = &self.inner.lock().unwrap().state;
+        if let InternalSubchannelState::Idle = state {
+            let _ = self
+                .work_queue_tx
+                .send(SubchannelStateMachineEvent::ConnectionRequested);
+        }
+    }
+
+    pub(crate) fn register_connectivity_state_watcher(
+        &self,
+        watcher: Arc<dyn ConnectivityStateWatcher>,
+    ) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.watchers.push(watcher.clone());
+        watcher.on_state_change(inner.state.to_subchannel_state());
+    }
+
+    pub(crate) fn unregister_connectivity_state_watcher(
+        &self,
+        watcher: Arc<dyn ConnectivityStateWatcher>,
+    ) {
+        self.inner
+            .lock()
+            .unwrap()
+            .watchers
+            .retain(|x| !Arc::ptr_eq(x, &watcher));
+    }
+
     fn move_to_idle(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.state = InternalSubchannelState::Idle;
@@ -341,7 +343,7 @@ impl InternalSubchannelImpl {
 
         let min_connect_timeout = self.backoff.min_connect_timeout();
         let t = self.transport.clone();
-        let address = self.key.address.address.clone();
+        let address = self.address().address.clone();
         let work_queue_tx = self.work_queue_tx.clone();
         let connect_task = tokio::task::spawn(async move {
             tokio::select! {
@@ -428,7 +430,7 @@ impl InternalSubchannelImpl {
     async fn drain(self) {}
 }
 
-impl Drop for InternalSubchannelImpl {
+impl Drop for InternalSubchannel {
     fn drop(&mut self) {
         println!("dropping internal subchannel {:?}", self.key);
         self.pool.unregister_subchannel(&self.key);
@@ -452,7 +454,7 @@ impl SubchannelKey {
 }
 
 pub(crate) struct InternalSubchannelPool {
-    subchannels: Mutex<BTreeMap<SubchannelKey, Weak<dyn InternalSubchannel>>>,
+    subchannels: Mutex<BTreeMap<SubchannelKey, Weak<InternalSubchannel>>>,
 }
 
 impl InternalSubchannelPool {
@@ -464,7 +466,7 @@ impl InternalSubchannelPool {
 }
 
 impl SubchannelPool for InternalSubchannelPool {
-    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<dyn InternalSubchannel>> {
+    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<InternalSubchannel>> {
         let subchannels = self.subchannels.lock().unwrap();
         println!("looking up subchannel for: {:?}", key);
         if let Some(weak_isc) = subchannels.get(key) {
@@ -483,8 +485,8 @@ impl SubchannelPool for InternalSubchannelPool {
     fn register_subchannel(
         &self,
         key: SubchannelKey,
-        subchannel: Arc<dyn InternalSubchannel>,
-    ) -> Arc<dyn InternalSubchannel> {
+        subchannel: Arc<InternalSubchannel>,
+    ) -> Arc<InternalSubchannel> {
         println!("registering subchannel for: {:?}", key);
         let mut subchannels = self.subchannels.lock().unwrap();
         if let Some(weak_isc) = subchannels.get(&key) {
