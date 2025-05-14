@@ -143,9 +143,7 @@ mod tests {
         let opts = ResolverOptions {
             server_addr: Some("8.8.8.8:53".parse().unwrap()),
         };
-        let default_resolver = build_system_resolver(opts).unwrap();
-
-        let txt = default_resolver.lookup_host_name("google.com").await;
-        assert_eq!(txt.is_err(), true)
+        let default_resolver = build_system_resolver(opts);
+        assert_eq!(default_resolver.is_err(), true)
     }
 }

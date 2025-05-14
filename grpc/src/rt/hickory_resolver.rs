@@ -86,7 +86,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // Don't run on CI as this required internet.
-    async fn test_hickory_txt() {
+    async fn test_txt() {
         let hickory_dns = super::DnsResolver::new(ResolverOptions::default()).unwrap();
 
         let txt = hickory_dns.lookup_txt("google.com").await.unwrap();
@@ -96,7 +96,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // Don't run on CI as this required internet.
-    async fn test_hickory_custom_authority() {
+    async fn test_custom_authority() {
         let opts = ResolverOptions {
             server_addr: Some("8.8.8.8:53".parse().unwrap()),
         };
