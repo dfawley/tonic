@@ -227,18 +227,6 @@ impl PersistentChannel {
     }
 }
 
-pub(crate) trait SubchannelPool: Send + Sync {
-    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<InternalSubchannel>>;
-
-    fn register_subchannel(
-        &self,
-        key: SubchannelKey,
-        subchannel: Arc<InternalSubchannel>,
-    ) -> Arc<InternalSubchannel>;
-
-    fn unregister_subchannel(&self, key: &SubchannelKey);
-}
-
 struct ActiveChannel {
     cur_state: Mutex<ConnectivityState>,
     abort_handle: AbortHandle,
@@ -258,9 +246,7 @@ impl ActiveChannel {
         let connectivity_state = Arc::new(Watcher::new());
         let picker = Arc::new(Watcher::new());
         let mut channel_controller = InternalChannelController::new(
-            target.clone(),
             transport_registry,
-            Arc::new(InternalSubchannelPool::new()),
             resolve_now.clone(),
             tx.clone(),
             picker.clone(),
@@ -354,7 +340,7 @@ impl name_resolution::ChannelController for WorkQueueTx {
 
 pub(super) struct InternalChannelController {
     pub(super) lb: Arc<GracefulSwitchBalancer>, // called and passes mutable parent to it, so must be Arc.
-    subchannel_pool: Arc<dyn SubchannelPool>,
+    subchannel_pool: Arc<InternalSubchannelPool>,
     transport_registry: TransportRegistry,
     resolve_now: Arc<Notify>,
     wqtx: WorkQueueTx,
@@ -364,9 +350,7 @@ pub(super) struct InternalChannelController {
 
 impl InternalChannelController {
     fn new(
-        target: Url,
         transport_registry: TransportRegistry,
-        subchannel_pool: Arc<dyn SubchannelPool>,
         resolve_now: Arc<Notify>,
         wqtx: WorkQueueTx,
         picker: Arc<Watcher<Arc<dyn Picker>>>,
@@ -376,7 +360,7 @@ impl InternalChannelController {
 
         Self {
             lb,
-            subchannel_pool,
+            subchannel_pool: Arc::new(InternalSubchannelPool::new()),
             transport_registry,
             resolve_now,
             wqtx,

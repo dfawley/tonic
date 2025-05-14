@@ -21,7 +21,7 @@ use super::load_balancing::{self, Picker, SubchannelState};
 use super::name_resolution::Address;
 use super::transport::{self, ConnectedTransport, Transport, TransportRegistry};
 use super::ConnectivityState;
-use crate::client::channel::{InternalChannelController, SubchannelPool};
+use crate::client::channel::InternalChannelController;
 use crate::service::{Request, Response, Service};
 
 struct TODO;
@@ -175,7 +175,7 @@ impl Drop for InternalSubchannelState {
 
 pub(crate) struct InternalSubchannel {
     key: SubchannelKey,
-    pool: Arc<dyn SubchannelPool>,
+    pool: Arc<InternalSubchannelPool>,
     transport: Arc<dyn Transport>,
     backoff: Arc<dyn Backoff>,
     work_queue_tx: Arc<mpsc::UnboundedSender<SubchannelStateMachineEvent>>,
@@ -228,7 +228,7 @@ impl Debug for SubchannelStateMachineEvent {
 impl InternalSubchannel {
     pub(crate) fn new(
         key: SubchannelKey,
-        pool: Arc<dyn SubchannelPool>,
+        pool: Arc<InternalSubchannelPool>,
         transport: Arc<dyn Transport>,
         backoff: Arc<dyn Backoff>,
     ) -> Arc<InternalSubchannel> {
@@ -433,9 +433,12 @@ impl InternalSubchannel {
 impl Drop for InternalSubchannel {
     fn drop(&mut self) {
         println!("dropping internal subchannel {:?}", self.key);
+        // TODO(easwars): Move this unregister_subchannel() call to the work
+        // serializer.
         self.pool.unregister_subchannel(&self.key);
     }
 }
+
 pub(crate) trait ConnectivityStateWatcher: Send + Sync {
     fn on_state_change(&self, state: SubchannelState);
 }
@@ -463,10 +466,8 @@ impl InternalSubchannelPool {
             subchannels: Mutex::new(BTreeMap::new()),
         }
     }
-}
 
-impl SubchannelPool for InternalSubchannelPool {
-    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<InternalSubchannel>> {
+    pub(crate) fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<InternalSubchannel>> {
         let subchannels = self.subchannels.lock().unwrap();
         println!("looking up subchannel for: {:?}", key);
         if let Some(weak_isc) = subchannels.get(key) {
@@ -482,7 +483,7 @@ impl SubchannelPool for InternalSubchannelPool {
         None
     }
 
-    fn register_subchannel(
+    pub(crate) fn register_subchannel(
         &self,
         key: SubchannelKey,
         subchannel: Arc<InternalSubchannel>,
@@ -502,7 +503,7 @@ impl SubchannelPool for InternalSubchannelPool {
         subchannel
     }
 
-    fn unregister_subchannel(&self, key: &SubchannelKey) {
+    pub(crate) fn unregister_subchannel(&self, key: &SubchannelKey) {
         let mut subchannels = self.subchannels.lock().unwrap();
         if let Some(weak_isc) = subchannels.get(key) {
             if let Some(isc) = weak_isc.upgrade() {
