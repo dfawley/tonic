@@ -442,34 +442,25 @@ impl PartialEq for WeakSubchannel {
 impl Eq for WeakSubchannel {}
 
 pub(crate) struct SubchannelImpl {
-    address: Address,
     dropped: Arc<Notify>,
     pub(crate) isc: Arc<InternalSubchannel>,
 }
 
 impl SubchannelImpl {
-    pub(super) fn new(
-        address: Address,
-        dropped: Arc<Notify>,
-        isc: Arc<InternalSubchannel>,
-    ) -> Self {
-        SubchannelImpl {
-            address,
-            dropped,
-            isc,
-        }
+    pub(super) fn new(dropped: Arc<Notify>, isc: Arc<InternalSubchannel>) -> Self {
+        SubchannelImpl { dropped, isc }
     }
 }
 
 impl Hash for SubchannelImpl {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.address.hash(state);
+        self.isc.address().hash(state);
     }
 }
 
 impl PartialEq for SubchannelImpl {
     fn eq(&self, other: &Self) -> bool {
-        self.address == other.address
+        self.isc.address() == other.isc.address()
     }
 }
 
@@ -478,7 +469,7 @@ impl Eq for SubchannelImpl {}
 #[async_trait]
 impl Subchannel for SubchannelImpl {
     fn address(&self) -> &Address {
-        &self.address
+        self.isc.address()
     }
 
     fn connect(&self) {
@@ -501,13 +492,13 @@ impl Drop for SubchannelImpl {
 
 impl Debug for SubchannelImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel {}", self.address)
+        write!(f, "Subchannel {}", self.isc.address())
     }
 }
 
 impl Display for SubchannelImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel {}", self.address)
+        write!(f, "Subchannel {}", self.isc.address())
     }
 }
 

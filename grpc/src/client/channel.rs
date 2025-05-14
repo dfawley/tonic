@@ -378,17 +378,10 @@ impl InternalChannelController {
         }
     }
 
-    fn new_subchannel_with_watcher(
-        &mut self,
-        address: &Address,
-        isc: Arc<InternalSubchannel>,
-    ) -> Arc<dyn Subchannel> {
+    fn new_subchannel_with_watcher(&mut self, isc: Arc<InternalSubchannel>) -> Arc<dyn Subchannel> {
         let drop_notify = Arc::new(Notify::new());
-        let sc: Arc<dyn Subchannel> = Arc::new(SubchannelImpl::new(
-            address.clone(),
-            drop_notify.clone(),
-            isc.clone(),
-        ));
+        let sc: Arc<dyn Subchannel> =
+            Arc::new(SubchannelImpl::new(drop_notify.clone(), isc.clone()));
         let watcher = Arc::new(SubchannelStateWatcher {
             subchannel: Arc::downgrade(&sc),
             wqtx: self.wqtx.clone(),
@@ -410,7 +403,7 @@ impl load_balancing::ChannelController for InternalChannelController {
         match self.subchannel_pool.lookup_subchannel(&key.clone()) {
             Some(isc) => {
                 println!("found subchannel in pool for address: {:?}", &address);
-                self.new_subchannel_with_watcher(address, isc)
+                self.new_subchannel_with_watcher(isc)
             }
             None => {
                 // Create an internal subchannel and register it with the pool.
@@ -431,7 +424,7 @@ impl load_balancing::ChannelController for InternalChannelController {
                     Arc::new(NopBackoff {}),
                 );
                 let isc_in_pool = self.subchannel_pool.register_subchannel(key, isc.clone());
-                self.new_subchannel_with_watcher(address, isc_in_pool)
+                self.new_subchannel_with_watcher(isc_in_pool)
             }
         }
     }
