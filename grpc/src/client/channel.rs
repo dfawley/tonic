@@ -340,7 +340,7 @@ impl name_resolution::ChannelController for WorkQueueTx {
 
 pub(super) struct InternalChannelController {
     pub(super) lb: Arc<GracefulSwitchBalancer>, // called and passes mutable parent to it, so must be Arc.
-    subchannel_pool: Arc<InternalSubchannelPool>,
+    pub(super) subchannel_pool: InternalSubchannelPool,
     transport_registry: TransportRegistry,
     resolve_now: Arc<Notify>,
     wqtx: WorkQueueTx,
@@ -360,7 +360,7 @@ impl InternalChannelController {
 
         Self {
             lb,
-            subchannel_pool: Arc::new(InternalSubchannelPool::new()),
+            subchannel_pool: InternalSubchannelPool::new(),
             transport_registry,
             resolve_now,
             wqtx,
@@ -410,7 +410,7 @@ impl load_balancing::ChannelController for InternalChannelController {
                     .unwrap();
                 let isc = InternalSubchannel::new(
                     key.clone(),
-                    self.subchannel_pool.clone(),
+                    self.wqtx.clone(),
                     transport,
                     Arc::new(NopBackoff {}),
                 );

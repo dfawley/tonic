@@ -175,10 +175,10 @@ impl Drop for InternalSubchannelState {
 
 pub(crate) struct InternalSubchannel {
     key: SubchannelKey,
-    pool: Arc<InternalSubchannelPool>,
+    work_scheduler: WorkQueueTx,
     transport: Arc<dyn Transport>,
     backoff: Arc<dyn Backoff>,
-    work_queue_tx: Arc<mpsc::UnboundedSender<SubchannelStateMachineEvent>>,
+    state_machine_event_sender: mpsc::UnboundedSender<SubchannelStateMachineEvent>,
     inner: Arc<Mutex<InnerSubchannel>>,
 }
 
@@ -226,9 +226,9 @@ impl Debug for SubchannelStateMachineEvent {
 }
 
 impl InternalSubchannel {
-    pub(crate) fn new(
+    pub(super) fn new(
         key: SubchannelKey,
-        pool: Arc<InternalSubchannelPool>,
+        work_scheduler: WorkQueueTx,
         transport: Arc<dyn Transport>,
         backoff: Arc<dyn Backoff>,
     ) -> Arc<InternalSubchannel> {
@@ -236,10 +236,10 @@ impl InternalSubchannel {
         let (tx, mut rx) = mpsc::unbounded_channel::<SubchannelStateMachineEvent>();
         let isc = Arc::new(Self {
             key: key.clone(),
-            pool,
+            work_scheduler,
             transport,
             backoff: backoff.clone(),
-            work_queue_tx: Arc::new(tx.clone()),
+            state_machine_event_sender: tx,
             inner: Arc::new(Mutex::new(InnerSubchannel {
                 state: InternalSubchannelState::Idle,
                 watchers: Vec::new(),
@@ -293,7 +293,7 @@ impl InternalSubchannel {
         let state = &self.inner.lock().unwrap().state;
         if let InternalSubchannelState::Idle = state {
             let _ = self
-                .work_queue_tx
+                .state_machine_event_sender
                 .send(SubchannelStateMachineEvent::ConnectionRequested);
         }
     }
@@ -344,7 +344,7 @@ impl InternalSubchannel {
         let min_connect_timeout = self.backoff.min_connect_timeout();
         let t = self.transport.clone();
         let address = self.address().address.clone();
-        let work_queue_tx = self.work_queue_tx.clone();
+        let work_queue_tx = self.state_machine_event_sender.clone();
         let connect_task = tokio::task::spawn(async move {
             tokio::select! {
                 _ = tokio::time::sleep(min_connect_timeout) => {
@@ -381,7 +381,7 @@ impl InternalSubchannel {
             });
         }
 
-        let work_queue_tx = self.work_queue_tx.clone();
+        let work_queue_tx = self.state_machine_event_sender.clone();
         let disconnect_task = tokio::task::spawn(async move {
             // TODO(easwars): Does it make sense for disconnected() to return an
             // error string containing information about why the connection
@@ -413,7 +413,7 @@ impl InternalSubchannel {
         }
 
         let backoff_interval = self.backoff.backoff_until();
-        let work_queue_tx = self.work_queue_tx.clone();
+        let work_queue_tx = self.state_machine_event_sender.clone();
         let backoff_task = tokio::task::spawn(async move {
             tokio::time::sleep_until(backoff_interval).await;
             let _ = work_queue_tx.send(SubchannelStateMachineEvent::BackoffExpired);
@@ -433,9 +433,12 @@ impl InternalSubchannel {
 impl Drop for InternalSubchannel {
     fn drop(&mut self) {
         println!("dropping internal subchannel {:?}", self.key);
-        // TODO(easwars): Move this unregister_subchannel() call to the work
-        // serializer.
-        self.pool.unregister_subchannel(&self.key);
+        let key = self.key.clone();
+        let _ = self
+            .work_scheduler
+            .send(Box::new(move |c: &mut InternalChannelController| {
+                c.subchannel_pool.unregister_subchannel(&key);
+            }));
     }
 }
 
