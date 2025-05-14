@@ -33,11 +33,11 @@ use std::{
 use tokio::sync::{mpsc::Sender, Notify};
 use tonic::{async_trait, metadata::MetadataMap, Status};
 
-use crate::service::{Request, Response};
+use crate::service::{Request, Response, Service};
 
-use crate::client::subchannel::{ConnectivityStateWatcher, InternalSubchannel};
 use crate::client::{
     name_resolution::{Address, ResolverUpdate},
+    subchannel::{ConnectivityStateWatcher, InternalSubchannel},
     ConnectivityState,
 };
 
@@ -441,23 +441,19 @@ impl PartialEq for WeakSubchannel {
 
 impl Eq for WeakSubchannel {}
 
-static NEXT_SUBCHANNEL_ID: AtomicI64 = AtomicI64::new(0);
-
 pub(crate) struct SubchannelImpl {
-    id: i64,
     address: Address,
     dropped: Arc<Notify>,
-    pub(crate) isc: Arc<dyn InternalSubchannel>,
+    pub(crate) isc: Arc<InternalSubchannel>,
 }
 
 impl SubchannelImpl {
     pub(super) fn new(
         address: Address,
         dropped: Arc<Notify>,
-        isc: Arc<dyn InternalSubchannel>,
+        isc: Arc<InternalSubchannel>,
     ) -> Self {
         SubchannelImpl {
-            id: NEXT_SUBCHANNEL_ID.fetch_add(1, Relaxed),
             address,
             dropped,
             isc,
@@ -467,13 +463,13 @@ impl SubchannelImpl {
 
 impl Hash for SubchannelImpl {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
+        self.address.hash(state);
     }
 }
 
 impl PartialEq for SubchannelImpl {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && self.address == other.address
+        self.address == other.address
     }
 }
 
@@ -505,17 +501,13 @@ impl Drop for SubchannelImpl {
 
 impl Debug for SubchannelImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Subchannel {{ id: {}, address: {} }}",
-            self.id, self.address
-        )
+        write!(f, "Subchannel {}", self.address)
     }
 }
 
 impl Display for SubchannelImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel {}", self.id)
+        write!(f, "Subchannel {}", self.address)
     }
 }
 

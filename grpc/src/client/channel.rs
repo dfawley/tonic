@@ -25,9 +25,6 @@ use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
 
-use super::subchannel::{
-    ConnectivityStateWatcher, InternalSubchannel, InternalSubchannelPool, NopBackoff, SubchannelKey,
-};
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 use super::{
     load_balancing::{
@@ -35,7 +32,10 @@ use super::{
         ParsedJsonLbConfig, PickResult, Picker, Subchannel, SubchannelImpl, SubchannelState,
         WorkScheduler, GLOBAL_LB_REGISTRY,
     },
-    subchannel::InternalSubchannelImpl,
+    subchannel::{
+        ConnectivityStateWatcher, InternalSubchannel, InternalSubchannelPool, NopBackoff,
+        SubchannelKey,
+    },
 };
 use super::{
     name_resolution::{
@@ -227,13 +227,13 @@ impl PersistentChannel {
 }
 
 pub(crate) trait SubchannelPool: Send + Sync {
-    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<dyn InternalSubchannel>>;
+    fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<InternalSubchannel>>;
 
     fn register_subchannel(
         &self,
         key: SubchannelKey,
-        subchannel: Arc<dyn InternalSubchannel>,
-    ) -> Arc<dyn InternalSubchannel>;
+        subchannel: Arc<InternalSubchannel>,
+    ) -> Arc<InternalSubchannel>;
 
     fn unregister_subchannel(&self, key: &SubchannelKey);
 }
@@ -381,7 +381,7 @@ impl InternalChannelController {
     fn new_subchannel_with_watcher(
         &mut self,
         address: &Address,
-        isc: Arc<dyn InternalSubchannel>,
+        isc: Arc<InternalSubchannel>,
     ) -> Arc<dyn Subchannel> {
         let drop_notify = Arc::new(Notify::new());
         let sc: Arc<dyn Subchannel> = Arc::new(SubchannelImpl::new(
@@ -424,7 +424,7 @@ impl load_balancing::ChannelController for InternalChannelController {
                     .transport_registry
                     .get_transport(&address.address_type)
                     .unwrap();
-                let isc = InternalSubchannelImpl::new(
+                let isc = InternalSubchannel::new(
                     key.clone(),
                     self.subchannel_pool.clone(),
                     transport,
