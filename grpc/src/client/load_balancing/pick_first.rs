@@ -44,6 +44,7 @@ impl LbPolicyBuilder for Builder {
             last_resolver_error: None,
             last_connection_error: None,
             connectivity_state: ConnectivityState::Connecting,
+            sent_connecting: false,
             num_transient_failures: 0,
         })
     }
@@ -99,6 +100,7 @@ struct PickFirstPolicy {
     last_resolver_error: Option<Arc<dyn Error + Send + Sync>>, // Most recent error from the name resolver.
     last_connection_error: Option<Arc<dyn Error + Send + Sync>>, // Most recent error from any subchannel.
     connectivity_state: ConnectivityState, // Overall connectivity state of the channel.
+    sent_connecting: bool, // Whether we have sent a CONNECTING state to the channel.
     num_transient_failures: usize, // Number of transient failures after the end of the first pass.
 }
 
@@ -307,9 +309,11 @@ impl PickFirstPolicy {
                 }
             }
             ConnectivityState::Connecting => {
-                // TODO(easwars): Prevent duplicate picker updates when the
-                // policy is in CONNECTING. Note that the policy starts out in
-                // CONNECTING.
+                // If we are already in CONNECTING, ignore this update.
+                if self.connectivity_state == ConnectivityState::Connecting && self.sent_connecting
+                {
+                    return;
+                }
                 if self.connectivity_state != ConnectivityState::TransientFailure {
                     self.move_to_connecting(channel_controller);
                 }
@@ -369,6 +373,7 @@ impl PickFirstPolicy {
             }),
         });
         channel_controller.request_resolution();
+        self.sent_connecting = false;
     }
 
     fn move_to_connecting(&mut self, channel_controller: &mut dyn ChannelController) {
@@ -377,6 +382,7 @@ impl PickFirstPolicy {
             connectivity_state: ConnectivityState::Connecting,
             picker: Arc::new(QueuingPicker {}),
         });
+        self.sent_connecting = true;
     }
 
     fn move_to_ready(
@@ -393,6 +399,7 @@ impl PickFirstPolicy {
             connectivity_state: ConnectivityState::Ready,
             picker: Arc::new(OneSubchannelPicker { sc: sc.clone() }),
         });
+        self.sent_connecting = false;
     }
 
     fn move_to_transient_failure(&mut self, channel_controller: &mut dyn ChannelController) {
@@ -406,6 +413,7 @@ impl PickFirstPolicy {
             picker: Arc::new(Failing { error: err }),
         });
         channel_controller.request_resolution();
+        self.sent_connecting = false;
     }
 }
 
