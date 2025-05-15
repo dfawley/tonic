@@ -23,7 +23,7 @@
 //! a service.
 use core::fmt;
 
-use super::service_config::{self, Config};
+use super::service_config::{self, ServiceConfig};
 use crate::{attributes::Attributes, rt};
 use std::{
     error::Error,
@@ -73,7 +73,7 @@ impl Url {
         self.url.host_str()
     }
 
-    pub fn path(&self) -> &strl {
+    pub fn path(&self) -> &str {
         self.url.path()
     }
 }
@@ -111,7 +111,7 @@ pub trait Helper: Send + Sync {
     fn schedule_work(&self);
     /// Parses the provided JSON service config and returns an instance of a
     /// ParsedServiceConfig.
-    fn parse_service_config(&self, config: &str) -> Result<service_config::Config, Box<dyn Error>>;
+    fn parse_service_config(&self, config: &str) -> Result<ServiceConfig, String>;
 }
 
 /// A collection of data configured on the channel that is constructing this
@@ -174,7 +174,7 @@ pub struct ResolverUpdate {
     /// service_config contains the result from parsing the latest service
     /// config.  If it is None, it indicates no service config is present or
     /// the resolver does not provide service configs.
-    pub service_config: Result<Option<ParsedServiceConfig>, String>,
+    pub service_config: Result<Option<ServiceConfig>, String>,
 
     /// An optional human-readable note describing context about the
     /// resolution, to be passed along to the LB policy for inclusion in

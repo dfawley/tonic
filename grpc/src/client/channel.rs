@@ -25,7 +25,7 @@ use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
 
-use super::service_config;
+use super::service_config::{self, ServiceConfig};
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 use super::{
     load_balancing::{
@@ -348,15 +348,9 @@ impl name_resolution::Helper for ResolverHelper {
         let _ = self.wqtx.send(WorkQueueItem::ScheduleResolver);
     }
 
-    fn parse_service_config(
-        &self,
-        config: &str,
-    ) -> Result<super::service_config::Config, Box<dyn Error>> {
+    fn parse_service_config(&self, config: &str) -> Result<ServiceConfig, String> {
         // Needs to call gsb's policy builder
-        Ok(service_config::Config {
-            // TODO(arjan-bal): Implement LB config parsing.
-            data: service_config::ConfigData { lb_config: None },
-        })
+        Ok(ServiceConfig)
     }
 }
 
@@ -387,29 +381,6 @@ impl InternalChannelController {
             picker,
             connectivity_state,
         }
-    }
-}
-
-impl load_balancing::ChannelController for InternalChannelController {
-    fn new_subchannel(&mut self, address: &Address) -> Arc<dyn Subchannel> {
-        let key = SubchannelKey::new(address.clone());
-        let isc = self.subchannel_pool.get_or_create_subchannel(&key);
-
-        let drop_notify = Arc::new(Notify::new());
-        let sc: Arc<dyn Subchannel> =
-            Arc::new(SubchannelImpl::new(drop_notify.clone(), isc.clone()));
-        let watcher = Arc::new(SubchannelStateWatcher {
-            subchannel: Arc::downgrade(&sc),
-            wqtx: self.wqtx.clone(),
-        });
-        isc.register_connectivity_state_watcher(watcher.clone());
-
-        // This task will exit when the subchannel is dropped.
-        tokio::task::spawn(async move {
-            drop_notify.notified().await;
-            isc.unregister_connectivity_state_watcher(watcher);
-        });
-        sc
     }
 }
 
