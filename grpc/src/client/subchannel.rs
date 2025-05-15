@@ -20,8 +20,6 @@ use tokio::{
 };
 use tonic::async_trait;
 
-struct TODO;
-
 type SharedService = Arc<dyn ConnectedTransport>;
 
 pub trait Backoff: Send + Sync {
