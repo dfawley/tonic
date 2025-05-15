@@ -20,12 +20,12 @@ use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
 use crate::attributes::Attributes;
-use crate::client::service_config::ServiceConfig;
 use crate::client::ConnectivityState;
 use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
 
+use super::service_config;
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 use super::{
     load_balancing::{
@@ -253,20 +253,35 @@ impl ActiveChannel {
             connectivity_state.clone(),
         );
 
-        let jh = tokio::task::spawn(async move {
-            while let Some(w) = rx.recv().await {
-                w(&mut channel_controller);
-            }
+        let resolver_helper = Box::new(tx.clone());
+
+        // TODO(arjan-bal): Return error here instead of panicking.
+        let rb = GLOBAL_RESOLVER_REGISTRY.get(target.scheme()).unwrap();
+        let authority = target.authority().to_string();
+        let authority = if authority.is_empty() {
+            rb.default_authority(&target.into())
+        } else {
+            authority
+        };
+        let helper = Arc::new(ResolverHelper {
+            lb: channel_controller.lb.clone(),
+            wqtx: tx,
         });
+        let resolver_opts = name_resolution::ResolverOptions {
+            authority,
+            helper,
+            runtime: todo!(),
+        };
+        let mut resolver = rb.build(target.into(), resolver_opts);
 
-        tokio::task::spawn(async move {
-            let resolver_helper = Box::new(tx.clone());
-            let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
-            let mut resolver = rb
-                .unwrap()
-                .build(target, resolve_now, ResolverOptions::default());
-
-            resolver.run(resolver_helper).await;
+        let jh = tokio::task::spawn(async move {
+            let mut resolver = resolver;
+            while let Some(w) = rx.recv().await {
+                match w {
+                    WorkQueueItem::Closure(func) => func(&mut channel_controller),
+                    WorkQueueItem::ScheduleResolver => resolver.work(&mut channel_controller),
+                }
+            }
         });
 
         Arc::new(Self {
@@ -321,20 +336,27 @@ impl Drop for ActiveChannel {
     }
 }
 
+struct ResolverHelper {
+    lb: Arc<GracefulSwitchBalancer>,
+    wqtx: WorkQueueTx,
+}
+
 pub(super) type WorkQueueTx = mpsc::UnboundedSender<WorkQueueItem>;
 
-#[async_trait]
-impl name_resolution::ChannelController for WorkQueueTx {
-    fn parse_config(&self, config: &str) -> Result<ServiceConfig, Box<dyn Error + Send + Sync>> {
-        Ok(ServiceConfig {})
-        // Needs to call gsb's policy builder
+impl name_resolution::Helper for ResolverHelper {
+    fn schedule_work(&self) {
+        let _ = self.wqtx.send(WorkQueueItem::ScheduleResolver);
     }
-    async fn update(&self, state: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(Box::new(|c: &mut InternalChannelController| {
-            let _ = tx.send(c.lb.clone().handle_resolver_update(state, c));
-        }))?;
-        rx.await?
+
+    fn parse_service_config(
+        &self,
+        config: &str,
+    ) -> Result<super::service_config::Config, Box<dyn Error>> {
+        // Needs to call gsb's policy builder
+        Ok(service_config::Config {
+            // TODO(arjan-bal): Implement LB config parsing.
+            data: service_config::ConfigData { lb_config: None },
+        })
     }
 }
 
@@ -389,6 +411,47 @@ impl load_balancing::ChannelController for InternalChannelController {
         });
         sc
     }
+}
+
+impl name_resolution::ChannelController for InternalChannelController {
+    fn update(&mut self, update: ResolverUpdate) -> Result<(), String> {
+        let lb = self.lb.clone();
+        lb.handle_resolver_update(update, self)
+            .map_err(|err| err.to_string())
+    }
+}
+
+impl load_balancing::ChannelController for InternalChannelController {
+    fn new_subchannel(&mut self, address: &Address) -> Arc<dyn Subchannel> {
+        let key = SubchannelKey::new(address.clone());
+        match self.subchannel_pool.lookup_subchannel(&key.clone()) {
+            Some(isc) => {
+                println!("found subchannel in pool for address: {:?}", &address);
+                self.new_subchannel_with_watcher(address, isc)
+            }
+            None => {
+                // Create an internal subchannel and register it with the pool.
+                //
+                // Note that the subchannel returned from the pool could be
+                // different to what we passed in. This can happen when someone
+                // races with us and registered one before us. This though, is
+                // not possible with a subchannel pool that is not shared across
+                // channels, because calls to new_subchannel() are serialized.
+                let transport = self
+                    .transport_registry
+                    .get_transport(&address.network_type)
+                    .unwrap();
+                let isc = InternalSubchannelImpl::new(
+                    key.clone(),
+                    self.subchannel_pool.clone(),
+                    transport,
+                    Arc::new(NopBackoff {}),
+                );
+                let isc_in_pool = self.subchannel_pool.register_subchannel(key, isc.clone());
+                self.new_subchannel_with_watcher(address, isc_in_pool)
+            }
+        }
+    }
 
     fn update_picker(&mut self, update: LbState) {
         println!(
@@ -418,9 +481,8 @@ impl WorkScheduler for GracefulSwitchBalancer {
             // Already had a pending call scheduled.
             return;
         }
-        let _ = self
-            .work_scheduler
-            .send(Box::new(|c: &mut InternalChannelController| {
+        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+            |c: &mut InternalChannelController| {
                 *c.lb.pending.lock().unwrap() = false;
                 c.lb.clone()
                     .policy
@@ -429,7 +491,8 @@ impl WorkScheduler for GracefulSwitchBalancer {
                     .as_mut()
                     .unwrap()
                     .work(c);
-            }));
+            },
+        )));
     }
 }
 
@@ -448,15 +511,10 @@ impl GracefulSwitchBalancer {
         update: ResolverUpdate,
         controller: &mut InternalChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let policy_name = pick_first::POLICY_NAME;
-        if let ResolverUpdate::Data(ref d) = update {
-            if d.service_config.is_some() {
-                return Err("can't do service configs yet".into());
-            }
-        } else {
-            todo!("unhandled update type");
+        if update.service_config.as_ref().is_ok_and(|sc| sc.is_some()) {
+            return Err("can't do service configs yet".into());
         }
-
+        let policy_name = pick_first::POLICY_NAME;
         let mut p = self.policy.lock().unwrap();
         if p.is_none() {
             let builder = GLOBAL_LB_REGISTRY.get_policy(policy_name).unwrap();
@@ -498,7 +556,12 @@ impl GracefulSwitchBalancer {
     }
 }
 
-pub(super) type WorkQueueItem = Box<dyn FnOnce(&mut InternalChannelController) + Send + Sync>;
+pub(super) enum WorkQueueItem {
+    // Execute the closure.
+    Closure(Box<dyn FnOnce(&mut InternalChannelController) + Send + Sync>),
+    // Call the resolver to do work.
+    ScheduleResolver,
+}
 
 pub struct TODO;
 
@@ -565,9 +628,8 @@ impl ConnectivityStateWatcher for SubchannelStateWatcher {
         // was dropped but its state watcher is still pending unregistration;
         // such updates are inconsequential.
         if let Some(sc) = self.subchannel.upgrade() {
-            let _ = self
-                .wqtx
-                .send(Box::new(move |c: &mut InternalChannelController| {
+            let _ = self.wqtx.send(WorkQueueItem::Closure(Box::new(
+                move |c: &mut InternalChannelController| {
                     c.lb.clone()
                         .policy
                         .lock()
@@ -575,7 +637,8 @@ impl ConnectivityStateWatcher for SubchannelStateWatcher {
                         .as_mut()
                         .unwrap()
                         .subchannel_update(sc, &state, c);
-                }));
+                },
+            )));
         }
     }
 }
