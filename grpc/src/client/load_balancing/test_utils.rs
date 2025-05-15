@@ -1,7 +1,7 @@
 use crate::client::{
     load_balancing::{ChannelController, LbState, Subchannel, SubchannelImpl, WorkScheduler},
     name_resolution::Address,
-    subchannel::{ConnectivityStateWatcher, InternalSubchannel},
+    subchannel::InternalSubchannel,
 };
 use crate::service::{Message, Request, Response, Service};
 use std::hash::{Hash, Hasher};

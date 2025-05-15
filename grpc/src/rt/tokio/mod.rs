@@ -102,9 +102,8 @@ mod tests {
             .get_dns_resolver(ResolverOptions::default())
             .unwrap();
         let ips = dns.lookup_host_name("localhost").await.unwrap();
-        assert_eq!(
-            ips.len() > 0,
-            true,
+        assert!(
+            !ips.is_empty(),
             "Expect localhost to resolve to more than 1 IPs."
         )
     }
@@ -114,7 +113,7 @@ mod tests {
         let default_resolver = TokioDefaultDnsResolver::new(ResolverOptions::default()).unwrap();
 
         let txt = default_resolver.lookup_txt("google.com").await;
-        assert_eq!(txt.is_err(), true)
+        assert!(txt.is_err())
     }
 
     #[tokio::test]
@@ -123,6 +122,6 @@ mod tests {
             server_addr: Some("8.8.8.8:53".parse().unwrap()),
         };
         let default_resolver = TokioDefaultDnsResolver::new(opts);
-        assert_eq!(default_resolver.is_err(), true)
+        assert!(default_resolver.is_err())
     }
 }

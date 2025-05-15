@@ -1,30 +1,27 @@
-use core::panic;
-use std::collections::{BTreeMap, HashMap};
-use std::convert::Into;
-use std::fmt::{Debug, Display};
-use std::hash::Hash;
-use std::ops::{Add, Sub};
-use std::sync::{
-    atomic::{AtomicU32, Ordering::Relaxed},
-    Arc, Mutex, Weak,
+use super::{
+    channel::{InternalChannelController, WorkQueueTx},
+    load_balancing::{self, Picker, Subchannel, SubchannelState},
+    name_resolution::Address,
+    transport::{self, ConnectedTransport, Transport, TransportRegistry},
+    ConnectivityState,
 };
-use tokio::io::Join;
-use tokio::time::{Duration, Instant}; // TODO(easwars): Maybe use tokio::time::Instance as it has some useful testing utilities.
-
-use std::error::Error;
-use tokio::sync::{mpsc, watch, Notify};
-use tokio::task::{AbortHandle, JoinHandle};
+use crate::{
+    client::channel::WorkQueueItem,
+    service::{Request, Response, Service},
+};
+use core::panic;
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt::{Debug, Display},
+    sync::{Arc, Mutex, Weak},
+};
+use tokio::{
+    sync::{mpsc, watch, Notify},
+    task::{AbortHandle, JoinHandle},
+    time::{Duration, Instant},
+};
 use tonic::async_trait;
-
-use super::channel::WorkQueueTx;
-use super::load_balancing::{self, Picker, SubchannelState};
-use super::name_resolution::Address;
-use super::transport::{self, ConnectedTransport, Transport, TransportRegistry};
-use super::ConnectivityState;
-use crate::client::channel::{InternalChannelController, WorkQueueItem};
-use crate::service::{Request, Response, Service};
-
-struct TODO;
 
 type SharedService = Arc<dyn ConnectedTransport>;
 
@@ -184,7 +181,7 @@ pub(crate) struct InternalSubchannel {
 
 struct InnerSubchannel {
     state: InternalSubchannelState,
-    watchers: Vec<Arc<dyn ConnectivityStateWatcher>>, // TODO(easwars): Revisit the choice for this data structure.
+    watchers: Vec<Arc<SubchannelStateWatcher>>, // TODO(easwars): Revisit the choice for this data structure.
     backoff_task: Option<JoinHandle<()>>,
     disconnect_task: Option<JoinHandle<()>>,
 }
@@ -298,18 +295,20 @@ impl InternalSubchannel {
         }
     }
 
-    pub(crate) fn register_connectivity_state_watcher(
-        &self,
-        watcher: Arc<dyn ConnectivityStateWatcher>,
-    ) {
+    pub(crate) fn register_connectivity_state_watcher(&self, watcher: Arc<SubchannelStateWatcher>) {
         let mut inner = self.inner.lock().unwrap();
         inner.watchers.push(watcher.clone());
-        watcher.on_state_change(inner.state.to_subchannel_state());
+        let state = inner.state.to_subchannel_state().clone();
+        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+            move |c: &mut InternalChannelController| {
+                watcher.on_state_change(state, c);
+            },
+        )));
     }
 
     pub(crate) fn unregister_connectivity_state_watcher(
         &self,
-        watcher: Arc<dyn ConnectivityStateWatcher>,
+        watcher: Arc<SubchannelStateWatcher>,
     ) {
         self.inner
             .lock()
@@ -318,78 +317,94 @@ impl InternalSubchannel {
             .retain(|x| !Arc::ptr_eq(x, &watcher));
     }
 
-    fn move_to_idle(&self) {
+    fn notify_watchers(&self, state: SubchannelState) {
+        // TODO(easwars): See if there is a way to call all watchers in a single
+        // work serializer task. Currently, that is not possible since we need
+        // to capture a reference to self in the closure, and self may not live
+        // long enough.
         let mut inner = self.inner.lock().unwrap();
         inner.state = InternalSubchannelState::Idle;
         for w in &inner.watchers {
-            w.on_state_change(SubchannelState {
-                connectivity_state: ConnectivityState::Idle,
-                last_connection_error: None,
-            });
+            let state = state.clone();
+            let w = w.clone();
+            let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+                move |c: &mut InternalChannelController| {
+                    w.on_state_change(state, c);
+                },
+            )));
         }
     }
 
-    fn move_to_connecting(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.state = InternalSubchannelState::Connecting(InternalSubchannelConnectingState {
-            abort_handle: None,
+    fn move_to_idle(&self) {
+        self.notify_watchers(SubchannelState {
+            connectivity_state: ConnectivityState::Idle,
+            last_connection_error: None,
         });
-        for w in &inner.watchers {
-            w.on_state_change(SubchannelState {
-                connectivity_state: ConnectivityState::Connecting,
-                last_connection_error: None,
+    }
+
+    fn move_to_connecting(&self) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.state = InternalSubchannelState::Connecting(InternalSubchannelConnectingState {
+                abort_handle: None,
             });
         }
+        self.notify_watchers(SubchannelState {
+            connectivity_state: ConnectivityState::Connecting,
+            last_connection_error: None,
+        });
 
         let min_connect_timeout = self.backoff.min_connect_timeout();
-        let t = self.transport.clone();
+        let transport = self.transport.clone();
         let address = self.address().address.clone();
-        let work_queue_tx = self.state_machine_event_sender.clone();
+        let state_machine_tx = self.state_machine_event_sender.clone();
         let connect_task = tokio::task::spawn(async move {
             tokio::select! {
                 _ = tokio::time::sleep(min_connect_timeout) => {
-                    let _ = work_queue_tx.send(SubchannelStateMachineEvent::ConnectionTimedOut);
+                    let _ = state_machine_tx.send(SubchannelStateMachineEvent::ConnectionTimedOut);
                 }
-                result = t.connect(address.clone()) => {
+                result = transport.connect(address.clone()) => {
                     match result {
                         Ok(s) => {
-                            let _ = work_queue_tx.send(SubchannelStateMachineEvent::ConnectionSucceeded(Arc::from(s)));
+                            let _ = state_machine_tx.send(SubchannelStateMachineEvent::ConnectionSucceeded(Arc::from(s)));
                         }
                         Err(e) => {
-                            let _ = work_queue_tx.send(SubchannelStateMachineEvent::ConnectionFailed(e));
+                            let _ = state_machine_tx.send(SubchannelStateMachineEvent::ConnectionFailed(e));
                         }
                     }
                 },
             }
         });
+        let mut inner = self.inner.lock().unwrap();
         inner.state = InternalSubchannelState::Connecting(InternalSubchannelConnectingState {
             abort_handle: Some(connect_task.abort_handle()),
         });
     }
 
     fn move_to_ready(&self, svc: SharedService) {
-        let mut inner = self.inner.lock().unwrap();
         let svc2 = svc.clone();
-        inner.state = InternalSubchannelState::Ready(InternalSubchannelReadyState {
-            abort_handle: None,
-            svc: svc2.clone(),
-        });
-        for w in &inner.watchers {
-            w.on_state_change(SubchannelState {
-                connectivity_state: ConnectivityState::Ready,
-                last_connection_error: None,
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.state = InternalSubchannelState::Ready(InternalSubchannelReadyState {
+                abort_handle: None,
+                svc: svc2.clone(),
             });
         }
+        self.notify_watchers(SubchannelState {
+            connectivity_state: ConnectivityState::Ready,
+            last_connection_error: None,
+        });
 
-        let work_queue_tx = self.state_machine_event_sender.clone();
+        let state_machine_tx = self.state_machine_event_sender.clone();
         let disconnect_task = tokio::task::spawn(async move {
             // TODO(easwars): Does it make sense for disconnected() to return an
             // error string containing information about why the connection
             // terminated? But what can we do with that error other than logging
             // it, which the transport can do as well?
             svc.disconnected().await;
-            let _ = work_queue_tx.send(SubchannelStateMachineEvent::ConnectionTerminated);
+            let _ = state_machine_tx.send(SubchannelStateMachineEvent::ConnectionTerminated);
         });
+        let mut inner = self.inner.lock().unwrap();
         inner.state = InternalSubchannelState::Ready(InternalSubchannelReadyState {
             abort_handle: Some(disconnect_task.abort_handle()),
             svc: svc2.clone(),
@@ -397,27 +412,29 @@ impl InternalSubchannel {
     }
 
     fn move_to_transient_failure(&self, err: String) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.state =
-            InternalSubchannelState::TransientFailure(InternalSubchannelTransientFailureState {
-                abort_handle: None,
-                error: err.clone(),
-            });
-
-        let arc_err: Arc<dyn Error + Send + Sync> = Arc::from(Box::from(err.clone()));
-        for w in &inner.watchers {
-            w.on_state_change(SubchannelState {
-                connectivity_state: ConnectivityState::TransientFailure,
-                last_connection_error: Some(arc_err.clone()),
-            });
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.state = InternalSubchannelState::TransientFailure(
+                InternalSubchannelTransientFailureState {
+                    abort_handle: None,
+                    error: err.clone(),
+                },
+            );
         }
 
+        let arc_err: Arc<dyn Error + Send + Sync> = Arc::from(Box::from(err.clone()));
+        self.notify_watchers(SubchannelState {
+            connectivity_state: ConnectivityState::TransientFailure,
+            last_connection_error: Some(arc_err.clone()),
+        });
+
         let backoff_interval = self.backoff.backoff_until();
-        let work_queue_tx = self.state_machine_event_sender.clone();
+        let state_machine_tx = self.state_machine_event_sender.clone();
         let backoff_task = tokio::task::spawn(async move {
             tokio::time::sleep_until(backoff_interval).await;
-            let _ = work_queue_tx.send(SubchannelStateMachineEvent::BackoffExpired);
+            let _ = state_machine_tx.send(SubchannelStateMachineEvent::BackoffExpired);
         });
+        let mut inner = self.inner.lock().unwrap();
         inner.state =
             InternalSubchannelState::TransientFailure(InternalSubchannelTransientFailureState {
                 abort_handle: Some(backoff_task.abort_handle()),
@@ -440,10 +457,6 @@ impl Drop for InternalSubchannel {
             },
         )));
     }
-}
-
-pub(crate) trait ConnectivityStateWatcher: Send + Sync {
-    fn on_state_change(&self, state: SubchannelState);
 }
 
 // SubchannelKey uniiquely identifies a subchannel in the pool.
@@ -514,5 +527,33 @@ impl InternalSubchannelPool {
             return;
         }
         panic!("attempt to unregister subchannel for unknown key {:?}", key);
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SubchannelStateWatcher {
+    subchannel: Weak<dyn Subchannel>,
+}
+
+impl SubchannelStateWatcher {
+    pub(crate) fn new(sc: Arc<dyn Subchannel>) -> Self {
+        Self {
+            subchannel: Arc::downgrade(&sc),
+        }
+    }
+
+    fn on_state_change(&self, state: SubchannelState, c: &mut InternalChannelController) {
+        // Ignore internal subchannel state changes if the external subchannel
+        // was dropped but its state watcher is still pending unregistration;
+        // such updates are inconsequential.
+        if let Some(sc) = self.subchannel.upgrade() {
+            c.lb.clone()
+                .policy
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .subchannel_update(sc, &state, c);
+        }
     }
 }

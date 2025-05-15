@@ -34,8 +34,8 @@ use super::{
         WorkScheduler, GLOBAL_LB_REGISTRY,
     },
     subchannel::{
-        ConnectivityStateWatcher, InternalSubchannel, InternalSubchannelPool, NopBackoff,
-        SubchannelKey,
+        InternalSubchannel, InternalSubchannelPool, NopBackoff, SubchannelKey,
+        SubchannelStateWatcher,
     },
 };
 use super::{
@@ -346,7 +346,7 @@ impl name_resolution::WorkScheduler for ResolverWorkScheduler {
     }
 }
 
-pub(super) struct InternalChannelController {
+pub(crate) struct InternalChannelController {
     pub(super) lb: Arc<GracefulSwitchBalancer>, // called and passes mutable parent to it, so must be Arc.
     pub(super) subchannel_pool: InternalSubchannelPool,
     resolve_now: Arc<Notify>,
@@ -396,10 +396,7 @@ impl load_balancing::ChannelController for InternalChannelController {
         let drop_notify = Arc::new(Notify::new());
         let sc: Arc<dyn Subchannel> =
             Arc::new(SubchannelImpl::new(drop_notify.clone(), isc.clone()));
-        let watcher = Arc::new(SubchannelStateWatcher {
-            subchannel: Arc::downgrade(&sc),
-            wqtx: self.wqtx.clone(),
-        });
+        let watcher = Arc::new(SubchannelStateWatcher::new(sc.clone()));
         isc.register_connectivity_state_watcher(watcher.clone());
 
         // This task will exit when the subchannel is dropped.
@@ -426,7 +423,7 @@ impl load_balancing::ChannelController for InternalChannelController {
 
 // A channel that is not idle (connecting, ready, or erroring).
 pub(super) struct GracefulSwitchBalancer {
-    policy: Mutex<Option<Box<dyn LbPolicy>>>,
+    pub(super) policy: Mutex<Option<Box<dyn LbPolicy>>>,
     policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
     work_scheduler: WorkQueueTx,
     pending: Mutex<bool>,
@@ -570,32 +567,6 @@ impl<T: Clone> WatcherIter<T> {
             if x.is_some() {
                 return x.clone();
             }
-        }
-    }
-}
-
-struct SubchannelStateWatcher {
-    subchannel: Weak<dyn Subchannel>,
-    wqtx: WorkQueueTx,
-}
-
-impl ConnectivityStateWatcher for SubchannelStateWatcher {
-    fn on_state_change(&self, state: SubchannelState) {
-        // Ignore internal subchannel state changes if the external subchannel
-        // was dropped but its state watcher is still pending unregistration;
-        // such updates are inconsequential.
-        if let Some(sc) = self.subchannel.upgrade() {
-            let _ = self.wqtx.send(WorkQueueItem::Closure(Box::new(
-                move |c: &mut InternalChannelController| {
-                    c.lb.clone()
-                        .policy
-                        .lock()
-                        .unwrap()
-                        .as_mut()
-                        .unwrap()
-                        .subchannel_update(sc, &state, c);
-                },
-            )));
         }
     }
 }

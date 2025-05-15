@@ -82,7 +82,6 @@ mod tests {
     use std::{
         net::{Ipv4Addr, SocketAddr},
         sync::Arc,
-        u16,
     };
 
     use hickory_resolver::Name;
@@ -229,7 +228,7 @@ mod tests {
         FakeDns {
             tx: Some(tx),
             join_handle: Some(server_task),
-            addr: addr,
+            addr,
         }
     }
 }
