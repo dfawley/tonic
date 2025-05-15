@@ -24,6 +24,9 @@ tower-service = "0.3.3"
 url = "2.5.0"
 hickory-resolver = { version = "0.25.1", optional = true }
 
+[dev-dependencies]
+hickory-server =  "0.25.2"
+
 [features]
 default = ["hickory_dns"]
 hickory_dns = ["dep:hickory-resolver"]
