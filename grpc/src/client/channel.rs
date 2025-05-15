@@ -373,17 +373,10 @@ impl load_balancing::ChannelController for InternalChannelController {
         let key = SubchannelKey::new(address.clone());
         let isc = self.subchannel_pool.get_or_create_subchannel(&key);
 
-        let drop_notify = Arc::new(Notify::new());
-        let sc: Arc<dyn Subchannel> =
-            Arc::new(SubchannelImpl::new(drop_notify.clone(), isc.clone()));
+        let sc = Arc::new(SubchannelImpl::new(isc.clone()));
         let watcher = Arc::new(SubchannelStateWatcher::new(sc.clone()));
+        sc.watcher.lock().unwrap().replace(watcher.clone());
         isc.register_connectivity_state_watcher(watcher.clone());
-
-        // This task will exit when the subchannel is dropped.
-        tokio::task::spawn(async move {
-            drop_notify.notified().await;
-            isc.unregister_connectivity_state_watcher(watcher);
-        });
         sc
     }
 

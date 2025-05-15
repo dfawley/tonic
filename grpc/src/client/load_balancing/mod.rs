@@ -48,7 +48,7 @@ pub mod pick_first;
 pub mod test_utils;
 
 mod registry;
-use super::service_config::LbConfig;
+use super::{service_config::LbConfig, subchannel::SubchannelStateWatcher};
 pub use registry::{LbPolicyRegistry, GLOBAL_LB_REGISTRY};
 
 /// A collection of data configured on the channel that is constructing this
@@ -180,15 +180,11 @@ impl Default for SubchannelState {
 }
 impl Display for SubchannelState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "connectivity_state: {}, last_connection_error: {}",
-            self.connectivity_state,
-            self.last_connection_error
-                .as_ref()
-                .map(|e| e.to_string())
-                .unwrap_or_default()
-        )
+        write!(f, "connectivity_state: {}", self.connectivity_state)?;
+        if let Some(err) = &self.last_connection_error {
+            write!(f, ", last_connection_error: {}", err)?;
+        }
+        Ok(())
     }
 }
 
@@ -374,13 +370,13 @@ impl Eq for dyn Subchannel {}
 
 impl Debug for dyn Subchannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel for address: {}", self.address())
+        write!(f, "Subchannel: {}", self.address())
     }
 }
 
 impl Display for dyn Subchannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel for address: {}", self.address())
+        write!(f, "Subchannel: {}", self.address())
     }
 }
 
@@ -417,13 +413,16 @@ impl PartialEq for WeakSubchannel {
 impl Eq for WeakSubchannel {}
 
 pub(crate) struct SubchannelImpl {
-    dropped: Arc<Notify>,
     pub(crate) isc: Arc<InternalSubchannel>,
+    pub(crate) watcher: Mutex<Option<Arc<SubchannelStateWatcher>>>,
 }
 
 impl SubchannelImpl {
-    pub(super) fn new(dropped: Arc<Notify>, isc: Arc<InternalSubchannel>) -> Self {
-        SubchannelImpl { dropped, isc }
+    pub(super) fn new(isc: Arc<InternalSubchannel>) -> Self {
+        SubchannelImpl {
+            isc,
+            watcher: Mutex::default(),
+        }
     }
 }
 
@@ -454,8 +453,13 @@ impl Subchannel for SubchannelImpl {
 
 impl Drop for SubchannelImpl {
     fn drop(&mut self) {
-        println!("dropping subchannel {}", self);
-        self.dropped.notify_one();
+        if let Some(watcher) = self.watcher.lock().unwrap().take() {
+            println!(
+                "unregistering connectivity state watcher for subchannel {}",
+                self
+            );
+            self.isc.unregister_connectivity_state_watcher(watcher);
+        }
     }
 }
 
