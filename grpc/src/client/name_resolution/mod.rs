@@ -84,7 +84,7 @@ pub trait ResolverBuilder: Send + Sync {
     ///
     /// Note that build must not fail.  Instead, an erroring Resolver may be
     /// returned that calls ChannelController.update() with an Err value.
-    fn build(&self, target: Url, options: ResolverOptions) -> Box<dyn Resolver>;
+    fn build(&self, target: &Url, options: ResolverOptions) -> Box<dyn Resolver>;
 
     /// Reports the URI scheme handled by this name resolver.
     fn scheme(&self) -> &str;
@@ -102,18 +102,6 @@ pub trait ResolverBuilder: Send + Sync {
     fn is_valid_uri(&self, uri: &Url) -> bool;
 }
 
-/// Provides utility functionality that can be invoked by the resolver at
-/// any time.
-pub trait Helper: Send + Sync {
-    /// Schedules a call into the Resolver's work method.  If there is
-    /// already a pending work call that has not yet started, this may not
-    /// schedule another call.
-    fn schedule_work(&self);
-    /// Parses the provided JSON service config and returns an instance of a
-    /// ParsedServiceConfig.
-    fn parse_service_config(&self, config: &str) -> Result<ServiceConfig, String>;
-}
-
 /// A collection of data configured on the channel that is constructing this
 /// name resolver.
 #[non_exhaustive]
@@ -125,7 +113,17 @@ pub struct ResolverOptions {
     /// The runtime which provides utilities to do async work.
     pub runtime: Arc<dyn rt::Runtime>,
 
-    pub helper: Arc<dyn Helper>,
+    /// A hook into the channel's work scheduler that allows the Resolver to
+    /// request the ability to perform operations on the ChannelController.
+    pub work_scheduler: Arc<dyn WorkScheduler>,
+}
+
+/// Used to asynchronously request a call into the Resolver's work method.
+pub trait WorkScheduler: Send + Sync {
+    // Schedules a call into the LbPolicy's work method.  If there is already a
+    // pending work call that has not yet started, this may not schedule another
+    // call.
+    fn schedule_work(&self);
 }
 
 /// Resolver watches for the updates on the specified target.
@@ -157,6 +155,10 @@ pub trait ChannelController: Send + Sync {
     /// appropriate backoff mechanism to avoid overloading the system or the
     /// remote resolver.
     fn update(&mut self, update: ResolverUpdate) -> Result<(), String>;
+
+    /// Parses the provided JSON service config and returns an instance of a
+    /// ParsedServiceConfig.
+    fn parse_service_config(&self, config: &str) -> Result<ServiceConfig, String>;
 }
 
 #[derive(Clone)]
@@ -211,7 +213,7 @@ pub struct Endpoint {
 }
 
 #[non_exhaustive]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialOrd, Ord)]
 /// An Address is an identifier that indicates how to connect to a server.
 pub struct Address {
     /// The network type is used to identify what kind of transport to create

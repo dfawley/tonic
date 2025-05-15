@@ -6,7 +6,7 @@ use crate::client::{
         ParsedJsonLbConfig, PickResult, QueuingPicker, Subchannel, SubchannelImpl, SubchannelState,
         WorkScheduler, GLOBAL_LB_REGISTRY,
     },
-    name_resolution::{Address, Endpoint, ResolverData, ResolverUpdate},
+    name_resolution::{Address, Endpoint, ResolverUpdate},
     subchannel::{ConnectivityStateWatcher, InternalSubchannel, InternalSubchannelPool},
     transport::{Transport, GLOBAL_TRANSPORT_REGISTRY},
     ConnectivityState,
@@ -149,10 +149,10 @@ fn send_resolver_update_to_policy(
     endpoint: Endpoint,
     tcc: &mut dyn ChannelController,
 ) {
-    let update = ResolverUpdate::Data(ResolverData {
-        endpoints: vec![endpoint],
+    let update = ResolverUpdate {
+        endpoints: Ok(vec![endpoint]),
         ..Default::default()
-    });
+    };
     assert!(lb_policy.resolver_update(update, None, tcc).is_ok());
 }
 
@@ -162,7 +162,10 @@ fn send_resolver_error_to_policy(
     err: String,
     tcc: &mut dyn ChannelController,
 ) {
-    let update = ResolverUpdate::Err(Arc::from(Box::from(err)));
+    let update = ResolverUpdate {
+        endpoints: Err(err),
+        ..Default::default()
+    };
     assert!(lb_policy.resolver_update(update, None, tcc).is_ok());
 }
 

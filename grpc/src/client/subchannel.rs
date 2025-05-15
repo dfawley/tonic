@@ -21,7 +21,7 @@ use super::load_balancing::{self, Picker, SubchannelState};
 use super::name_resolution::Address;
 use super::transport::{self, ConnectedTransport, Transport, TransportRegistry};
 use super::ConnectivityState;
-use crate::client::channel::InternalChannelController;
+use crate::client::channel::{InternalChannelController, WorkQueueItem};
 use crate::service::{Request, Response, Service};
 
 struct TODO;
@@ -434,11 +434,11 @@ impl Drop for InternalSubchannel {
     fn drop(&mut self) {
         println!("dropping internal subchannel {:?}", self.key);
         let key = self.key.clone();
-        let _ = self
-            .work_scheduler
-            .send(Box::new(move |c: &mut InternalChannelController| {
+        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+            move |c: &mut InternalChannelController| {
                 c.subchannel_pool.unregister_subchannel(&key);
-            }));
+            },
+        )));
     }
 }
 

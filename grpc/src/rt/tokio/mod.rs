@@ -47,7 +47,7 @@ impl DnsResolver for TokioDefaultDnsResolver {
     }
 }
 
-struct TokioRuntime {}
+pub struct TokioRuntime {}
 
 impl TaskHandle for tokio::task::JoinHandle<()> {
     fn abort(&self) {

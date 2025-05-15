@@ -31,10 +31,10 @@ impl ResolverBuilder for PassthroughResolverBuilder {
         "passthrough"
     }
 
-    fn build(&self, target: super::Url, options: ResolverOptions) -> Box<dyn Resolver> {
+    fn build(&self, target: &super::Url, options: ResolverOptions) -> Box<dyn Resolver> {
         let id = target.path().strip_prefix("/").unwrap().to_string();
 
-        options.helper.schedule_work();
+        options.work_scheduler.schedule_work();
         Box::new(NopResolver { id })
     }
 

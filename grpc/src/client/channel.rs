@@ -19,13 +19,13 @@ use serde_json::json;
 use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
-use crate::attributes::Attributes;
 use crate::client::ConnectivityState;
 use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
+use crate::{attributes::Attributes, rt::tokio::TokioRuntime};
 
-use super::service_config::{self, ServiceConfig};
+use super::service_config::ServiceConfig;
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 use super::{
     load_balancing::{
@@ -258,21 +258,19 @@ impl ActiveChannel {
         // TODO(arjan-bal): Return error here instead of panicking.
         let rb = GLOBAL_RESOLVER_REGISTRY.get(target.scheme()).unwrap();
         let authority = target.authority().to_string();
+        let target = name_resolution::Url::from(target);
         let authority = if authority.is_empty() {
-            rb.default_authority(&target.into())
+            rb.default_authority(&target)
         } else {
             authority
         };
-        let helper = Arc::new(ResolverHelper {
-            lb: channel_controller.lb.clone(),
-            wqtx: tx,
-        });
+        let work_scheduler = Arc::new(ResolverWorkScheduler { wqtx: tx });
         let resolver_opts = name_resolution::ResolverOptions {
             authority,
-            helper,
-            runtime: todo!(),
+            work_scheduler,
+            runtime: Arc::new(TokioRuntime {}),
         };
-        let mut resolver = rb.build(target.into(), resolver_opts);
+        let resolver = rb.build(&target, resolver_opts);
 
         let jh = tokio::task::spawn(async move {
             let mut resolver = resolver;
@@ -336,21 +334,15 @@ impl Drop for ActiveChannel {
     }
 }
 
-struct ResolverHelper {
-    lb: Arc<GracefulSwitchBalancer>,
+struct ResolverWorkScheduler {
     wqtx: WorkQueueTx,
 }
 
 pub(super) type WorkQueueTx = mpsc::UnboundedSender<WorkQueueItem>;
 
-impl name_resolution::Helper for ResolverHelper {
+impl name_resolution::WorkScheduler for ResolverWorkScheduler {
     fn schedule_work(&self) {
         let _ = self.wqtx.send(WorkQueueItem::ScheduleResolver);
-    }
-
-    fn parse_service_config(&self, config: &str) -> Result<ServiceConfig, String> {
-        // Needs to call gsb's policy builder
-        Ok(ServiceConfig)
     }
 }
 
@@ -390,38 +382,32 @@ impl name_resolution::ChannelController for InternalChannelController {
         lb.handle_resolver_update(update, self)
             .map_err(|err| err.to_string())
     }
+
+    fn parse_service_config(&self, config: &str) -> Result<ServiceConfig, String> {
+        Err("service configs not supported".to_string())
+    }
 }
 
 impl load_balancing::ChannelController for InternalChannelController {
     fn new_subchannel(&mut self, address: &Address) -> Arc<dyn Subchannel> {
         let key = SubchannelKey::new(address.clone());
-        match self.subchannel_pool.lookup_subchannel(&key.clone()) {
-            Some(isc) => {
-                println!("found subchannel in pool for address: {:?}", &address);
-                self.new_subchannel_with_watcher(address, isc)
-            }
-            None => {
-                // Create an internal subchannel and register it with the pool.
-                //
-                // Note that the subchannel returned from the pool could be
-                // different to what we passed in. This can happen when someone
-                // races with us and registered one before us. This though, is
-                // not possible with a subchannel pool that is not shared across
-                // channels, because calls to new_subchannel() are serialized.
-                let transport = self
-                    .transport_registry
-                    .get_transport(&address.network_type)
-                    .unwrap();
-                let isc = InternalSubchannelImpl::new(
-                    key.clone(),
-                    self.subchannel_pool.clone(),
-                    transport,
-                    Arc::new(NopBackoff {}),
-                );
-                let isc_in_pool = self.subchannel_pool.register_subchannel(key, isc.clone());
-                self.new_subchannel_with_watcher(address, isc_in_pool)
-            }
-        }
+        let isc = self.subchannel_pool.get_or_create_subchannel(&key);
+
+        let drop_notify = Arc::new(Notify::new());
+        let sc: Arc<dyn Subchannel> =
+            Arc::new(SubchannelImpl::new(drop_notify.clone(), isc.clone()));
+        let watcher = Arc::new(SubchannelStateWatcher {
+            subchannel: Arc::downgrade(&sc),
+            wqtx: self.wqtx.clone(),
+        });
+        isc.register_connectivity_state_watcher(watcher.clone());
+
+        // This task will exit when the subchannel is dropped.
+        tokio::task::spawn(async move {
+            drop_notify.notified().await;
+            isc.unregister_connectivity_state_watcher(watcher);
+        });
+        sc
     }
 
     fn update_picker(&mut self, update: LbState) {
