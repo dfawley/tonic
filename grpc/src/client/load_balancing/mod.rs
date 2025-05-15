@@ -37,7 +37,7 @@ use crate::service::{Request, Response, Service};
 
 use crate::client::{
     name_resolution::{Address, ResolverUpdate},
-    subchannel::{ConnectivityStateWatcher, InternalSubchannel},
+    subchannel::InternalSubchannel,
     ConnectivityState,
 };
 
