@@ -341,7 +341,6 @@ impl name_resolution::ChannelController for WorkQueueTx {
 pub(super) struct InternalChannelController {
     pub(super) lb: Arc<GracefulSwitchBalancer>, // called and passes mutable parent to it, so must be Arc.
     pub(super) subchannel_pool: InternalSubchannelPool,
-    transport_registry: TransportRegistry,
     resolve_now: Arc<Notify>,
     wqtx: WorkQueueTx,
     picker: Arc<Watcher<Arc<dyn Picker>>>,
@@ -360,16 +359,20 @@ impl InternalChannelController {
 
         Self {
             lb,
-            subchannel_pool: InternalSubchannelPool::new(),
-            transport_registry,
+            subchannel_pool: InternalSubchannelPool::new(wqtx.clone(), transport_registry),
             resolve_now,
             wqtx,
             picker,
             connectivity_state,
         }
     }
+}
 
-    fn new_subchannel_with_watcher(&mut self, isc: Arc<InternalSubchannel>) -> Arc<dyn Subchannel> {
+impl load_balancing::ChannelController for InternalChannelController {
+    fn new_subchannel(&mut self, address: &Address) -> Arc<dyn Subchannel> {
+        let key = SubchannelKey::new(address.clone());
+        let isc = self.subchannel_pool.get_or_create_subchannel(&key);
+
         let drop_notify = Arc::new(Notify::new());
         let sc: Arc<dyn Subchannel> =
             Arc::new(SubchannelImpl::new(drop_notify.clone(), isc.clone()));
@@ -385,39 +388,6 @@ impl InternalChannelController {
             isc.unregister_connectivity_state_watcher(watcher);
         });
         sc
-    }
-}
-
-impl load_balancing::ChannelController for InternalChannelController {
-    fn new_subchannel(&mut self, address: &Address) -> Arc<dyn Subchannel> {
-        let key = SubchannelKey::new(address.clone());
-        match self.subchannel_pool.lookup_subchannel(&key.clone()) {
-            Some(isc) => {
-                println!("found subchannel in pool for address: {:?}", &address);
-                self.new_subchannel_with_watcher(isc)
-            }
-            None => {
-                // Create an internal subchannel and register it with the pool.
-                //
-                // Note that the subchannel returned from the pool could be
-                // different to what we passed in. This can happen when someone
-                // races with us and registered one before us. This though, is
-                // not possible with a subchannel pool that is not shared across
-                // channels, because calls to new_subchannel() are serialized.
-                let transport = self
-                    .transport_registry
-                    .get_transport(&address.address_type)
-                    .unwrap();
-                let isc = InternalSubchannel::new(
-                    key.clone(),
-                    self.wqtx.clone(),
-                    transport,
-                    Arc::new(NopBackoff {}),
-                );
-                let isc_in_pool = self.subchannel_pool.register_subchannel(key, isc.clone());
-                self.new_subchannel_with_watcher(isc_in_pool)
-            }
-        }
     }
 
     fn update_picker(&mut self, update: LbState) {

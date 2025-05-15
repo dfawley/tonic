@@ -460,59 +460,57 @@ impl SubchannelKey {
 }
 
 pub(crate) struct InternalSubchannelPool {
-    subchannels: Mutex<BTreeMap<SubchannelKey, Weak<InternalSubchannel>>>,
+    work_scheduler: WorkQueueTx,
+    transport_registry: TransportRegistry,
+    subchannels: BTreeMap<SubchannelKey, Weak<InternalSubchannel>>,
 }
 
 impl InternalSubchannelPool {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(work_scheduler: WorkQueueTx, transport_registry: TransportRegistry) -> Self {
         Self {
-            subchannels: Mutex::new(BTreeMap::new()),
+            work_scheduler,
+            transport_registry,
+            subchannels: BTreeMap::new(),
         }
     }
 
-    pub(crate) fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<InternalSubchannel>> {
-        let subchannels = self.subchannels.lock().unwrap();
-        println!("looking up subchannel for: {:?}", key);
-        if let Some(weak_isc) = subchannels.get(key) {
-            if let Some(isc) = weak_isc.upgrade() {
-                return Some(isc);
-            }
-        }
-
-        // This addresses two scenarios:
-        // 1. a missing key in the map
-        // 2. an unpromotable value, which can occur if its internal subchannel
-        // has been dropped but unregister_subchannel() hasn't been called yet.
-        None
-    }
-
-    pub(crate) fn register_subchannel(
-        &self,
-        key: SubchannelKey,
-        subchannel: Arc<InternalSubchannel>,
+    pub(crate) fn get_or_create_subchannel(
+        &mut self,
+        key: &SubchannelKey,
     ) -> Arc<InternalSubchannel> {
-        println!("registering subchannel for: {:?}", key);
-        let mut subchannels = self.subchannels.lock().unwrap();
-        if let Some(weak_isc) = subchannels.get(&key) {
+        println!("looking up subchannel for: {:?}", key);
+        if let Some(weak_isc) = self.subchannels.get(key) {
             if let Some(isc) = weak_isc.upgrade() {
-                // Handles the race where multiple subchannels are created for
-                // an address simultaneously, each might try to create and
-                // register a new internal subchannel. Only the first one to
-                // register succeeds.
                 return isc;
             }
         }
-        subchannels.insert(key, Arc::downgrade(&subchannel));
-        subchannel
+
+        // If we get here, it means one of two things:
+        // 1. provided key is not found in the map
+        // 2. provided key points to an unpromotable value, which can occur if
+        //    its internal subchannel has been dropped but hasn't been
+        //    unregistered yet.
+
+        let transport = self
+            .transport_registry
+            .get_transport(&key.address.address_type)
+            .unwrap();
+        let isc = InternalSubchannel::new(
+            key.clone(),
+            self.work_scheduler.clone(),
+            transport,
+            Arc::new(NopBackoff {}),
+        );
+        self.subchannels.insert(key.clone(), Arc::downgrade(&isc));
+        isc
     }
 
-    pub(crate) fn unregister_subchannel(&self, key: &SubchannelKey) {
-        let mut subchannels = self.subchannels.lock().unwrap();
-        if let Some(weak_isc) = subchannels.get(key) {
+    pub(crate) fn unregister_subchannel(&mut self, key: &SubchannelKey) {
+        if let Some(weak_isc) = self.subchannels.get(key) {
             if let Some(isc) = weak_isc.upgrade() {
                 return;
             }
-            subchannels.remove(key);
+            self.subchannels.remove(key);
             return;
         }
         panic!("attempt to unregister subchannel for unknown key {:?}", key);
