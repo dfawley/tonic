@@ -31,14 +31,14 @@ impl ResolverBuilder for PassthroughResolverBuilder {
         "passthrough"
     }
 
-    fn build(&self, target: &super::Url, options: ResolverOptions) -> Box<dyn Resolver> {
+    fn build(&self, target: &super::Target, options: ResolverOptions) -> Box<dyn Resolver> {
         let id = target.path().strip_prefix("/").unwrap().to_string();
 
         options.work_scheduler.schedule_work();
         Box::new(NopResolver { id })
     }
 
-    fn is_valid_uri(&self, uri: &super::Url) -> bool {
+    fn is_valid_uri(&self, uri: &super::Target) -> bool {
         true
     }
 }

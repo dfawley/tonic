@@ -38,38 +38,79 @@ mod passthrough;
 mod registry;
 pub use registry::{ResolverRegistry, GLOBAL_RESOLVER_REGISTRY};
 
-pub struct Url {
+pub struct Target {
     url: url::Url,
 }
 
-impl FromStr for Url {
+impl FromStr for Target {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.parse::<url::Url>() {
-            Ok(url) => Ok(Url { url }),
+            Ok(url) => Ok(Target { url }),
             Err(err) => Err(err.to_string()),
         }
     }
 }
 
-impl From<url::Url> for Url {
+impl From<url::Url> for Target {
     fn from(url: url::Url) -> Self {
-        Url { url }
+        Target { url }
     }
 }
 
-impl Url {
-    pub fn authority(&self) -> &str {
-        self.url.authority()
+/// Target represents a target for gRPC, as specified in:
+/// https://github.com/grpc/grpc/blob/master/doc/naming.md.
+/// It is parsed from the target string that gets passed during channel creation
+/// by the user. gRPC passes it to the resolver and the balancer.
+///
+/// If the target follows the naming spec, and the parsed scheme is registered
+/// with gRPC, we will parse the target string according to the spec. If the
+/// target does not contain a scheme or if the parsed scheme is not registered
+/// (i.e. no corresponding resolver available to resolve the endpoint), we will
+/// apply the default scheme, and will attempt to reparse it.
+impl Target {
+    pub fn scheme(&self) -> &str {
+        self.url.scheme()
     }
 
-    pub fn host_str(&self) -> Option<&str> {
-        self.url.host_str()
+    /// The host part of the authority.
+    pub fn authority_host(&self) -> &str {
+        self.url.host_str().unwrap_or("")
     }
 
+    /// The port part of the authority.
+    pub fn aythority_port(&self) -> Option<u16> {
+        self.url.port()
+    }
+
+    /// Returns either host:port or host depending on the existence of the port
+    /// in the authority.
+    pub fn authority_host_port(&self) -> String {
+        let host = self.authority_host();
+        let port = self.aythority_port();
+        if let Some(port) = port {
+            format!("{}:{}", host, port)
+        } else {
+            host.to_owned()
+        }
+    }
+
+    /// Retrieves endpoint from `Url.path()`.
     pub fn path(&self) -> &str {
         self.url.path()
+    }
+}
+
+impl Display for Target {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}//{}/{}",
+            self.scheme(),
+            self.authority_host_port(),
+            self.path()
+        )
     }
 }
 
@@ -79,7 +120,7 @@ pub trait ResolverBuilder: Send + Sync {
     ///
     /// Note that build must not fail.  Instead, an erroring Resolver may be
     /// returned that calls ChannelController.update() with an Err value.
-    fn build(&self, target: &Url, options: ResolverOptions) -> Box<dyn Resolver>;
+    fn build(&self, target: &Target, options: ResolverOptions) -> Box<dyn Resolver>;
 
     /// Reports the URI scheme handled by this name resolver.
     fn scheme(&self) -> &str;
@@ -88,13 +129,13 @@ pub trait ResolverBuilder: Send + Sync {
     /// and target.  This is typically the same as the service's name.  By
     /// default, the default_authority method automatically returns the path
     /// portion of the target URI, with the leading prefix removed.
-    fn default_authority(&self, uri: &Url) -> String {
-        uri.authority().to_string()
+    fn default_authority<'a>(&self, uri: &'a Target) -> &'a str {
+        uri.authority_host()
     }
 
     /// Returns a bool indicating whether the input uri is valid to create a
     /// resolver.
-    fn is_valid_uri(&self, uri: &Url) -> bool;
+    fn is_valid_uri(&self, uri: &Target) -> bool;
 }
 
 /// A collection of data configured on the channel that is constructing this
@@ -262,3 +303,64 @@ impl Display for Address {
 /// Indicates the address is an IPv4 or IPv6 address that should be connected to
 /// via TCP/IP.
 pub static TCP_IP_NETWORK_TYPE: &str = "tcp";
+
+#[cfg(test)]
+mod test {
+    use super::Target;
+
+    #[test]
+    pub fn parse_target() {
+        #[derive(Default)]
+        struct TestCase {
+            input: &'static str,
+            want_scheme: &'static str,
+            want_host: &'static str,
+            want_port: Option<u16>,
+            want_host_port: &'static str,
+            want_path: &'static str,
+        }
+        let test_cases = vec![
+            TestCase {
+                input: "dns:///grpc.io",
+                want_scheme: "dns",
+                want_host_port: "",
+                want_host: "",
+                want_port: None,
+                want_path: "/grpc.io",
+            },
+            TestCase {
+                input: "dns://8.8.8.8:53/grpc.io/docs",
+                want_scheme: "dns",
+                want_host_port: "8.8.8.8:53",
+                want_host: "8.8.8.8",
+                want_port: Some(53),
+                want_path: "/grpc.io/docs",
+            },
+            TestCase {
+                input: "unix:path/to/file",
+                want_scheme: "unix",
+                want_host_port: "",
+                want_host: "",
+                want_port: None,
+                want_path: "path/to/file",
+            },
+            TestCase {
+                input: "unix:///run/containerd/containerd.sock",
+                want_scheme: "unix",
+                want_host_port: "",
+                want_host: "",
+                want_port: None,
+                want_path: "/run/containerd/containerd.sock",
+            },
+        ];
+
+        for tc in test_cases {
+            let target: Target = tc.input.parse().unwrap();
+            assert_eq!(target.scheme(), tc.want_scheme);
+            assert_eq!(target.authority_host(), tc.want_host);
+            assert_eq!(target.aythority_port(), tc.want_port);
+            assert_eq!(target.authority_host_port(), tc.want_host_port);
+            assert_eq!(target.path(), tc.want_path);
+        }
+    }
+}
