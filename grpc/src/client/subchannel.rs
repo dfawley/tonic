@@ -5,7 +5,10 @@ use super::{
     transport::{self, ConnectedTransport, Transport, TransportRegistry},
     ConnectivityState,
 };
-use crate::service::{Request, Response, Service};
+use crate::{
+    client::channel::WorkQueueItem,
+    service::{Request, Response, Service},
+};
 use core::panic;
 use std::{
     collections::BTreeMap,
@@ -297,11 +300,11 @@ impl InternalSubchannel {
         let mut inner = self.inner.lock().unwrap();
         inner.watchers.push(watcher.clone());
         let state = inner.state.to_subchannel_state().clone();
-        let _ = self
-            .work_scheduler
-            .send(Box::new(move |c: &mut InternalChannelController| {
+        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+            move |c: &mut InternalChannelController| {
                 watcher.on_state_change(state, c);
-            }));
+            },
+        )));
     }
 
     pub(crate) fn unregister_connectivity_state_watcher(
@@ -325,11 +328,11 @@ impl InternalSubchannel {
         for w in &inner.watchers {
             let state = state.clone();
             let w = w.clone();
-            let _ = self
-                .work_scheduler
-                .send(Box::new(move |c: &mut InternalChannelController| {
+            let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+                move |c: &mut InternalChannelController| {
                     w.on_state_change(state, c);
-                }));
+                },
+            )));
         }
     }
 
@@ -449,11 +452,11 @@ impl Drop for InternalSubchannel {
     fn drop(&mut self) {
         println!("dropping internal subchannel {:?}", self.key);
         let key = self.key.clone();
-        let _ = self
-            .work_scheduler
-            .send(Box::new(move |c: &mut InternalChannelController| {
+        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+            move |c: &mut InternalChannelController| {
                 c.subchannel_pool.unregister_subchannel(&key);
-            }));
+            },
+        )));
     }
 }
 
@@ -515,7 +518,7 @@ impl InternalSubchannelPool {
 
         let transport = self
             .transport_registry
-            .get_transport(&key.address.address_type)
+            .get_transport(&key.address.network_type)
             .unwrap();
         let isc = InternalSubchannel::new(
             key.clone(),

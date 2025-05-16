@@ -19,13 +19,13 @@ use serde_json::json;
 use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
-use crate::attributes::Attributes;
-use crate::client::service_config::ServiceConfig;
 use crate::client::ConnectivityState;
 use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
+use crate::{attributes::Attributes, rt::tokio::TokioRuntime};
 
+use super::service_config::ServiceConfig;
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 use super::{
     load_balancing::{
@@ -253,20 +253,33 @@ impl ActiveChannel {
             connectivity_state.clone(),
         );
 
+        let resolver_helper = Box::new(tx.clone());
+
+        // TODO(arjan-bal): Return error here instead of panicking.
+        let rb = GLOBAL_RESOLVER_REGISTRY.get(target.scheme()).unwrap();
+        let authority = target.authority().to_string();
+        let target = name_resolution::Url::from(target);
+        let authority = if authority.is_empty() {
+            rb.default_authority(&target)
+        } else {
+            authority
+        };
+        let work_scheduler = Arc::new(ResolverWorkScheduler { wqtx: tx });
+        let resolver_opts = name_resolution::ResolverOptions {
+            authority,
+            work_scheduler,
+            runtime: Arc::new(TokioRuntime {}),
+        };
+        let resolver = rb.build(&target, resolver_opts);
+
         let jh = tokio::task::spawn(async move {
+            let mut resolver = resolver;
             while let Some(w) = rx.recv().await {
-                w(&mut channel_controller);
+                match w {
+                    WorkQueueItem::Closure(func) => func(&mut channel_controller),
+                    WorkQueueItem::ScheduleResolver => resolver.work(&mut channel_controller),
+                }
             }
-        });
-
-        tokio::task::spawn(async move {
-            let resolver_helper = Box::new(tx.clone());
-            let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
-            let mut resolver = rb
-                .unwrap()
-                .build(target, resolve_now, ResolverOptions::default());
-
-            resolver.run(resolver_helper).await;
         });
 
         Arc::new(Self {
@@ -321,20 +334,15 @@ impl Drop for ActiveChannel {
     }
 }
 
+struct ResolverWorkScheduler {
+    wqtx: WorkQueueTx,
+}
+
 pub(super) type WorkQueueTx = mpsc::UnboundedSender<WorkQueueItem>;
 
-#[async_trait]
-impl name_resolution::ChannelController for WorkQueueTx {
-    fn parse_config(&self, config: &str) -> Result<ServiceConfig, Box<dyn Error + Send + Sync>> {
-        Ok(ServiceConfig {})
-        // Needs to call gsb's policy builder
-    }
-    async fn update(&self, state: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let (tx, rx) = oneshot::channel();
-        self.send(Box::new(|c: &mut InternalChannelController| {
-            let _ = tx.send(c.lb.clone().handle_resolver_update(state, c));
-        }))?;
-        rx.await?
+impl name_resolution::WorkScheduler for ResolverWorkScheduler {
+    fn schedule_work(&self) {
+        let _ = self.wqtx.send(WorkQueueItem::ScheduleResolver);
     }
 }
 
@@ -365,6 +373,18 @@ impl InternalChannelController {
             picker,
             connectivity_state,
         }
+    }
+}
+
+impl name_resolution::ChannelController for InternalChannelController {
+    fn update(&mut self, update: ResolverUpdate) -> Result<(), String> {
+        let lb = self.lb.clone();
+        lb.handle_resolver_update(update, self)
+            .map_err(|err| err.to_string())
+    }
+
+    fn parse_service_config(&self, config: &str) -> Result<ServiceConfig, String> {
+        Err("service configs not supported".to_string())
     }
 }
 
@@ -408,9 +428,8 @@ impl WorkScheduler for GracefulSwitchBalancer {
             // Already had a pending call scheduled.
             return;
         }
-        let _ = self
-            .work_scheduler
-            .send(Box::new(|c: &mut InternalChannelController| {
+        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+            |c: &mut InternalChannelController| {
                 *c.lb.pending.lock().unwrap() = false;
                 c.lb.clone()
                     .policy
@@ -419,7 +438,8 @@ impl WorkScheduler for GracefulSwitchBalancer {
                     .as_mut()
                     .unwrap()
                     .work(c);
-            }));
+            },
+        )));
     }
 }
 
@@ -438,15 +458,10 @@ impl GracefulSwitchBalancer {
         update: ResolverUpdate,
         controller: &mut InternalChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let policy_name = pick_first::POLICY_NAME;
-        if let ResolverUpdate::Data(ref d) = update {
-            if d.service_config.is_some() {
-                return Err("can't do service configs yet".into());
-            }
-        } else {
-            todo!("unhandled update type");
+        if update.service_config.as_ref().is_ok_and(|sc| sc.is_some()) {
+            return Err("can't do service configs yet".into());
         }
-
+        let policy_name = pick_first::POLICY_NAME;
         let mut p = self.policy.lock().unwrap();
         if p.is_none() {
             let builder = GLOBAL_LB_REGISTRY.get_policy(policy_name).unwrap();
@@ -488,7 +503,12 @@ impl GracefulSwitchBalancer {
     }
 }
 
-pub(super) type WorkQueueItem = Box<dyn FnOnce(&mut InternalChannelController) + Send + Sync>;
+pub(super) enum WorkQueueItem {
+    // Execute the closure.
+    Closure(Box<dyn FnOnce(&mut InternalChannelController) + Send + Sync>),
+    // Call the resolver to do work.
+    ScheduleResolver,
+}
 
 pub struct TODO;
 

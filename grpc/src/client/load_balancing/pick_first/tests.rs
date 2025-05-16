@@ -6,7 +6,7 @@ use crate::client::{
         ParsedJsonLbConfig, PickResult, Picker, QueuingPicker, Subchannel, SubchannelImpl,
         SubchannelState, WorkScheduler, GLOBAL_LB_REGISTRY,
     },
-    name_resolution::{Address, Endpoint, ResolverData, ResolverUpdate},
+    name_resolution::{Address, Endpoint, ResolverUpdate},
     subchannel::{InternalSubchannel, InternalSubchannelPool},
     transport::{Transport, GLOBAL_TRANSPORT_REGISTRY},
     ConnectivityState,
@@ -150,10 +150,10 @@ fn send_resolver_update_to_policy(
     endpoint: Endpoint,
     tcc: &mut dyn ChannelController,
 ) {
-    let update = ResolverUpdate::Data(ResolverData {
-        endpoints: vec![endpoint],
+    let update = ResolverUpdate {
+        endpoints: Ok(vec![endpoint]),
         ..Default::default()
-    });
+    };
     assert!(lb_policy.resolver_update(update, None, tcc).is_ok());
 }
 
@@ -163,7 +163,10 @@ fn send_resolver_error_to_policy(
     err: String,
     tcc: &mut dyn ChannelController,
 ) {
-    let update = ResolverUpdate::Err(Arc::from(Box::from(err)));
+    let update = ResolverUpdate {
+        endpoints: Err(err),
+        ..Default::default()
+    };
     assert!(lb_policy.resolver_update(update, None, tcc).is_ok());
 }
 
@@ -493,10 +496,10 @@ async fn pickfirst_zero_addresses_from_resolver_before_valid_update() {
     let tcc = tcc.as_mut();
 
     let endpoint = create_endpoint_with_n_addresses(0);
-    let update = ResolverUpdate::Data(ResolverData {
-        endpoints: vec![endpoint],
+    let update = ResolverUpdate {
+        endpoints: Ok(vec![endpoint]),
         ..Default::default()
-    });
+    };
     assert!(lb_policy.resolver_update(update, None, tcc).is_err());
     verify_transient_failure_picker_from_policy(
         &mut rx_events,
@@ -514,10 +517,10 @@ async fn pickfirst_zero_endpoints_from_resolver_before_valid_update() {
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
 
-    let update = ResolverUpdate::Data(ResolverData {
-        endpoints: vec![],
+    let update = ResolverUpdate {
+        endpoints: Ok(vec![]),
         ..Default::default()
-    });
+    };
     assert!(lb_policy.resolver_update(update, None, tcc).is_err());
     verify_transient_failure_picker_from_policy(
         &mut rx_events,
@@ -552,10 +555,10 @@ async fn pickfirst_zero_endpoints_from_resolver_after_valid_update() {
 
     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
 
-    let update = ResolverUpdate::Data(ResolverData {
-        endpoints: vec![],
+    let update = ResolverUpdate {
+        endpoints: Ok(vec![]),
         ..Default::default()
-    });
+    };
     assert!(lb_policy.resolver_update(update, None, tcc).is_err());
     verify_transient_failure_picker_from_policy(
         &mut rx_events,

@@ -13,8 +13,8 @@ use std::{
 use crate::{
     client::{
         name_resolution::{
-            Address, ChannelController, Resolver, ResolverBuilder, ResolverData, ResolverOptions,
-            ResolverUpdate, SharedResolverBuilder, GLOBAL_RESOLVER_REGISTRY, TCP_IP_ADDRESS_TYPE,
+            Address, ChannelController, Resolver, ResolverBuilder, ResolverOptions, ResolverUpdate,
+            GLOBAL_RESOLVER_REGISTRY, TCP_IP_NETWORK_TYPE,
         },
         transport::{self, ConnectedTransport, GLOBAL_TRANSPORT_REGISTRY},
     },
@@ -93,5 +93,5 @@ impl transport::Transport for TonicTransportBuilder {
 }
 
 pub fn reg() {
-    GLOBAL_TRANSPORT_REGISTRY.add_transport(TCP_IP_ADDRESS_TYPE, TonicTransportBuilder::new());
+    GLOBAL_TRANSPORT_REGISTRY.add_transport(TCP_IP_NETWORK_TYPE, TonicTransportBuilder::new());
 }

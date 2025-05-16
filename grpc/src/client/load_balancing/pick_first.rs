@@ -14,7 +14,7 @@ use crate::{
             ParsedJsonLbConfig, Pick, PickResult, Picker, QueuingPicker, Subchannel,
             SubchannelImpl, SubchannelState, WorkScheduler,
         },
-        name_resolution::{Address, Endpoint, ResolverData, ResolverUpdate},
+        name_resolution::{Address, Endpoint, ResolverUpdate},
         service_config::LbConfig,
         subchannel, ConnectivityState,
     },
@@ -97,7 +97,7 @@ struct PickFirstPolicy {
     subchannel_list: Option<SubchannelList>, // List of subchannels, that we are currently connecting to.
     selected_subchannel: Option<Arc<dyn Subchannel>>, // The currently selected subchannel.
     addresses: Vec<Address>,                 // Most recent addresses from the name resolver.
-    last_resolver_error: Option<Arc<dyn Error + Send + Sync>>, // Most recent error from the name resolver.
+    last_resolver_error: Option<String>,     // Most recent error from the name resolver.
     last_connection_error: Option<Arc<dyn Error + Send + Sync>>, // Most recent error from any subchannel.
     connectivity_state: ConnectivityState, // Overall connectivity state of the channel.
     sent_connecting: bool, // Whether we have sent a CONNECTING state to the channel.
@@ -111,12 +111,14 @@ impl LbPolicy for PickFirstPolicy {
         config: Option<&LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        match update {
-            ResolverUpdate::Data(data) => {
-                println!("received update from resolver with data: {:?}", data);
+        match update.endpoints {
+            Ok(mut endpoints) => {
+                println!(
+                    "received update from resolver with endpoints: {:?}",
+                    endpoints
+                );
 
                 // Shuffle endpoints if requested.
-                let mut endpoints = data.endpoints.clone();
                 if let Some(err) = self.shuffle_endpoints(config, &mut endpoints) {
                     println!("failed to shuffle endpoints: {}", err);
                     return Err(err);
@@ -140,7 +142,7 @@ impl LbPolicy for PickFirstPolicy {
                 }
                 self.addresses = new_addresses;
             }
-            ResolverUpdate::Err(error) => {
+            Err(error) => {
                 println!("received error from resolver: {}", error);
                 self.last_resolver_error = Some(error);
 
@@ -256,10 +258,8 @@ impl PickFirstPolicy {
         self.subchannel_list = None;
         self.selected_subchannel = None;
         self.addresses = vec![];
-        let arc_err = Arc::from(Box::from(
-            "received empty address list from the name resolver",
-        ));
-        self.last_resolver_error = Some(arc_err);
+        let res_err = String::from("received empty address list from the name resolver");
+        self.last_resolver_error = Some(res_err);
         self.move_to_transient_failure(channel_controller);
         channel_controller.request_resolution();
     }

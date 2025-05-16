@@ -10,8 +10,8 @@ use std::{
 use crate::{
     client::{
         name_resolution::{
-            Address, ChannelController, Endpoint, Resolver, ResolverBuilder, ResolverData,
-            ResolverOptions, ResolverUpdate, SharedResolverBuilder, GLOBAL_RESOLVER_REGISTRY,
+            self, Address, ChannelController, Endpoint, Resolver, ResolverBuilder, ResolverOptions,
+            ResolverUpdate, GLOBAL_RESOLVER_REGISTRY,
         },
         transport::{self, ConnectedTransport, GLOBAL_TRANSPORT_REGISTRY},
     },
@@ -120,11 +120,11 @@ impl transport::Transport for ClientTransport {
     }
 }
 
-static INMEMORY_ADDRESS_TYPE: &str = "inmemory";
+static INMEMORY_NETWORK_TYPE: &str = "inmemory";
 
 pub fn reg() {
-    GLOBAL_TRANSPORT_REGISTRY.add_transport(INMEMORY_ADDRESS_TYPE, ClientTransport::new());
-    GLOBAL_RESOLVER_REGISTRY.add_builder(SharedResolverBuilder::new(InMemoryResolverBuilder));
+    GLOBAL_TRANSPORT_REGISTRY.add_transport(INMEMORY_NETWORK_TYPE, ClientTransport::new());
+    GLOBAL_RESOLVER_REGISTRY.add_builder(Box::new(InMemoryResolverBuilder));
 }
 
 struct InMemoryResolverBuilder;
@@ -134,15 +134,14 @@ impl ResolverBuilder for InMemoryResolverBuilder {
         "inmemory"
     }
 
-    fn build(
-        &self,
-        target: url::Url,
-        resolve_now: Arc<Notify>,
-        options: ResolverOptions,
-    ) -> Box<dyn Resolver> {
+    fn build(&self, target: &name_resolution::Url, options: ResolverOptions) -> Box<dyn Resolver> {
         let id = target.path().strip_prefix("/").unwrap().to_string();
 
         Box::new(NopResolver { id })
+    }
+
+    fn is_valid_uri(&self, uri: &crate::client::name_resolution::Url) -> bool {
+        true
     }
 }
 
@@ -150,26 +149,25 @@ struct NopResolver {
     id: String,
 }
 
-#[async_trait]
 impl Resolver for NopResolver {
-    async fn run(&mut self, channel_controller: Box<dyn ChannelController>) {
+    fn work(&mut self, channel_controller: &mut dyn ChannelController) {
         let mut addresses: Vec<Address> = Vec::new();
         for addr in LISTENERS.lock().unwrap().keys() {
             addresses.push(Address {
-                address_type: INMEMORY_ADDRESS_TYPE.to_string(),
+                network_type: INMEMORY_NETWORK_TYPE.to_string(),
                 address: addr.clone(),
                 ..Default::default()
             });
         }
 
-        let _ = channel_controller
-            .update(ResolverUpdate::Data(ResolverData {
-                endpoints: vec![Endpoint {
-                    addresses,
-                    ..Default::default()
-                }],
+        let _ = channel_controller.update(ResolverUpdate {
+            endpoints: Ok(vec![Endpoint {
+                addresses,
                 ..Default::default()
-            }))
-            .await;
+            }]),
+            ..Default::default()
+        });
     }
+
+    fn resolve_now(&mut self) {}
 }

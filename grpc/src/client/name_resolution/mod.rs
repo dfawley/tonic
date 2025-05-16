@@ -23,97 +23,174 @@
 //! a service.
 use core::fmt;
 
-use super::service_config::ServiceConfig;
-use crate::attributes::Attributes;
+use super::service_config::{self, ServiceConfig};
+use crate::{attributes::Attributes, rt};
 use std::{
     error::Error,
     fmt::{Display, Formatter},
     hash::Hash,
+    str::FromStr,
     sync::Arc,
 };
 use tokio::sync::Notify;
-use tonic::async_trait;
-use url::Url;
 
 mod passthrough;
 mod registry;
-pub use registry::{ResolverRegistry, SharedResolverBuilder, GLOBAL_RESOLVER_REGISTRY};
+pub use registry::{ResolverRegistry, GLOBAL_RESOLVER_REGISTRY};
 
-/// A name resolver factory that produces Resolver instances used by the channel
-/// to resolve network addresses for the target URI.
+pub struct Url {
+    url: url::Url,
+}
+
+impl FromStr for Url {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.parse::<url::Url>() {
+            Ok(url) => Ok(Url { url }),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+}
+
+impl From<url::Url> for Url {
+    fn from(url: url::Url) -> Self {
+        Url { url }
+    }
+}
+
+impl Url {
+    pub fn authority(&self) -> &str {
+        self.url.authority()
+    }
+
+    pub fn host_str(&self) -> Option<&str> {
+        self.url.host_str()
+    }
+
+    pub fn path(&self) -> &str {
+        self.url.path()
+    }
+}
+
+/// A name resolver factory
 pub trait ResolverBuilder: Send + Sync {
-    /// Builds and returns a new name resolver instance.
+    /// Builds a name resolver instance, or returns an error.
     ///
     /// Note that build must not fail.  Instead, an erroring Resolver may be
     /// returned that calls ChannelController.update() with an Err value.
-    fn build(
-        &self,
-        target: Url,
-        resolve_now: Arc<Notify>,
-        options: ResolverOptions,
-    ) -> Box<dyn Resolver>;
+    fn build(&self, target: &Url, options: ResolverOptions) -> Box<dyn Resolver>;
 
     /// Reports the URI scheme handled by this name resolver.
-    fn scheme(&self) -> &'static str;
+    fn scheme(&self) -> &str;
 
-    /// Returns the default authority for a channel using this name resolver and
-    /// target.  This is typically the same as the service's name.  By default,
-    /// the default_authority method automatically returns the path portion of
-    /// the target URI, with the leading prefix removed.
-    fn default_authority(&self, target: &Url) -> String {
-        let path = target.path();
-        path.strip_prefix("/").unwrap_or(path).to_string()
+    /// Returns the default authority for a channel using this name resolver
+    /// and target.  This is typically the same as the service's name.  By
+    /// default, the default_authority method automatically returns the path
+    /// portion of the target URI, with the leading prefix removed.
+    fn default_authority(&self, uri: &Url) -> String {
+        uri.authority().to_string()
     }
+
+    /// Returns a bool indicating whether the input uri is valid to create a
+    /// resolver.
+    fn is_valid_uri(&self, uri: &Url) -> bool;
 }
 
 /// A collection of data configured on the channel that is constructing this
 /// name resolver.
-#[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct ResolverOptions {
-    /// The authority that will be used for the channel by default.  This
-    /// contains either the result of the default_authority method of this
-    /// ResolverBuilder, or another string if the channel was configured to
-    /// override the default.
-    authority: String,
+    /// Authority is the effective authority of the channel for which the
+    /// resolver is built.
+    pub authority: String,
+
+    /// The runtime which provides utilities to do async work.
+    pub runtime: Arc<dyn rt::Runtime>,
+
+    /// A hook into the channel's work scheduler that allows the Resolver to
+    /// request the ability to perform operations on the ChannelController.
+    pub work_scheduler: Arc<dyn WorkScheduler>,
 }
 
-#[async_trait]
-/// A collection of operations a Resolver may perform on the channel which
-/// constructed it.
-pub trait ChannelController: Send + Sync {
-    /// Parses the provided JSON service config.
-    fn parse_config(&self, config: &str) -> Result<ServiceConfig, Box<dyn Error + Send + Sync>>; // TODO
+/// Used to asynchronously request a call into the Resolver's work method.
+pub trait WorkScheduler: Send + Sync {
+    // Schedules a call into the LbPolicy's work method.  If there is already a
+    // pending work call that has not yet started, this may not schedule another
+    // call.
+    fn schedule_work(&self);
+}
 
+/// Resolver watches for the updates on the specified target.
+/// Updates include address updates and service config updates.
+pub trait Resolver: Send {
+    /// Asks the resolver to obtain an updated resolver result, if
+    /// applicable.
+    ///
+    /// This is useful for pull-based implementations to decide when to
+    /// re-resolve.  However, the implementation is not required to
+    /// re-resolve immediately upon receiving this call; it may instead
+    /// elect to delay based on some configured minimum time between
+    /// queries, to avoid hammering the name service with queries.
+    ///
+    /// For push-based implementations, this may be a no-op.
+    fn resolve_now(&mut self);
+
+    /// Called serially by the work scheduler to do work after the helper's
+    /// schedule_work method is called.
+    fn work(&mut self, channel_controller: &mut dyn ChannelController);
+}
+
+/// The `ChannelController` trait provides the resolver with functionality
+/// to interact with the channel.
+pub trait ChannelController: Send + Sync {
     /// Notifies the channel about the current state of the name resolver.  If
     /// an error value is returned, the name resolver should attempt to
     /// re-resolve, if possible.  The resolver is responsible for applying an
     /// appropriate backoff mechanism to avoid overloading the system or the
     /// remote resolver.
-    async fn update(&self, update: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>>;
+    fn update(&mut self, update: ResolverUpdate) -> Result<(), String>;
+
+    /// Parses the provided JSON service config and returns an instance of a
+    /// ParsedServiceConfig.
+    fn parse_service_config(&self, config: &str) -> Result<ServiceConfig, String>;
 }
 
-/// A name resolver update expresses the current state of the resolver.
 #[derive(Clone)]
-pub enum ResolverUpdate {
-    /// Indicates the name resolver encountered an error.
-    Err(Arc<dyn Error + Send + Sync>),
-    /// Indicates the name resolver produced a valid result.
-    Data(ResolverData),
+#[non_exhaustive]
+/// ResolverUpdate contains the current Resolver state relevant to the
+/// channel.
+pub struct ResolverUpdate {
+    /// Attributes contains arbitrary data about the resolver intended for
+    /// consumption by the load balancing policy.
+    pub attributes: Arc<Attributes>,
+
+    /// Endpoints is the latest set of resolved endpoints for the target.
+    pub endpoints: Result<Vec<Endpoint>, String>,
+
+    /// service_config contains the result from parsing the latest service
+    /// config.  If it is None, it indicates no service config is present or
+    /// the resolver does not provide service configs.
+    pub service_config: Result<Option<ServiceConfig>, String>,
+
+    /// An optional human-readable note describing context about the
+    /// resolution, to be passed along to the LB policy for inclusion in
+    /// RPC failure status messages in cases where neither endpoints nor
+    /// service_config has a non-OK status.  For example, a resolver that
+    /// returns an empty endpoint list but a valid service config may set
+    /// to this to something like "no DNS entries found for <name>".
+    pub resolution_note: Option<String>,
 }
 
-/// Data provided by the name resolver to the channel.
-#[derive(Debug, Default, Clone)]
-#[non_exhaustive]
-pub struct ResolverData {
-    /// A list of endpoints which each identify a logical host serving the
-    /// service indicated by the target URI.
-    pub endpoints: Vec<Endpoint>,
-    /// The service config which the client should use for communicating with
-    /// the service.
-    pub service_config: Option<ServiceConfig>,
-    // Optional data which may be used by the LB Policy or channel.
-    pub attributes: Attributes,
+impl Default for ResolverUpdate {
+    fn default() -> Self {
+        ResolverUpdate {
+            service_config: Ok(None),
+            attributes: Arc::default(),
+            endpoints: Ok(Vec::default()),
+            resolution_note: None,
+        }
+    }
 }
 
 /// An Endpoint is an address or a collection of addresses which reference one
@@ -122,10 +199,37 @@ pub struct ResolverData {
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct Endpoint {
-    /// The list of addresses used to connect to the server.
+    /// Addresses contains a list of addresses used to access this endpoint.
     pub addresses: Vec<Address>,
-    /// Optional data which may be used by the LB policy or channel.
+
+    /// Attributes contains arbitrary data about this endpoint intended for
+    /// consumption by the LB policy.
     pub attributes: Attributes,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialOrd, Ord)]
+/// An Address is an identifier that indicates how to connect to a server.
+pub struct Address {
+    /// The network type is used to identify what kind of transport to create
+    /// when connecting to this address.  Typically TCP_IP_ADDRESS_TYPE.
+    pub network_type: String,
+
+    /// The address itself is passed to the transport in order to create a
+    /// connection to it.
+    pub address: String,
+
+    /// Attributes contains arbitrary data about this address intended for
+    /// consumption by the subchannel.
+    pub attributes: Attributes,
+}
+
+impl Eq for Address {}
+
+impl PartialEq for Address {
+    fn eq(&self, other: &Self) -> bool {
+        self.network_type == other.network_type && self.address == other.address
+    }
 }
 
 impl Eq for Endpoint {}
@@ -142,51 +246,19 @@ impl Hash for Endpoint {
     }
 }
 
-/// An Address is an identifier that indicates how to connect to a server.
-#[derive(Debug, Default, Clone, PartialOrd, Ord)]
-#[non_exhaustive]
-pub struct Address {
-    /// The address type is used to identify what kind of transport to create
-    /// when connecting to this address.  Typically TCP_IP_ADDRESS_TYPE.
-    pub address_type: String, // TODO: &'static str?
-    /// The address itself is passed to the transport in order to create a
-    /// connection to it.
-    pub address: String,
-    // Optional data which the transport may use for the connection.
-    pub attributes: Attributes,
-}
-
 impl Hash for Address {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.address_type.hash(state);
+        self.network_type.hash(state);
         self.address.hash(state);
-    }
-}
-
-impl Eq for Address {}
-
-impl PartialEq for Address {
-    fn eq(&self, other: &Self) -> bool {
-        self.address_type == other.address_type && self.address == other.address
     }
 }
 
 impl Display for Address {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.address_type, self.address)
+        write!(f, "{}:{}", self.network_type, self.address)
     }
 }
 
 /// Indicates the address is an IPv4 or IPv6 address that should be connected to
 /// via TCP/IP.
-pub static TCP_IP_ADDRESS_TYPE: &str = "tcp";
-
-/// A name resolver instance.
-#[async_trait]
-pub trait Resolver: Send + Sync {
-    /// The entry point of the resolver.  Will only be called once by the
-    /// channel.  Should not return unless the resolver never will need to
-    /// update its state.  The future will be dropped when the channel shuts
-    /// down or enters idle mode.
-    async fn run(&mut self, channel_controller: Box<dyn ChannelController>);
-}
+pub static TCP_IP_NETWORK_TYPE: &str = "tcp";

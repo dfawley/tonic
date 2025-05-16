@@ -1,70 +1,56 @@
 use std::{
     collections::HashMap,
+    str::FromStr,
     sync::{Arc, Mutex},
 };
 
 use once_cell::sync::Lazy;
 use tokio::sync::Notify;
-use url::Url;
 
 use super::{Resolver, ResolverBuilder, ResolverOptions};
 
-#[derive(Clone)]
-pub struct SharedResolverBuilder {
-    rb: Arc<dyn ResolverBuilder>,
-}
-
-impl SharedResolverBuilder {
-    pub fn new(rb: impl ResolverBuilder + 'static) -> Self {
-        Self { rb: Arc::new(rb) }
-    }
-}
-
-impl ResolverBuilder for SharedResolverBuilder {
-    fn scheme(&self) -> &'static str {
-        self.rb.scheme()
-    }
-
-    fn build(
-        &self,
-        target: Url,
-        resolve_now: Arc<Notify>,
-        options: ResolverOptions,
-    ) -> Box<dyn Resolver> {
-        self.rb.build(target, resolve_now, options)
-    }
-}
-
 /// A registry to store and retrieve name resolvers.  Resolvers are indexed by
 /// the URI scheme they are intended to handle.
+#[derive(Default)]
 pub struct ResolverRegistry {
-    m: Arc<Mutex<HashMap<String, SharedResolverBuilder>>>,
+    m: Arc<Mutex<HashMap<String, Arc<dyn ResolverBuilder>>>>,
 }
 
 impl ResolverRegistry {
     /// Construct an empty name resolver registry.
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self { m: Arc::default() }
     }
-    /// Add a name resolver into the registry.
-    pub fn add_builder(&self, builder: SharedResolverBuilder) {
+
+    /// Add a name resolver into the registry. builder.scheme() will
+    // be used as the scheme registered with this builder. If multiple
+    // resolvers are registered with the same name, the one registered last
+    // will take effect. Panics if the given scheme contains uppercase
+    // characters.
+    pub fn add_builder(&self, builder: Box<dyn ResolverBuilder>) {
+        let scheme = builder.scheme();
+        if scheme.chars().any(|c| c.is_ascii_uppercase()) {
+            panic!("Scheme must not contain uppercase characters: {}", scheme);
+        }
         self.m
             .lock()
             .unwrap()
-            .insert(builder.scheme().to_string(), builder);
+            .insert(scheme.to_string(), Arc::from(builder));
     }
-    /// Retrieve a name resolver from the registry, or None if not found.
-    pub fn get_scheme(&self, name: &str) -> Option<SharedResolverBuilder> {
-        self.m.lock().unwrap().get(name).cloned()
+
+    /// Returns the resolver builder registered for the given scheme, if any.
+    ///
+    /// The provided scheme is case-insensitive; any uppercase characters
+    /// will be converted to lowercase before lookup.
+    pub fn get(&self, scheme: &str) -> Option<Arc<dyn ResolverBuilder>> {
+        self.m
+            .lock()
+            .unwrap()
+            .get(&scheme.to_lowercase())
+            .map(|b| b.clone())
     }
 }
 
-impl Default for ResolverRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// The registry used if a local registry is not provided to a channel or if it
-/// does not exist in the local registry.
-pub static GLOBAL_RESOLVER_REGISTRY: Lazy<ResolverRegistry> = Lazy::new(ResolverRegistry::new);
+/// Global registry for resolver builders.
+pub static GLOBAL_RESOLVER_REGISTRY: std::sync::LazyLock<ResolverRegistry> =
+    std::sync::LazyLock::new(ResolverRegistry::new);
