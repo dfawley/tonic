@@ -99,7 +99,7 @@ mod tests {
     use crate::rt::{tokio::TokioDefaultDnsResolver, DnsResolver, ResolverOptions};
 
     #[tokio::test]
-    async fn test_compare_hickory_and_default() {
+    async fn compare_hickory_and_default() {
         let hickory_dns = super::DnsResolver::new(ResolverOptions::default()).unwrap();
         let mut ips_hickory = hickory_dns.lookup_host_name("localhost").await.unwrap();
 
@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_txt() {
+    async fn resolve_txt() {
         let records = vec![
             Record::from_rdata(
                 Name::from_ascii("test.local.").unwrap(),
@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_custom_authority() {
+    async fn custom_authority() {
         let record = Record::from_rdata(
             Name::from_ascii("test.local.").unwrap(),
             300,
