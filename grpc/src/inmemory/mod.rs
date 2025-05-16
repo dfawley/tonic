@@ -134,13 +134,17 @@ impl ResolverBuilder for InMemoryResolverBuilder {
         "inmemory"
     }
 
-    fn build(&self, target: &name_resolution::Url, options: ResolverOptions) -> Box<dyn Resolver> {
+    fn build(
+        &self,
+        target: &name_resolution::Target,
+        options: ResolverOptions,
+    ) -> Box<dyn Resolver> {
         let id = target.path().strip_prefix("/").unwrap().to_string();
 
         Box::new(NopResolver { id })
     }
 
-    fn is_valid_uri(&self, uri: &crate::client::name_resolution::Url) -> bool {
+    fn is_valid_uri(&self, uri: &crate::client::name_resolution::Target) -> bool {
         true
     }
 }

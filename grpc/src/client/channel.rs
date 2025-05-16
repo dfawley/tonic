@@ -262,7 +262,7 @@ impl ActiveChannel {
         // TODO(arjan-bal): Return error here instead of panicking.
         let rb = GLOBAL_RESOLVER_REGISTRY.get(target.scheme()).unwrap();
         let target = name_resolution::Target::from(target);
-        let authority = target.host_port();
+        let authority = target.authority_host_port();
         let authority = if authority.is_empty() {
             rb.default_authority(&target).to_owned()
         } else {

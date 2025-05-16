@@ -34,7 +34,6 @@ use std::{
 };
 use tokio::sync::Notify;
 
-mod dns;
 mod passthrough;
 mod registry;
 pub use registry::{ResolverRegistry, GLOBAL_RESOLVER_REGISTRY};
@@ -76,20 +75,20 @@ impl Target {
     }
 
     /// The host part of the authority.
-    pub fn host(&self) -> &str {
+    pub fn authority_host(&self) -> &str {
         self.url.host_str().unwrap_or("")
     }
 
     /// The port part of the authority.
-    pub fn port(&self) -> Option<u16> {
+    pub fn aythority_port(&self) -> Option<u16> {
         self.url.port()
     }
 
     /// Returns either host:port or host depending on the existence of the port
     /// in the authority.
-    pub fn host_port(&self) -> String {
-        let host = self.host();
-        let port = self.port();
+    pub fn authority_host_port(&self) -> String {
+        let host = self.authority_host();
+        let port = self.aythority_port();
         if let Some(port) = port {
             format!("{}:{}", host, port)
         } else {
@@ -97,10 +96,9 @@ impl Target {
         }
     }
 
-    /// Endpoint retrieves endpoint without leading "/" from `Url.path()`.
-    pub fn endpoint(&self) -> &str {
-        let endpoint = self.url.path();
-        endpoint.strip_suffix("/").unwrap_or(endpoint)
+    /// Retrieves endpoint from `Url.path()`.
+    pub fn path(&self) -> &str {
+        self.url.path()
     }
 }
 
@@ -110,8 +108,8 @@ impl Display for Target {
             f,
             "{}//{}/{}",
             self.scheme(),
-            self.host_port(),
-            self.endpoint()
+            self.authority_host_port(),
+            self.path()
         )
     }
 }
@@ -132,7 +130,7 @@ pub trait ResolverBuilder: Send + Sync {
     /// default, the default_authority method automatically returns the path
     /// portion of the target URI, with the leading prefix removed.
     fn default_authority<'a>(&self, uri: &'a Target) -> &'a str {
-        uri.host()
+        uri.authority_host()
     }
 
     /// Returns a bool indicating whether the input uri is valid to create a
@@ -305,3 +303,64 @@ impl Display for Address {
 /// Indicates the address is an IPv4 or IPv6 address that should be connected to
 /// via TCP/IP.
 pub static TCP_IP_NETWORK_TYPE: &str = "tcp";
+
+#[cfg(test)]
+mod test {
+    use super::Target;
+
+    #[test]
+    pub fn parse_target() {
+        #[derive(Default)]
+        struct TestCase {
+            input: &'static str,
+            want_scheme: &'static str,
+            want_host: &'static str,
+            want_port: Option<u16>,
+            want_host_port: &'static str,
+            want_path: &'static str,
+        }
+        let test_cases = vec![
+            TestCase {
+                input: "dns:///grpc.io",
+                want_scheme: "dns",
+                want_host_port: "",
+                want_host: "",
+                want_port: None,
+                want_path: "/grpc.io",
+            },
+            TestCase {
+                input: "dns://8.8.8.8:53/grpc.io/docs",
+                want_scheme: "dns",
+                want_host_port: "8.8.8.8:53",
+                want_host: "8.8.8.8",
+                want_port: Some(53),
+                want_path: "/grpc.io/docs",
+            },
+            TestCase {
+                input: "unix:path/to/file",
+                want_scheme: "unix",
+                want_host_port: "",
+                want_host: "",
+                want_port: None,
+                want_path: "path/to/file",
+            },
+            TestCase {
+                input: "unix:///run/containerd/containerd.sock",
+                want_scheme: "unix",
+                want_host_port: "",
+                want_host: "",
+                want_port: None,
+                want_path: "/run/containerd/containerd.sock",
+            },
+        ];
+
+        for tc in test_cases {
+            let target: Target = tc.input.parse().unwrap();
+            assert_eq!(target.scheme(), tc.want_scheme);
+            assert_eq!(target.authority_host(), tc.want_host);
+            assert_eq!(target.aythority_port(), tc.want_port);
+            assert_eq!(target.authority_host_port(), tc.want_host_port);
+            assert_eq!(target.path(), tc.want_path);
+        }
+    }
+}
