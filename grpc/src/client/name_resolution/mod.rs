@@ -43,12 +43,12 @@ pub struct Url {
 }
 
 impl FromStr for Url {
-    type Err = ParseError;
+    type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.parse::<url::Url>() {
             Ok(url) => Ok(Url { url }),
-            Err(err) => Err(ParseError { cause: err }),
+            Err(err) => Err(err.to_string()),
         }
     }
 }
@@ -57,11 +57,6 @@ impl From<url::Url> for Url {
     fn from(url: url::Url) -> Self {
         Url { url }
     }
-}
-
-#[derive(Debug)]
-pub struct ParseError {
-    cause: url::ParseError,
 }
 
 impl Url {
