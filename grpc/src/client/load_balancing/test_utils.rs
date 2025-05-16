@@ -39,6 +39,7 @@ impl Subchannel for TestSubchannel {
     }
 
     fn connect(&self) {
+        println!("connect called for subchannel {}", self.address);
         self.tx_connect
             .send(TestEvent::Connect(self.address.clone()))
             .unwrap();
