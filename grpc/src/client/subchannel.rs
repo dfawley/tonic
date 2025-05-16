@@ -14,6 +14,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt::{Debug, Display},
+    ops::Sub,
     sync::{Arc, Mutex, Weak},
 };
 use tokio::{
@@ -460,7 +461,7 @@ impl Drop for InternalSubchannel {
 }
 
 // SubchannelKey uniiquely identifies a subchannel in the pool.
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone)]
+#[derive(PartialEq, PartialOrd, Eq, Ord, Clone)]
 
 pub(crate) struct SubchannelKey {
     address: Address,
@@ -472,6 +473,17 @@ impl SubchannelKey {
     }
 }
 
+impl Display for SubchannelKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.address.address)
+    }
+}
+
+impl Debug for SubchannelKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.address)
+    }
+}
 pub(crate) struct InternalSubchannelPool {
     work_scheduler: WorkQueueTx,
     transport_registry: TransportRegistry,

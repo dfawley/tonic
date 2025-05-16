@@ -85,6 +85,7 @@ impl ChannelController for FakeChannel {
         subchannel
     }
     fn update_picker(&mut self, update: LbState) {
+        println!("picker_update called with {}", update.connectivity_state);
         self.tx_events
             .send(TestEvent::UpdatePicker(update))
             .unwrap();
