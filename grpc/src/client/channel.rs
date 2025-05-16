@@ -19,11 +19,11 @@ use serde_json::json;
 use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
-use crate::client::ConnectivityState;
 use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
 use crate::{attributes::Attributes, rt::tokio::TokioRuntime};
+use crate::{client::ConnectivityState, rt::Runtime};
 
 use super::service_config::ServiceConfig;
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
@@ -137,7 +137,7 @@ impl Channel {
             inner: Arc::new(PersistentChannel::new(
                 target,
                 credentials,
-                runtime,
+                Arc::from(runtime.unwrap_or(Box::new(rt::tokio::TokioRuntime {}))),
                 options,
             )),
         }
@@ -193,6 +193,7 @@ impl Channel {
             *s = Some(ActiveChannel::new(
                 self.inner.target.clone(),
                 &self.inner.options,
+                self.inner.runtime.clone(),
             ));
         }
         s.clone().unwrap()
@@ -208,6 +209,7 @@ struct PersistentChannel {
     target: Url,
     options: ChannelOptions,
     active_channel: Mutex<Option<Arc<ActiveChannel>>>,
+    runtime: Arc<dyn Runtime>,
 }
 
 impl PersistentChannel {
@@ -216,26 +218,28 @@ impl PersistentChannel {
     fn new(
         target: &str,
         credentials: Option<Box<dyn Credentials>>,
-        runtime: Option<Box<dyn rt::Runtime>>,
+        runtime: Arc<dyn rt::Runtime>,
         options: ChannelOptions,
     ) -> Self {
         Self {
             target: Url::from_str(target).unwrap(), // TODO handle err
             active_channel: Mutex::default(),
             options,
+            runtime: runtime.clone(),
         }
     }
 }
 
 struct ActiveChannel {
     cur_state: Mutex<ConnectivityState>,
-    abort_handle: AbortHandle,
+    abort_handle: Box<dyn rt::TaskHandle>,
     picker: Arc<Watcher<Arc<dyn Picker>>>,
     connectivity_state: Arc<Watcher<ConnectivityState>>,
+    runtime: Arc<dyn Runtime>,
 }
 
 impl ActiveChannel {
-    fn new(target: Url, options: &ChannelOptions) -> Arc<Self> {
+    fn new(target: Url, options: &ChannelOptions, runtime: Arc<dyn Runtime>) -> Arc<Self> {
         let (tx, mut rx) = mpsc::unbounded_channel::<WorkQueueItem>();
         let transport_registry = match &options.transport_registry {
             Some(tr) => tr.clone(),
@@ -272,7 +276,7 @@ impl ActiveChannel {
         };
         let resolver = rb.build(&target, resolver_opts);
 
-        let jh = tokio::task::spawn(async move {
+        let jh = runtime.spawn(Box::pin(async move {
             let mut resolver = resolver;
             while let Some(w) = rx.recv().await {
                 match w {
@@ -280,13 +284,14 @@ impl ActiveChannel {
                     WorkQueueItem::ScheduleResolver => resolver.work(&mut channel_controller),
                 }
             }
-        });
+        }));
 
         Arc::new(Self {
             cur_state: Mutex::new(ConnectivityState::Connecting),
-            abort_handle: jh.abort_handle(),
+            abort_handle: jh,
             picker: picker.clone(),
             connectivity_state: connectivity_state.clone(),
+            runtime: runtime.clone(),
         })
     }
 

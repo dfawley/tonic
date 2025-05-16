@@ -95,7 +95,7 @@ mod tests {
     use super::{DnsResolver, ResolverOptions, Runtime, TokioDefaultDnsResolver, TokioRuntime};
 
     #[tokio::test]
-    async fn test_lookup_hostname() {
+    async fn lookup_hostname() {
         let runtime = TokioRuntime {};
 
         let dns = runtime
@@ -109,7 +109,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_resolver_txt_fails() {
+    async fn default_resolver_txt_fails() {
         let default_resolver = TokioDefaultDnsResolver::new(ResolverOptions::default()).unwrap();
 
         let txt = default_resolver.lookup_txt("google.com").await;
@@ -117,7 +117,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_resolver_custom_authority() {
+    async fn default_resolver_custom_authority() {
         let opts = ResolverOptions {
             server_addr: Some("8.8.8.8:53".parse().unwrap()),
         };
