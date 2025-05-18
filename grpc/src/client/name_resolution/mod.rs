@@ -34,6 +34,7 @@ use std::{
 };
 use tokio::sync::Notify;
 
+mod dns;
 mod passthrough;
 mod registry;
 pub use registry::{ResolverRegistry, GLOBAL_RESOLVER_REGISTRY};
@@ -87,7 +88,7 @@ impl Target {
     /// Returns either host:port or host depending on the existence of the port
     /// in the authority.
     pub fn authority_host_port(&self) -> String {
-        let host = self.authority_host();
+        let host = self.url.host_str().unwrap_or("");
         let port = self.aythority_port();
         if let Some(port) = port {
             format!("{}:{}", host, port)
@@ -130,7 +131,8 @@ pub trait ResolverBuilder: Send + Sync {
     /// default, the default_authority method automatically returns the path
     /// portion of the target URI, with the leading prefix removed.
     fn default_authority<'a>(&self, uri: &'a Target) -> &'a str {
-        uri.authority_host()
+        let path = uri.path();
+        path.strip_prefix("/").unwrap_or(path)
     }
 
     /// Returns a bool indicating whether the input uri is valid to create a
