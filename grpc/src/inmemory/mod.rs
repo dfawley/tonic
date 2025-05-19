@@ -158,7 +158,7 @@ impl Resolver for NopResolver {
         let mut addresses: Vec<Address> = Vec::new();
         for addr in LISTENERS.lock().unwrap().keys() {
             addresses.push(Address {
-                network_type: INMEMORY_NETWORK_TYPE.to_string(),
+                network_type: INMEMORY_NETWORK_TYPE,
                 address: addr.clone(),
                 ..Default::default()
             });

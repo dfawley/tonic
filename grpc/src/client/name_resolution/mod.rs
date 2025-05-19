@@ -35,6 +35,7 @@ use std::{
 use tokio::sync::Notify;
 
 mod backoff;
+mod dns;
 mod passthrough;
 mod registry;
 pub use registry::{ResolverRegistry, GLOBAL_RESOLVER_REGISTRY};
@@ -131,7 +132,8 @@ pub trait ResolverBuilder: Send + Sync {
     /// default, the default_authority method automatically returns the path
     /// portion of the target URI, with the leading prefix removed.
     fn default_authority<'a>(&self, uri: &'a Target) -> &'a str {
-        uri.authority_host()
+        let path = uri.path();
+        path.strip_prefix("/").unwrap_or(path)
     }
 
     /// Returns a bool indicating whether the input uri is valid to create a
@@ -198,7 +200,7 @@ pub trait ChannelController: Send + Sync {
     fn parse_service_config(&self, config: &str) -> Result<ServiceConfig, String>;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 /// ResolverUpdate contains the current Resolver state relevant to the
 /// channel.
@@ -255,7 +257,7 @@ pub struct Endpoint {
 pub struct Address {
     /// The network type is used to identify what kind of transport to create
     /// when connecting to this address.  Typically TCP_IP_ADDRESS_TYPE.
-    pub network_type: String,
+    pub network_type: &'static str,
 
     /// The address itself is passed to the transport in order to create a
     /// connection to it.

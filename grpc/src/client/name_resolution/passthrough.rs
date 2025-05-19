@@ -35,7 +35,19 @@ impl ResolverBuilder for PassthroughResolverBuilder {
         let id = target.path().strip_prefix("/").unwrap().to_string();
 
         options.work_scheduler.schedule_work();
-        Box::new(NopResolver { id })
+        Box::new(NopResolver {
+            update: ResolverUpdate {
+                endpoints: Ok(vec![Endpoint {
+                    addresses: vec![Address {
+                        network_type: TCP_IP_NETWORK_TYPE,
+                        address: id,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+        })
     }
 
     fn is_valid_uri(&self, uri: &super::Target) -> bool {
@@ -43,25 +55,14 @@ impl ResolverBuilder for PassthroughResolverBuilder {
     }
 }
 
-struct NopResolver {
-    id: String,
+pub(super) struct NopResolver {
+    pub update: ResolverUpdate,
 }
 
 impl Resolver for NopResolver {
     fn resolve_now(&mut self) {}
 
     fn work(&mut self, channel_controller: &mut dyn ChannelController) {
-        let update = ResolverUpdate {
-            endpoints: Ok(vec![Endpoint {
-                addresses: vec![Address {
-                    network_type: TCP_IP_NETWORK_TYPE.to_string(),
-                    address: self.id.clone(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }]),
-            ..Default::default()
-        };
-        let _ = channel_controller.update(update);
+        let _ = channel_controller.update(self.update.clone());
     }
 }
