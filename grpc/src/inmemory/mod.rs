@@ -140,7 +140,7 @@ impl ResolverBuilder for InMemoryResolverBuilder {
         options: ResolverOptions,
     ) -> Box<dyn Resolver> {
         let id = target.path().strip_prefix("/").unwrap().to_string();
-
+        options.work_scheduler.schedule_work();
         Box::new(NopResolver { id })
     }
 
