@@ -34,6 +34,7 @@ use std::{
 };
 use tokio::sync::Notify;
 
+mod backoff;
 mod passthrough;
 mod registry;
 pub use registry::{ResolverRegistry, GLOBAL_RESOLVER_REGISTRY};
