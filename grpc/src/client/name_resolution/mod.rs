@@ -88,7 +88,7 @@ impl Target {
     /// Returns either host:port or host depending on the existence of the port
     /// in the authority.
     pub fn authority_host_port(&self) -> String {
-        let host = self.url.host_str().unwrap_or("");
+        let host = self.authority_host();
         let port = self.aythority_port();
         if let Some(port) = port {
             format!("{}:{}", host, port)

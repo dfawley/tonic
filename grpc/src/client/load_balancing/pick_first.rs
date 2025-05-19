@@ -3,7 +3,7 @@ use std::{
     error::Error,
     hash::Hash,
     ops::Sub,
-    sync::{Arc, Mutex},
+    sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 
@@ -21,11 +21,28 @@ use crate::{
     service::{Request, Response, Service},
 };
 
-use rand::{self, seq::SliceRandom};
+use once_cell::sync::Lazy;
+use rand::{self, rngs::StdRng, seq::SliceRandom, thread_rng, Rng, RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::time::sleep;
 use tonic::{async_trait, metadata::MetadataMap};
+
+type EndpointShuffler = dyn Fn(&mut [Endpoint]) + Send + Sync + 'static;
+pub static SHUFFLE_ENDPOINTS_FN: LazyLock<Mutex<Box<EndpointShuffler>>> =
+    std::sync::LazyLock::new(|| {
+        let shuffle_endpoints: Box<EndpointShuffler> = Box::new(|endpoints: &mut [Endpoint]| {
+            let mut rng = thread_rng();
+            endpoints.shuffle(&mut rng);
+        });
+        Mutex::new(shuffle_endpoints)
+    });
+pub(crate) fn thread_rng_shuffler() -> Box<EndpointShuffler> {
+    Box::new(|endpoints: &mut [Endpoint]| {
+        let mut rng = thread_rng();
+        endpoints.shuffle(&mut rng);
+    })
+}
 
 #[cfg(test)]
 mod tests;
@@ -44,7 +61,7 @@ impl LbPolicyBuilder for Builder {
             last_resolver_error: None,
             last_connection_error: None,
             connectivity_state: ConnectivityState::Connecting,
-            sent_connecting: false,
+            sent_connecting_state: false,
             num_transient_failures: 0,
         })
     }
@@ -74,7 +91,7 @@ pub(super) struct PickFirstConfig {
 }
 
 pub fn reg() {
-    super::GLOBAL_LB_REGISTRY.add_builder(Builder {})
+    super::GLOBAL_LB_REGISTRY.add_builder(Builder {});
 }
 
 #[derive(Clone)]
@@ -100,7 +117,7 @@ struct PickFirstPolicy {
     last_resolver_error: Option<String>,     // Most recent error from the name resolver.
     last_connection_error: Option<Arc<dyn Error + Send + Sync>>, // Most recent error from any subchannel.
     connectivity_state: ConnectivityState, // Overall connectivity state of the channel.
-    sent_connecting: bool, // Whether we have sent a CONNECTING state to the channel.
+    sent_connecting_state: bool, // Whether we have sent a CONNECTING state to the channel.
     num_transient_failures: usize, // Number of transient failures after the end of the first pass.
 }
 
@@ -207,6 +224,11 @@ impl LbPolicy for PickFirstPolicy {
     }
 }
 
+fn shuffle_endpoints(endpoints: &mut [Endpoint]) {
+    let mut rng = rand::thread_rng();
+    endpoints.shuffle(&mut rng);
+}
+
 impl PickFirstPolicy {
     fn shuffle_endpoints(
         &self,
@@ -230,8 +252,7 @@ impl PickFirstPolicy {
         // change the order of the endpoints but will not touch the order of the
         // addresses within each endpoint - A61.
         if shuffle_addresses {
-            let mut rng = rand::thread_rng();
-            endpoints.shuffle(&mut rng);
+            SHUFFLE_ENDPOINTS_FN.lock().unwrap()(endpoints);
         };
         None
     }
@@ -310,7 +331,8 @@ impl PickFirstPolicy {
             }
             ConnectivityState::Connecting => {
                 // If we are already in CONNECTING, ignore this update.
-                if self.connectivity_state == ConnectivityState::Connecting && self.sent_connecting
+                if self.connectivity_state == ConnectivityState::Connecting
+                    && self.sent_connecting_state
                 {
                     return;
                 }
@@ -339,6 +361,7 @@ impl PickFirstPolicy {
                             picker: Arc::new(Failing { error: err }),
                         });
                         channel_controller.request_resolution();
+                        println!("first pass complete, connecting to all subchannels");
                         subchannel_list.connect_to_all_subchannels(channel_controller);
                     }
                 } else {
@@ -373,7 +396,7 @@ impl PickFirstPolicy {
             }),
         });
         channel_controller.request_resolution();
-        self.sent_connecting = false;
+        self.sent_connecting_state = false;
     }
 
     fn move_to_connecting(&mut self, channel_controller: &mut dyn ChannelController) {
@@ -382,7 +405,7 @@ impl PickFirstPolicy {
             connectivity_state: ConnectivityState::Connecting,
             picker: Arc::new(QueuingPicker {}),
         });
-        self.sent_connecting = true;
+        self.sent_connecting_state = true;
     }
 
     fn move_to_ready(
@@ -399,7 +422,7 @@ impl PickFirstPolicy {
             connectivity_state: ConnectivityState::Ready,
             picker: Arc::new(OneSubchannelPicker { sc: sc.clone() }),
         });
-        self.sent_connecting = false;
+        self.sent_connecting_state = false;
     }
 
     fn move_to_transient_failure(&mut self, channel_controller: &mut dyn ChannelController) {
@@ -413,7 +436,7 @@ impl PickFirstPolicy {
             picker: Arc::new(Failing { error: err }),
         });
         channel_controller.request_resolution();
-        self.sent_connecting = false;
+        self.sent_connecting_state = false;
     }
 }
 
@@ -532,6 +555,7 @@ impl SubchannelList {
                     if state.connectivity_state == ConnectivityState::Connecting
                         || state.connectivity_state == ConnectivityState::TransientFailure
                     {
+                        self.current_idx += 1;
                         continue;
                     } else if state.connectivity_state == ConnectivityState::Idle {
                         sc.connect();
@@ -546,7 +570,6 @@ impl SubchannelList {
                     );
                 }
             }
-            self.current_idx += 1;
         }
         false
     }
