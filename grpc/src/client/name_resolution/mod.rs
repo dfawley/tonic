@@ -200,7 +200,7 @@ pub trait ChannelController: Send + Sync {
     fn parse_service_config(&self, config: &str) -> Result<ServiceConfig, String>;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 /// ResolverUpdate contains the current Resolver state relevant to the
 /// channel.

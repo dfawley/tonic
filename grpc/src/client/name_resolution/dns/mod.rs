@@ -7,6 +7,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use once_cell::sync::Lazy;
 use tokio::sync::mpsc::UnboundedSender;
 use url::Host;
 
@@ -19,9 +20,12 @@ use crate::{
 };
 
 use super::{
-    backoff::{ExponentialBackoff, DEFAULT_EXPONENTIAL_CONFIG},
-    Endpoint, Resolver, ResolverBuilder,
+    backoff::{self, BackoffConfig, ExponentialBackoff, DEFAULT_EXPONENTIAL_CONFIG},
+    Endpoint, Resolver, ResolverBuilder, GLOBAL_RESOLVER_REGISTRY,
 };
+
+#[cfg(test)]
+mod test;
 
 const DEFAULT_PORT: u16 = 443;
 const DEFAULT_DNS_PORT: u16 = 53;
@@ -32,20 +36,47 @@ const DEFAULT_DNS_PORT: u16 = 53;
 ///
 /// It is recommended to set this value at application startup. Avoid modifying
 /// this variable after initialization.
-/// TODO(arjan-bal): Make these configurable.
-const RESOLVING_TIMEOUT: Duration = Duration::from_secs(30);
+static RESOLVING_TIMEOUT: Lazy<Mutex<Duration>> = Lazy::new(|| Mutex::new(Duration::from_secs(30)));
 
 /// This is the minimum interval at which re-resolutions are allowed. This helps
 /// to prevent excessive re-resolution.
-const MIN_RESOLUTION_INTERVAL: Duration = Duration::from_secs(30);
+static MIN_RESOLUTION_INTERVAL: Lazy<Mutex<Duration>> =
+    Lazy::new(|| Mutex::new(Duration::from_secs(30)));
+
+pub fn get_resolving_timeout() -> Duration {
+    RESOLVING_TIMEOUT.lock().unwrap().clone()
+}
+
+pub fn set_resolving_timeout(duration: Duration) {
+    *RESOLVING_TIMEOUT.lock().unwrap() = duration;
+}
+
+pub fn get_min_resolution_interval() -> Duration {
+    MIN_RESOLUTION_INTERVAL.lock().unwrap().clone()
+}
+
+pub fn set_min_resolution_interval(duration: Duration) {
+    *MIN_RESOLUTION_INTERVAL.lock().unwrap() = duration;
+}
+
+pub fn reg() {
+    GLOBAL_RESOLVER_REGISTRY.add_builder(Box::new(Builder {}));
+}
+
 struct Builder {}
 
-impl ResolverBuilder for Builder {
-    fn build(
-        &self,
+struct DnsOptions {
+    min_resolution_interval: Duration,
+    resolving_timeout: Duration,
+    backoff_config: BackoffConfig,
+}
+
+impl DnsResolver {
+    fn new(
         target: &super::Target,
         options: super::ResolverOptions,
-    ) -> Box<dyn super::Resolver> {
+        dns_opts: DnsOptions,
+    ) -> Box<dyn Resolver + 'static> {
         let parsed = match parse_endpoint_and_authority(target) {
             Ok(res) => res,
             Err(err) => return nop_resolver_for_err(err.to_string(), options),
@@ -76,13 +107,13 @@ impl ResolverBuilder for Builder {
             tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
 
         let handle = options.runtime.clone().spawn(Box::pin(async move {
-            let mut backoff = ExponentialBackoff::new(DEFAULT_EXPONENTIAL_CONFIG.clone());
+            let mut backoff = ExponentialBackoff::new(dns_opts.backoff_config.clone());
             let state = state_copy;
             let work_scheduler = options.work_scheduler;
             let mut update_error_rx = update_error_rx;
             loop {
                 let mut lookup_fut = dns.lookup_host_name(&host);
-                let mut timeout_fut = options.runtime.sleep(RESOLVING_TIMEOUT);
+                let mut timeout_fut = options.runtime.sleep(dns_opts.resolving_timeout);
                 let addrs = tokio::select! {
                     result = &mut lookup_fut => {
                         match result {
@@ -123,7 +154,7 @@ impl ResolverBuilder for Builder {
                     // constantly re-resolving.
                     backoff.reset();
                     next_resoltion_time = SystemTime::now()
-                        .checked_add(MIN_RESOLUTION_INTERVAL)
+                        .checked_add(dns_opts.min_resolution_interval)
                         .unwrap();
                     _ = resolve_now_rx.recv().await;
                 }
@@ -141,6 +172,21 @@ impl ResolverBuilder for Builder {
             resolve_now_requester: resolve_now_tx,
             update_error_sender: update_error_tx,
         })
+    }
+}
+
+impl ResolverBuilder for Builder {
+    fn build(
+        &self,
+        target: &super::Target,
+        options: super::ResolverOptions,
+    ) -> Box<dyn super::Resolver> {
+        let dns_opts = DnsOptions {
+            min_resolution_interval: get_min_resolution_interval(),
+            resolving_timeout: get_resolving_timeout(),
+            backoff_config: DEFAULT_EXPONENTIAL_CONFIG,
+        };
+        DnsResolver::new(target, options, dns_opts)
     }
 
     fn scheme(&self) -> &str {
@@ -315,130 +361,4 @@ fn nop_resolver_for_err(err: String, options: super::ResolverOptions) -> Box<dyn
             ..Default::default()
         },
     })
-}
-
-#[cfg(test)]
-mod test {
-    use crate::client::name_resolution::{
-        dns::{parse_endpoint_and_authority, HostPort},
-        Target,
-    };
-
-    use super::ParseResult;
-
-    #[test]
-    pub fn target_parsing() {
-        struct TestCase {
-            input: &'static str,
-            want_result: Result<ParseResult, String>,
-        }
-        let test_cases = vec![
-            TestCase {
-                input: "dns:///grpc.io",
-                want_result: Ok(ParseResult {
-                    endpoint: HostPort {
-                        host: url::Host::Domain("grpc.io".to_string()),
-                        port: 443,
-                    },
-                    authority: None,
-                }),
-            },
-            TestCase {
-                input: "dns:///grpc.io:1234",
-                want_result: Ok(ParseResult {
-                    endpoint: HostPort {
-                        host: url::Host::Domain("grpc.io".to_string()),
-                        port: 1234,
-                    },
-                    authority: None,
-                }),
-            },
-            TestCase {
-                input: "dns://8.8.8.8/grpc.io:1234",
-                want_result: Ok(ParseResult {
-                    endpoint: HostPort {
-                        host: url::Host::Domain("grpc.io".to_string()),
-                        port: 1234,
-                    },
-                    authority: Some("8.8.8.8:53".parse().unwrap()),
-                }),
-            },
-            TestCase {
-                input: "dns://8.8.8.8:5678/grpc.io:1234/abc",
-                want_result: Ok(ParseResult {
-                    endpoint: HostPort {
-                        host: url::Host::Domain("grpc.io".to_string()),
-                        port: 1234,
-                    },
-                    authority: Some("8.8.8.8:5678".parse().unwrap()),
-                }),
-            },
-            TestCase {
-                input: "dns://[::1]:5678/grpc.io:1234/abc",
-                want_result: Ok(ParseResult {
-                    endpoint: HostPort {
-                        host: url::Host::Domain("grpc.io".to_string()),
-                        port: 1234,
-                    },
-                    authority: Some("[::1]:5678".parse().unwrap()),
-                }),
-            },
-            TestCase {
-                input: "dns://[fe80::1]:5678/127.0.0.1:1234/abc",
-                want_result: Ok(ParseResult {
-                    endpoint: HostPort {
-                        host: url::Host::Ipv4("127.0.0.1".parse().unwrap()),
-                        port: 1234,
-                    },
-                    authority: Some("[fe80::1]:5678".parse().unwrap()),
-                }),
-            },
-            TestCase {
-                input: "dns:///[fe80::1%80]:5678/abc",
-                want_result: Err("SocketAddr doesn't support IPv6 addresses with zones".to_string()),
-            },
-            TestCase {
-                input: "dns:///:5678/abc",
-                want_result: Err("Empty host with port".to_string()),
-            },
-            TestCase {
-                input: "dns:///grpc.io:abc/abc",
-                want_result: Err("Non numeric port".to_string()),
-            },
-            TestCase {
-                input: "dns:///grpc.io:/",
-                want_result: Ok(ParseResult {
-                    endpoint: HostPort {
-                        host: url::Host::Domain("grpc.io".to_string()),
-                        port: 443,
-                    },
-                    authority: None,
-                }),
-            },
-            TestCase {
-                input: "dns:///:",
-                want_result: Err("No host and port".to_string()),
-            },
-            TestCase {
-                input: "dns:///[2001:db8:a0b:12f0::1",
-                want_result: Err("Invalid address".to_string()),
-            },
-        ];
-
-        for tc in test_cases {
-            let target: Target = tc.input.parse().unwrap();
-            let got = parse_endpoint_and_authority(&target);
-            if got.is_err() != tc.want_result.is_err() {
-                panic!(
-                    "Got error {:?}, want error: {:?}",
-                    got.err(),
-                    tc.want_result.err()
-                );
-            }
-            if got.is_err() {
-                continue;
-            }
-            assert_eq!(got.unwrap(), tc.want_result.unwrap());
-        }
-    }
 }
