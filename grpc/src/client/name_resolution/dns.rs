@@ -7,7 +7,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use rand::{rngs::StdRng, Rng};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Host;
 
@@ -19,76 +18,13 @@ use crate::{
     rt,
 };
 
-use super::{Endpoint, Resolver, ResolverBuilder};
+use super::{
+    backoff::{ExponentialBackoff, DEFAULT_EXPONENTIAL_CONFIG},
+    Endpoint, Resolver, ResolverBuilder,
+};
 
 const DEFAULT_PORT: u16 = 443;
 const DEFAULT_DNS_PORT: u16 = 53;
-
-/// TODO(arjan-bal): Move this
-#[derive(Clone)]
-struct BackoffConfig {
-    /// The amount of time to backoff after the first failure.
-    base_delay: Duration,
-
-    /// The factor with which to multiply backoffs after a
-    /// failed retry. Should ideally be greater than 1.
-    multiplier: f64,
-
-    /// The factor with which backoffs are randomized.
-    jitter: f64,
-
-    /// The upper bound of backoff delay.
-    max_delay: Duration,
-}
-
-struct ExponentialBackoff {
-    config: BackoffConfig,
-
-    /// The delay for the next retry, without the random jitter. Store as f64
-    /// to avoid rounding errors.
-    next_delay_secs: f64,
-}
-
-const DEFAULT_EXPONENTIAL_CONFIG: BackoffConfig = BackoffConfig {
-    base_delay: Duration::from_secs(1),
-    multiplier: 1.6,
-    jitter: 1.2,
-    max_delay: Duration::from_secs(120),
-};
-
-impl ExponentialBackoff {
-    /// This is a backoff configuration with the default values specified
-    /// at https://github.com/grpc/grpc/blob/master/doc/connection-backoff.md.
-    ///
-    /// This should be useful for callers who want to configure backoff with
-    /// non-default values only for a subset of the options.
-    fn new(config: BackoffConfig) -> Self {
-        let next_delay_secs = config.base_delay.min(config.max_delay).as_secs_f64();
-        ExponentialBackoff {
-            config,
-            next_delay_secs,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.next_delay_secs = self
-            .config
-            .base_delay
-            .min(self.config.max_delay)
-            .as_secs_f64();
-    }
-
-    fn backoff_duration(&mut self) -> Duration {
-        let ret = self.next_delay_secs
-            * (1.0 + self.config.jitter * rand::thread_rng().gen_range(-1.0..1.0));
-        self.next_delay_secs = self
-            .config
-            .max_delay
-            .as_secs_f64()
-            .min(self.next_delay_secs * self.config.base_delay.as_secs_f64());
-        Duration::from_secs_f64(ret)
-    }
-}
 
 /// This specifies the maximum duration for a DNS resolution request.
 /// If the timeout expires before a response is received, the request will be
@@ -182,8 +118,8 @@ impl ResolverBuilder for Builder {
                         .checked_add(backoff.backoff_duration())
                         .unwrap();
                 } else {
-                    // Success resolving, wait for the next ResolveNow. However,
-                    // also wait 30 seconds at the very least to prevent
+                    // Success resolving, wait for the next resolve_now. However,
+                    // also wait MIN_RESOLUTION_INTERVAL at the very least to prevent
                     // constantly re-resolving.
                     backoff.reset();
                     next_resoltion_time = SystemTime::now()
@@ -222,8 +158,6 @@ impl ResolverBuilder for Builder {
 }
 
 struct DnsResolver {
-    // TODO(arjan-bal): Replace with async-aware mutex, but need to make
-    // Resolver an async trait.
     state: Arc<Mutex<InternalState>>,
     task_handle: Box<dyn rt::TaskHandle>,
     resolve_now_requester: UnboundedSender<()>,
