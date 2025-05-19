@@ -1,15 +1,107 @@
 //! This module implements a DNS resolver to be installed as the default resolver
 //! in grpc.
 
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime},
+};
 
+use rand::{rngs::StdRng, Rng};
+use tokio::sync::mpsc::UnboundedSender;
 use url::Host;
 
-use super::ResolverBuilder;
+use crate::{
+    client::name_resolution::{
+        passthrough::{self, NopResolver},
+        Address, ResolverUpdate, TCP_IP_NETWORK_TYPE,
+    },
+    rt,
+};
+
+use super::{Endpoint, Resolver, ResolverBuilder};
 
 const DEFAULT_PORT: u16 = 443;
 const DEFAULT_DNS_PORT: u16 = 53;
 
+/// TODO(arjan-bal): Move this
+#[derive(Clone)]
+struct BackoffConfig {
+    /// The amount of time to backoff after the first failure.
+    base_delay: Duration,
+
+    /// The factor with which to multiply backoffs after a
+    /// failed retry. Should ideally be greater than 1.
+    multiplier: f64,
+
+    /// The factor with which backoffs are randomized.
+    jitter: f64,
+
+    /// The upper bound of backoff delay.
+    max_delay: Duration,
+}
+
+struct ExponentialBackoff {
+    config: BackoffConfig,
+
+    /// The delay for the next retry, without the random jitter. Store as f64
+    /// to avoid rounding errors.
+    next_delay_secs: f64,
+}
+
+const DEFAULT_EXPONENTIAL_CONFIG: BackoffConfig = BackoffConfig {
+    base_delay: Duration::from_secs(1),
+    multiplier: 1.6,
+    jitter: 1.2,
+    max_delay: Duration::from_secs(120),
+};
+
+impl ExponentialBackoff {
+    /// This is a backoff configuration with the default values specified
+    /// at https://github.com/grpc/grpc/blob/master/doc/connection-backoff.md.
+    ///
+    /// This should be useful for callers who want to configure backoff with
+    /// non-default values only for a subset of the options.
+    fn new(config: BackoffConfig) -> Self {
+        let next_delay_secs = config.base_delay.min(config.max_delay).as_secs_f64();
+        ExponentialBackoff {
+            config,
+            next_delay_secs,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next_delay_secs = self
+            .config
+            .base_delay
+            .min(self.config.max_delay)
+            .as_secs_f64();
+    }
+
+    fn backoff_duration(&mut self) -> Duration {
+        let ret = self.next_delay_secs
+            * (1.0 + self.config.jitter * rand::thread_rng().gen_range(-1.0..1.0));
+        self.next_delay_secs = self
+            .config
+            .max_delay
+            .as_secs_f64()
+            .min(self.next_delay_secs * self.config.base_delay.as_secs_f64());
+        Duration::from_secs_f64(ret)
+    }
+}
+
+/// This specifies the maximum duration for a DNS resolution request.
+/// If the timeout expires before a response is received, the request will be
+/// canceled.
+///
+/// It is recommended to set this value at application startup. Avoid modifying
+/// this variable after initialization.
+/// TODO(arjan-bal): Make these configurable.
+const RESOLVING_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// This is the minimum interval at which re-resolutions are allowed. This helps
+/// to prevent excessive re-resolution.
+const MIN_RESOLUTION_INTERVAL: Duration = Duration::from_secs(30);
 struct Builder {}
 
 impl ResolverBuilder for Builder {
@@ -18,7 +110,101 @@ impl ResolverBuilder for Builder {
         target: &super::Target,
         options: super::ResolverOptions,
     ) -> Box<dyn super::Resolver> {
-        todo!()
+        let parsed = match parse_endpoint_and_authority(target) {
+            Ok(res) => res,
+            Err(err) => return nop_resolver_for_err(err.to_string(), options),
+        };
+        let endpoint = parsed.endpoint;
+        let host = match endpoint.host {
+            Host::Domain(d) => d,
+            Host::Ipv4(ipv4) => {
+                return nop_resolver_for_ip(IpAddr::V4(ipv4), endpoint.port, options)
+            }
+            Host::Ipv6(ipv6) => {
+                return nop_resolver_for_ip(IpAddr::V6(ipv6), endpoint.port, options)
+            }
+        };
+        let authority = parsed.authority;
+        let dns = match options.runtime.get_dns_resolver(rt::ResolverOptions {
+            server_addr: authority,
+        }) {
+            Ok(dns) => dns,
+            Err(err) => return nop_resolver_for_err(err.to_string(), options),
+        };
+        let state = Arc::new(Mutex::new(InternalState {
+            addrs: Ok(Vec::new()),
+        }));
+        let state_copy = state.clone();
+        let (resolve_now_tx, mut resolve_now_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (update_error_tx, update_error_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
+
+        let handle = options.runtime.clone().spawn(Box::pin(async move {
+            let mut backoff = ExponentialBackoff::new(DEFAULT_EXPONENTIAL_CONFIG.clone());
+            let state = state_copy;
+            let work_scheduler = options.work_scheduler;
+            let mut update_error_rx = update_error_rx;
+            loop {
+                let mut lookup_fut = dns.lookup_host_name(&host);
+                let mut timeout_fut = options.runtime.sleep(RESOLVING_TIMEOUT);
+                let addrs = tokio::select! {
+                    result = &mut lookup_fut => {
+                        match result {
+                            Ok(ips) => {
+                                let addrs = ips
+                                    .into_iter()
+                                    .map(|ip| SocketAddr::new(ip, endpoint.port))
+                                    .collect();
+                                Ok(addrs)
+                            }
+                            Err(err) => Err(err),
+                        }
+                    }
+                    _ = &mut timeout_fut => {
+                        Err("Timed out waiting for DNS resolution".to_string())
+                    }
+                };
+                {
+                    let mut internal_state = match state.lock() {
+                        Ok(state) => state,
+                        Err(_) => return,
+                    };
+                    internal_state.addrs = addrs;
+                }
+                work_scheduler.schedule_work();
+                let update_result = match update_error_rx.recv().await {
+                    Some(res) => res,
+                    None => return,
+                };
+                let next_resoltion_time: SystemTime;
+                if update_result.is_err() {
+                    next_resoltion_time = SystemTime::now()
+                        .checked_add(backoff.backoff_duration())
+                        .unwrap();
+                } else {
+                    // Success resolving, wait for the next ResolveNow. However,
+                    // also wait 30 seconds at the very least to prevent
+                    // constantly re-resolving.
+                    backoff.reset();
+                    next_resoltion_time = SystemTime::now()
+                        .checked_add(MIN_RESOLUTION_INTERVAL)
+                        .unwrap();
+                    _ = resolve_now_rx.recv().await;
+                }
+                // Wait till next resolution time.
+                let duration = match next_resoltion_time.duration_since(SystemTime::now()) {
+                    Ok(d) => options.runtime.sleep(d).await,
+                    Err(_) => continue, // Time has already passed.
+                };
+            }
+        }));
+
+        Box::new(DnsResolver {
+            state,
+            task_handle: handle,
+            resolve_now_requester: resolve_now_tx,
+            update_error_sender: update_error_tx,
+        })
     }
 
     fn scheme(&self) -> &str {
@@ -27,11 +213,69 @@ impl ResolverBuilder for Builder {
 
     fn is_valid_uri(&self, target: &super::Target) -> bool {
         if let Err(err) = parse_endpoint_and_authority(target) {
-            println!("{}", err);
+            eprintln!("{}", err);
             false
         } else {
             true
         }
+    }
+}
+
+struct DnsResolver {
+    // TODO(arjan-bal): Replace with async-aware mutex, but need to make
+    // Resolver an async trait.
+    state: Arc<Mutex<InternalState>>,
+    task_handle: Box<dyn rt::TaskHandle>,
+    resolve_now_requester: UnboundedSender<()>,
+    update_error_sender: UnboundedSender<Result<(), String>>,
+}
+
+struct InternalState {
+    addrs: Result<Vec<SocketAddr>, String>,
+}
+
+impl Resolver for DnsResolver {
+    fn resolve_now(&mut self) {
+        _ = self.resolve_now_requester.send(());
+    }
+
+    fn work(&mut self, channel_controller: &mut dyn super::ChannelController) {
+        let state = match self.state.lock() {
+            Err(_) => {
+                eprintln!("DNS resolver mutex poisoned, can't update channel");
+                return;
+            }
+            Ok(s) => s,
+        };
+        let endpoint_result = match &state.addrs {
+            Ok(addrs) => {
+                let endpoints: Vec<_> = addrs
+                    .iter()
+                    .map(|a| Endpoint {
+                        addresses: vec![Address {
+                            network_type: TCP_IP_NETWORK_TYPE,
+                            address: a.to_string(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })
+                    .collect();
+                Ok(endpoints)
+            }
+            Err(err) => Err(err.to_string()),
+        };
+        let update = ResolverUpdate {
+            endpoints: endpoint_result,
+            ..Default::default()
+        };
+        let status = channel_controller.update(update);
+        _ = self.update_error_sender.send(status);
+    }
+}
+
+impl Drop for DnsResolver {
+    fn drop(&mut self) {
+        self.task_handle.abort();
     }
 }
 
@@ -106,6 +350,37 @@ fn parse_host_port(host_and_port: &str, default_port: u16) -> Result<Option<Host
         Host::Ipv6(ip) => Host::Ipv6(ip),
     };
     Ok(Some(HostPort { host, port }))
+}
+
+fn nop_resolver_for_ip(
+    ip: IpAddr,
+    port: u16,
+    options: super::ResolverOptions,
+) -> Box<dyn super::Resolver> {
+    options.work_scheduler.schedule_work();
+    Box::new(NopResolver {
+        update: ResolverUpdate {
+            endpoints: Ok(vec![Endpoint {
+                addresses: vec![Address {
+                    network_type: TCP_IP_NETWORK_TYPE,
+                    address: SocketAddr::new(ip, port).to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }]),
+            ..Default::default()
+        },
+    })
+}
+
+fn nop_resolver_for_err(err: String, options: super::ResolverOptions) -> Box<dyn super::Resolver> {
+    options.work_scheduler.schedule_work();
+    Box::new(NopResolver {
+        update: ResolverUpdate {
+            endpoints: Err(err),
+            ..Default::default()
+        },
+    })
 }
 
 #[cfg(test)]

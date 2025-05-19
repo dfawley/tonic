@@ -256,7 +256,7 @@ pub struct Endpoint {
 pub struct Address {
     /// The network type is used to identify what kind of transport to create
     /// when connecting to this address.  Typically TCP_IP_ADDRESS_TYPE.
-    pub network_type: String,
+    pub network_type: &'static str,
 
     /// The address itself is passed to the transport in order to create a
     /// connection to it.
