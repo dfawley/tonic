@@ -34,6 +34,7 @@ use std::{
 };
 use tokio::sync::Notify;
 
+mod backoff;
 mod dns;
 mod passthrough;
 mod registry;
