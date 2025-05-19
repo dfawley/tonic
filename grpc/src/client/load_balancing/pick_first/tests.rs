@@ -166,8 +166,8 @@ fn send_resolver_update_to_policy(
     endpoints: Vec<Endpoint>,
     tcc: &mut dyn ChannelController,
 ) {
-    let update = ResolverUpdate::Data(ResolverData {
-        endpoints: endpoints.clone(),
+    let update = ResolverUpdate {
+        endpoints: Ok(endpoints.clone()),
         ..Default::default()
     };
     assert!(lb_policy.resolver_update(update, None, tcc).is_ok());
@@ -180,10 +180,10 @@ fn send_resolver_update_with_lb_config_to_policy(
     endpoints: Vec<Endpoint>,
     tcc: &mut dyn ChannelController,
 ) {
-    let update = ResolverUpdate::Data(ResolverData {
-        endpoints: endpoints.clone(),
+    let update = ResolverUpdate {
+        endpoints: Ok(endpoints.clone()),
         ..Default::default()
-    });
+    };
 
     let json_config = ParsedJsonLbConfig(json!({"shuffleAddressList": true}));
     let builder = GLOBAL_LB_REGISTRY.get_policy("pick_first").unwrap();
