@@ -1,5 +1,5 @@
 use rand::Rng;
-use std::time::Duration;
+use std::{sync::Mutex, time::Duration};
 
 /// TODO(arjan-bal): Move this
 #[derive(Clone)]
@@ -23,7 +23,7 @@ pub struct ExponentialBackoff {
 
     /// The delay for the next retry, without the random jitter. Store as f64
     /// to avoid rounding errors.
-    next_delay_secs: f64,
+    next_delay_secs: Mutex<f64>,
 }
 
 /// This is a backoff configuration with the default values specified
@@ -51,23 +51,25 @@ impl ExponentialBackoff {
         let next_delay_secs = config.base_delay.as_secs_f64();
         ExponentialBackoff {
             config,
-            next_delay_secs,
+            next_delay_secs: Mutex::new(next_delay_secs),
         }
     }
 
-    pub fn reset(&mut self) {
-        self.next_delay_secs = self.config.base_delay.as_secs_f64();
+    pub fn reset(&self) {
+        let mut next_delay = self.next_delay_secs.lock().unwrap();
+        *next_delay = self.config.base_delay.as_secs_f64();
     }
 
-    pub fn backoff_duration(&mut self) -> Duration {
-        let ret = self.next_delay_secs
-            * (1.0 + self.config.jitter * rand::thread_rng().gen_range(-1.0..1.0));
-        self.next_delay_secs = self
+    pub fn backoff_duration(&self) -> Duration {
+        let mut next_delay = self.next_delay_secs.lock().unwrap();
+        let cur_delay =
+            *next_delay * (1.0 + self.config.jitter * rand::thread_rng().gen_range(-1.0..1.0));
+        *next_delay = self
             .config
             .max_delay
             .as_secs_f64()
-            .min(self.next_delay_secs * self.config.multiplier);
-        Duration::from_secs_f64(ret)
+            .min(*next_delay * self.config.multiplier);
+        Duration::from_secs_f64(cur_delay)
     }
 }
 
@@ -89,7 +91,7 @@ mod tests {
             jitter: 0.0,
             max_delay: Duration::from_secs(100),
         };
-        let mut backoff = ExponentialBackoff::new(config.clone());
+        let backoff = ExponentialBackoff::new(config.clone());
         assert_eq!(backoff.backoff_duration(), Duration::from_secs(10));
     }
 
@@ -101,7 +103,7 @@ mod tests {
             base_delay: Duration::from_secs(100),
             max_delay: Duration::from_secs(10),
         };
-        let mut backoff = ExponentialBackoff::new(config.clone());
+        let backoff = ExponentialBackoff::new(config.clone());
         assert_eq!(backoff.backoff_duration(), Duration::from_secs(10));
     }
 
@@ -113,7 +115,7 @@ mod tests {
             base_delay: Duration::from_secs(10),
             max_delay: Duration::from_secs(100),
         };
-        let mut backoff = ExponentialBackoff::new(config.clone());
+        let backoff = ExponentialBackoff::new(config.clone());
         // multiplier gets clipped to 1.
         assert_eq!(backoff.backoff_duration(), Duration::from_secs(10));
         assert_eq!(backoff.backoff_duration(), Duration::from_secs(10));
@@ -127,7 +129,7 @@ mod tests {
             base_delay: Duration::from_secs(10),
             max_delay: Duration::from_secs(100),
         };
-        let mut backoff = ExponentialBackoff::new(config.clone());
+        let backoff = ExponentialBackoff::new(config.clone());
         // jitter gets clipped to 0.
         assert_eq!(backoff.backoff_duration(), Duration::from_secs(10));
         assert_eq!(backoff.backoff_duration(), Duration::from_secs(10));
@@ -141,7 +143,7 @@ mod tests {
             base_delay: Duration::from_secs(10),
             max_delay: Duration::from_secs(100),
         };
-        let mut backoff = ExponentialBackoff::new(config.clone());
+        let backoff = ExponentialBackoff::new(config.clone());
         // jitter gets clipped to 1.
         // 0 <= duration <= 20.
         let duration = backoff.backoff_duration();
@@ -161,7 +163,7 @@ mod tests {
             base_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(15),
         };
-        let mut backoff = ExponentialBackoff::new(config.clone());
+        let backoff = ExponentialBackoff::new(config.clone());
         assert_eq!(backoff.backoff_duration(), Duration::from_secs(1));
         assert_eq!(backoff.backoff_duration(), Duration::from_secs(2));
         assert_eq!(backoff.backoff_duration(), Duration::from_secs(4));
@@ -189,7 +191,7 @@ mod tests {
             base_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(15),
         };
-        let mut backoff = ExponentialBackoff::new(config.clone());
+        let backoff = ExponentialBackoff::new(config.clone());
         // 0.8 <= duration <= 1.2.
         let duration = backoff.backoff_duration();
         assert_eq!(duration.gt(&Duration::from_secs_f64(0.8 - EPSILON)), true);

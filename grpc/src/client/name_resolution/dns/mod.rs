@@ -107,7 +107,7 @@ impl DnsResolver {
             tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
 
         let handle = options.runtime.clone().spawn(Box::pin(async move {
-            let mut backoff = ExponentialBackoff::new(dns_opts.backoff_config.clone());
+            let backoff = ExponentialBackoff::new(dns_opts.backoff_config.clone());
             let state = state_copy;
             let work_scheduler = options.work_scheduler;
             let mut update_error_rx = update_error_rx;
