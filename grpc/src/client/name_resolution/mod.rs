@@ -128,12 +128,12 @@ pub trait ResolverBuilder: Send + Sync {
     fn scheme(&self) -> &str;
 
     /// Returns the default authority for a channel using this name resolver
-    /// and target.  This is typically the same as the service's name.  By
+    /// and target.  This is typically the same as the service's name. By
     /// default, the default_authority method automatically returns the path
     /// portion of the target URI, with the leading prefix removed.
-    fn default_authority<'a>(&self, uri: &'a Target) -> &'a str {
+    fn default_authority(&self, uri: &Target) -> String {
         let path = uri.path();
-        path.strip_prefix("/").unwrap_or(path)
+        path.strip_prefix("/").unwrap_or(path).to_string()
     }
 
     /// Returns a bool indicating whether the input uri is valid to create a
@@ -159,7 +159,7 @@ pub struct ResolverOptions {
 
 /// Used to asynchronously request a call into the Resolver's work method.
 pub trait WorkScheduler: Send + Sync {
-    // Schedules a call into the LbPolicy's work method.  If there is already a
+    // Schedules a call into the Resolver's work method.  If there is already a
     // pending work call that has not yet started, this may not schedule another
     // call.
     fn schedule_work(&self);
