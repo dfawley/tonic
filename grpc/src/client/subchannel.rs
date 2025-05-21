@@ -518,7 +518,7 @@ impl InternalSubchannelPool {
 
         let transport = self
             .transport_registry
-            .get_transport(&key.address.network_type)
+            .get_transport(key.address.network_type)
             .unwrap();
         let isc = InternalSubchannel::new(
             key.clone(),

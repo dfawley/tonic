@@ -269,6 +269,16 @@ impl PartialEq for PickResult {
     }
 }
 
+impl Display for PickResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pick(_) => write!(f, "Pick"),
+            Self::Queue => write!(f, "Queue"),
+            Self::Fail(st) => write!(f, "Fail({})", st),
+            Self::Drop(st) => write!(f, "Drop({})", st),
+        }
+    }
+}
 /// Data provided by the LB policy.
 #[derive(Clone)]
 pub struct LbState {
@@ -339,6 +349,7 @@ impl<T: Eq + PartialEq + 'static> DynPartialEq for T {
 /// subsequent state updates will be provided for it to the LB policy.
 pub trait Subchannel: DynHash + DynPartialEq + Any + Send + Sync {
     /// Returns the address of the Subchannel.
+    /// TODO: Consider whether this should really be public.
     fn address(&self) -> &Address;
 
     /// Notifies the Subchannel to connect.

@@ -4,8 +4,12 @@ use crate::client::{
     subchannel::InternalSubchannel,
 };
 use crate::service::{Message, Request, Response, Service};
-use std::hash::{Hash, Hasher};
-use std::{ops::Add, sync::Arc};
+use std::{
+    fmt::Display,
+    hash::{Hash, Hasher},
+    ops::Add,
+    sync::Arc,
+};
 use tokio::{
     sync::{mpsc, Notify},
     task::AbortHandle,
@@ -65,6 +69,18 @@ pub(crate) enum TestEvent {
     RequestResolution,
     Connect(Address),
     ScheduleWork,
+}
+
+impl Display for TestEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NewSubchannel(addr, _) => write!(f, "NewSubchannel({})", addr),
+            Self::UpdatePicker(state) => write!(f, "UpdatePicker({})", state.connectivity_state),
+            Self::RequestResolution => write!(f, "RequestResolution"),
+            Self::Connect(addr) => write!(f, "Connect({})", addr.address),
+            Self::ScheduleWork => write!(f, "ScheduleWork"),
+        }
+    }
 }
 
 pub(crate) struct FakeChannel {
