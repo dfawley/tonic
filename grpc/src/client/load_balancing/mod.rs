@@ -423,35 +423,35 @@ impl PartialEq for WeakSubchannel {
 
 impl Eq for WeakSubchannel {}
 
-pub(crate) struct SubchannelImpl {
+pub(crate) struct ExternalSubchannel {
     pub(crate) isc: Arc<InternalSubchannel>,
     pub(crate) watcher: Mutex<Option<Arc<SubchannelStateWatcher>>>,
 }
 
-impl SubchannelImpl {
+impl ExternalSubchannel {
     pub(super) fn new(isc: Arc<InternalSubchannel>) -> Self {
-        SubchannelImpl {
+        ExternalSubchannel {
             isc,
             watcher: Mutex::default(),
         }
     }
 }
 
-impl Hash for SubchannelImpl {
+impl Hash for ExternalSubchannel {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.isc.address().hash(state);
     }
 }
 
-impl PartialEq for SubchannelImpl {
+impl PartialEq for ExternalSubchannel {
     fn eq(&self, other: &Self) -> bool {
         self.isc.address() == other.isc.address()
     }
 }
 
-impl Eq for SubchannelImpl {}
+impl Eq for ExternalSubchannel {}
 
-impl Subchannel for SubchannelImpl {
+impl Subchannel for ExternalSubchannel {
     fn address(&self) -> &Address {
         self.isc.address()
     }
@@ -462,7 +462,7 @@ impl Subchannel for SubchannelImpl {
     }
 }
 
-impl Drop for SubchannelImpl {
+impl Drop for ExternalSubchannel {
     fn drop(&mut self) {
         if let Some(watcher) = self.watcher.lock().unwrap().take() {
             println!(
@@ -474,13 +474,13 @@ impl Drop for SubchannelImpl {
     }
 }
 
-impl Debug for SubchannelImpl {
+impl Debug for ExternalSubchannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Subchannel {}", self.isc.address())
     }
 }
 
-impl Display for SubchannelImpl {
+impl Display for ExternalSubchannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Subchannel {}", self.isc.address())
     }

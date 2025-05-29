@@ -12,7 +12,7 @@ use crate::{
         load_balancing::{
             ChannelController, Failing, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState,
             ParsedJsonLbConfig, Pick, PickResult, Picker, QueuingPicker, Subchannel,
-            SubchannelImpl, SubchannelState, WorkScheduler,
+            ExternalSubchannel, SubchannelState, WorkScheduler,
         },
         name_resolution::{Address, Endpoint, ResolverUpdate},
         service_config::LbConfig,

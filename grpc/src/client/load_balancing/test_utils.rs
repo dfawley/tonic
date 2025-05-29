@@ -1,5 +1,5 @@
 use crate::client::{
-    load_balancing::{ChannelController, LbState, Subchannel, SubchannelImpl, WorkScheduler},
+    load_balancing::{ChannelController, ExternalSubchannel, LbState, Subchannel, WorkScheduler},
     name_resolution::Address,
     subchannel::InternalSubchannel,
 };

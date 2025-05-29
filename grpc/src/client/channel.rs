@@ -30,7 +30,7 @@ use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 use super::{
     load_balancing::{
         self, pick_first, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyRegistry, LbState,
-        ParsedJsonLbConfig, PickResult, Picker, Subchannel, SubchannelImpl, SubchannelState,
+        ParsedJsonLbConfig, PickResult, Picker, Subchannel, ExternalSubchannel, SubchannelState,
         WorkScheduler, GLOBAL_LB_REGISTRY,
     },
     subchannel::{
@@ -311,7 +311,7 @@ impl ActiveChannel {
                 match result {
                     PickResult::Pick(pr) => {
                         if let Some(sc) =
-                            (pr.subchannel.as_ref() as &dyn Any).downcast_ref::<SubchannelImpl>()
+                            (pr.subchannel.as_ref() as &dyn Any).downcast_ref::<ExternalSubchannel>()
                         {
                             return sc.isc.call(method, request).await;
                         } else {
@@ -398,7 +398,7 @@ impl load_balancing::ChannelController for InternalChannelController {
         let key = SubchannelKey::new(address.clone());
         let isc = self.subchannel_pool.get_or_create_subchannel(&key);
 
-        let sc = Arc::new(SubchannelImpl::new(isc.clone()));
+        let sc = Arc::new(ExternalSubchannel::new(isc.clone()));
         let watcher = Arc::new(SubchannelStateWatcher::new(sc.clone()));
         sc.watcher.lock().unwrap().replace(watcher.clone());
         isc.register_connectivity_state_watcher(watcher.clone());
