@@ -1,6 +1,6 @@
 use super::{
     channel::{InternalChannelController, WorkQueueTx},
-    load_balancing::{self, Picker, Subchannel, SubchannelState},
+    load_balancing::{self, ExternalSubchannel, Picker, Subchannel, SubchannelState},
     name_resolution::Address,
     transport::{self, ConnectedTransport, Transport, TransportRegistry},
     ConnectivityState,
@@ -544,11 +544,11 @@ impl InternalSubchannelPool {
 
 #[derive(Clone)]
 pub(crate) struct SubchannelStateWatcher {
-    subchannel: Weak<dyn Subchannel>,
+    subchannel: Weak<ExternalSubchannel>,
 }
 
 impl SubchannelStateWatcher {
-    pub(crate) fn new(sc: Arc<dyn Subchannel>) -> Self {
+    pub(crate) fn new(sc: Arc<ExternalSubchannel>) -> Self {
         Self {
             subchannel: Arc::downgrade(&sc),
         }
