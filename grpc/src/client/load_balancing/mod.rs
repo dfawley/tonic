@@ -330,6 +330,12 @@ impl<T: Eq + PartialEq + 'static> DynPartialEq for T {
     }
 }
 
+mod private {
+    pub trait Sealed {}
+}
+
+pub trait SealedSubchannel: private::Sealed {}
+
 /// A Subchannel represents a method of communicating with a server which may be
 /// connected or disconnected many times across its lifetime.
 ///
@@ -347,10 +353,10 @@ impl<T: Eq + PartialEq + 'static> DynPartialEq for T {
 ///
 /// When a Subchannel is dropped, it is disconnected automatically, and no
 /// subsequent state updates will be provided for it to the LB policy.
-pub trait Subchannel: DynHash + DynPartialEq + Any + Send + Sync {
+pub trait Subchannel: SealedSubchannel + DynHash + DynPartialEq + Any + Send + Sync {
     /// Returns the address of the Subchannel.
     /// TODO: Consider whether this should really be public.
-    fn address(&self) -> &Address;
+    fn address(&self) -> Address;
 
     /// Notifies the Subchannel to connect.
     fn connect(&self);
@@ -452,7 +458,7 @@ impl PartialEq for ExternalSubchannel {
 impl Eq for ExternalSubchannel {}
 
 impl Subchannel for ExternalSubchannel {
-    fn address(&self) -> &Address {
+    fn address(&self) -> Address {
         self.isc.address()
     }
 
@@ -461,6 +467,9 @@ impl Subchannel for ExternalSubchannel {
         self.isc.connect(false);
     }
 }
+
+impl SealedSubchannel for ExternalSubchannel {}
+impl private::Sealed for ExternalSubchannel {}
 
 impl Drop for ExternalSubchannel {
     fn drop(&mut self) {
@@ -485,6 +494,28 @@ impl Display for ExternalSubchannel {
         write!(f, "Subchannel {}", self.isc.address())
     }
 }
+
+pub trait ForwardingSubchannel: DynHash + DynPartialEq + Any + Send + Sync {
+    fn delegate(&self) -> Arc<dyn Subchannel>;
+
+    fn address(&self) -> Address {
+        self.delegate().address()
+    }
+    fn connect(&self) {
+        self.delegate().connect()
+    }
+}
+
+impl<T: ForwardingSubchannel> Subchannel for T {
+    fn address(&self) -> Address {
+        self.address()
+    }
+    fn connect(&self) {
+        self.connect()
+    }
+}
+impl<T: ForwardingSubchannel> SealedSubchannel for T {}
+impl<T: ForwardingSubchannel> private::Sealed for T {}
 
 /// QueuingPicker always returns Queue.  LB policies that are not actively
 /// Connecting should not use this picker.

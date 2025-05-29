@@ -1,5 +1,8 @@
 use crate::client::{
-    load_balancing::{ChannelController, ExternalSubchannel, LbState, Subchannel, WorkScheduler},
+    load_balancing::{
+        ChannelController, ExternalSubchannel, ForwardingSubchannel, LbState, Subchannel,
+        WorkScheduler,
+    },
     name_resolution::Address,
     subchannel::InternalSubchannel,
 };
@@ -37,9 +40,13 @@ impl TestSubchannel {
     }
 }
 
-impl Subchannel for TestSubchannel {
-    fn address(&self) -> &Address {
-        &self.address
+impl ForwardingSubchannel for TestSubchannel {
+    fn delegate(&self) -> Arc<dyn Subchannel> {
+        panic!("unsupported operation on a test subchannel");
+    }
+
+    fn address(&self) -> Address {
+        self.address.clone()
     }
 
     fn connect(&self) {

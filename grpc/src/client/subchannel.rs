@@ -281,8 +281,8 @@ impl InternalSubchannel {
         isc
     }
 
-    pub(crate) fn address(&self) -> &Address {
-        &self.key.address
+    pub(crate) fn address(&self) -> Address {
+        self.key.address.clone()
     }
 
     /// Begins connecting the subchannel asynchronously.  If now is set, does
@@ -357,7 +357,7 @@ impl InternalSubchannel {
 
         let min_connect_timeout = self.backoff.min_connect_timeout();
         let transport = self.transport.clone();
-        let address = self.address().address.clone();
+        let address = self.address().address;
         let state_machine_tx = self.state_machine_event_sender.clone();
         let connect_task = tokio::task::spawn(async move {
             tokio::select! {

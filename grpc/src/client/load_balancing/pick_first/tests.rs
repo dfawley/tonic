@@ -306,7 +306,7 @@ async fn verify_connection_attempt_from_policy(
 ) {
     match rx_events.recv().await.unwrap() {
         TestEvent::Connect(addr) => {
-            assert!(addr == *subchannel.address());
+            assert!(addr == subchannel.address());
         }
         other => panic!("unexpected event {}", other),
     };
