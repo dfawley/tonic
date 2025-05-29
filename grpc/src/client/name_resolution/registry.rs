@@ -46,8 +46,7 @@ impl ResolverRegistry {
         self.m
             .lock()
             .unwrap()
-            .get(&scheme.to_lowercase())
-            .map(|b| b.clone())
+            .get(&scheme.to_lowercase()).cloned()
     }
 }
 

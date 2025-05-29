@@ -147,12 +147,12 @@ mod tests {
         // jitter gets clipped to 1.
         // 0 <= duration <= 20.
         let duration = backoff.backoff_duration();
-        assert_eq!(duration.lt(&Duration::from_secs(20)), true);
-        assert_eq!(duration.gt(&Duration::from_secs(0)), true);
+        assert!(duration.lt(&Duration::from_secs(20)));
+        assert!(duration.gt(&Duration::from_secs(0)));
 
         let duration = backoff.backoff_duration();
-        assert_eq!(duration.lt(&Duration::from_secs(20)), true);
-        assert_eq!(duration.gt(&Duration::from_secs(0)), true);
+        assert!(duration.lt(&Duration::from_secs(20)));
+        assert!(duration.gt(&Duration::from_secs(0)));
     }
 
     #[test]
@@ -194,15 +194,15 @@ mod tests {
         let backoff = ExponentialBackoff::new(config.clone());
         // 0.8 <= duration <= 1.2.
         let duration = backoff.backoff_duration();
-        assert_eq!(duration.gt(&Duration::from_secs_f64(0.8 - EPSILON)), true);
-        assert_eq!(duration.lt(&Duration::from_secs_f64(1.2 + EPSILON)), true);
+        assert!(duration.gt(&Duration::from_secs_f64(0.8 - EPSILON)));
+        assert!(duration.lt(&Duration::from_secs_f64(1.2 + EPSILON)));
         // 1.6 <= duration <= 2.4.
         let duration = backoff.backoff_duration();
-        assert_eq!(duration.gt(&Duration::from_secs_f64(1.6 - EPSILON)), true);
-        assert_eq!(duration.lt(&Duration::from_secs_f64(2.4 + EPSILON)), true);
+        assert!(duration.gt(&Duration::from_secs_f64(1.6 - EPSILON)));
+        assert!(duration.lt(&Duration::from_secs_f64(2.4 + EPSILON)));
         // 3.2 <= duration <= 4.8.
         let duration = backoff.backoff_duration();
-        assert_eq!(duration.gt(&Duration::from_secs_f64(3.2 - EPSILON)), true);
-        assert_eq!(duration.lt(&Duration::from_secs_f64(4.8 + EPSILON)), true);
+        assert!(duration.gt(&Duration::from_secs_f64(3.2 - EPSILON)));
+        assert!(duration.lt(&Duration::from_secs_f64(4.8 + EPSILON)));
     }
 }

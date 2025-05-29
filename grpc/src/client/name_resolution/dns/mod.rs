@@ -44,7 +44,7 @@ static MIN_RESOLUTION_INTERVAL: Lazy<Mutex<Duration>> =
     Lazy::new(|| Mutex::new(Duration::from_secs(30)));
 
 pub fn get_resolving_timeout() -> Duration {
-    RESOLVING_TIMEOUT.lock().unwrap().clone()
+    *RESOLVING_TIMEOUT.lock().unwrap()
 }
 
 pub fn set_resolving_timeout(duration: Duration) {
@@ -52,7 +52,7 @@ pub fn set_resolving_timeout(duration: Duration) {
 }
 
 pub fn get_min_resolution_interval() -> Duration {
-    MIN_RESOLUTION_INTERVAL.lock().unwrap().clone()
+    *MIN_RESOLUTION_INTERVAL.lock().unwrap()
 }
 
 pub fn set_min_resolution_interval(duration: Duration) {
@@ -159,7 +159,7 @@ impl DnsResolver {
                     _ = resolve_now_rx.recv().await;
                 }
                 // Wait till next resolution time.
-                let duration = match next_resoltion_time.duration_since(SystemTime::now()) {
+                match next_resoltion_time.duration_since(SystemTime::now()) {
                     Ok(d) => options.runtime.sleep(d).await,
                     Err(_) => continue, // Time has already passed.
                 };
