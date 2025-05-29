@@ -281,13 +281,13 @@ impl InternalSubchannel {
         isc
     }
 
-    pub(crate) fn address(&self) -> Address {
+    pub(super) fn address(&self) -> Address {
         self.key.address.clone()
     }
 
     /// Begins connecting the subchannel asynchronously.  If now is set, does
     /// not wait for any pending connection backoff to complete.
-    pub(crate) fn connect(&self, now: bool) {
+    pub(super) fn connect(&self, now: bool) {
         let state = &self.inner.lock().unwrap().state;
         if let InternalSubchannelState::Idle = state {
             let _ = self
@@ -296,18 +296,14 @@ impl InternalSubchannel {
         }
     }
 
-    pub(crate) fn register_connectivity_state_watcher(&self, watcher: Arc<SubchannelStateWatcher>) {
+    pub(super) fn register_connectivity_state_watcher(&self, watcher: Arc<SubchannelStateWatcher>) {
         let mut inner = self.inner.lock().unwrap();
         inner.watchers.push(watcher.clone());
         let state = inner.state.to_subchannel_state().clone();
-        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
-            move |c: &mut InternalChannelController| {
-                watcher.on_state_change(state, c);
-            },
-        )));
+        watcher.on_state_change(state);
     }
 
-    pub(crate) fn unregister_connectivity_state_watcher(
+    pub(super) fn unregister_connectivity_state_watcher(
         &self,
         watcher: Arc<SubchannelStateWatcher>,
     ) {
@@ -326,13 +322,7 @@ impl InternalSubchannel {
         let mut inner = self.inner.lock().unwrap();
         inner.state = InternalSubchannelState::Idle;
         for w in &inner.watchers {
-            let state = state.clone();
-            let w = w.clone();
-            let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
-                move |c: &mut InternalChannelController| {
-                    w.on_state_change(state, c);
-                },
-            )));
+            w.on_state_change(state.clone());
         }
     }
 
@@ -484,14 +474,14 @@ impl Debug for SubchannelKey {
         write!(f, "{}", self.address)
     }
 }
-pub(crate) struct InternalSubchannelPool {
+pub(super) struct InternalSubchannelPool {
     work_scheduler: WorkQueueTx,
     transport_registry: TransportRegistry,
     subchannels: BTreeMap<SubchannelKey, Weak<InternalSubchannel>>,
 }
 
 impl InternalSubchannelPool {
-    pub(crate) fn new(work_scheduler: WorkQueueTx, transport_registry: TransportRegistry) -> Self {
+    pub(super) fn new(work_scheduler: WorkQueueTx, transport_registry: TransportRegistry) -> Self {
         Self {
             work_scheduler,
             transport_registry,
@@ -499,7 +489,7 @@ impl InternalSubchannelPool {
         }
     }
 
-    pub(crate) fn get_or_create_subchannel(
+    pub(super) fn get_or_create_subchannel(
         &mut self,
         key: &SubchannelKey,
     ) -> Arc<InternalSubchannel> {
@@ -530,7 +520,7 @@ impl InternalSubchannelPool {
         isc
     }
 
-    pub(crate) fn unregister_subchannel(&mut self, key: &SubchannelKey) {
+    pub(super) fn unregister_subchannel(&mut self, key: &SubchannelKey) {
         if let Some(weak_isc) = self.subchannels.get(key) {
             if let Some(isc) = weak_isc.upgrade() {
                 return;
@@ -543,29 +533,35 @@ impl InternalSubchannelPool {
 }
 
 #[derive(Clone)]
-pub(crate) struct SubchannelStateWatcher {
+pub(super) struct SubchannelStateWatcher {
     subchannel: Weak<ExternalSubchannel>,
+    work_scheduler: WorkQueueTx,
 }
 
 impl SubchannelStateWatcher {
-    pub(crate) fn new(sc: Arc<ExternalSubchannel>) -> Self {
+    pub(super) fn new(sc: Arc<ExternalSubchannel>, work_scheduler: WorkQueueTx) -> Self {
         Self {
             subchannel: Arc::downgrade(&sc),
+            work_scheduler,
         }
     }
 
-    fn on_state_change(&self, state: SubchannelState, c: &mut InternalChannelController) {
+    fn on_state_change(&self, state: SubchannelState) {
         // Ignore internal subchannel state changes if the external subchannel
         // was dropped but its state watcher is still pending unregistration;
         // such updates are inconsequential.
         if let Some(sc) = self.subchannel.upgrade() {
-            c.lb.clone()
-                .policy
-                .lock()
-                .unwrap()
-                .as_mut()
-                .unwrap()
-                .subchannel_update(sc, &state, c);
+            let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+                move |c: &mut InternalChannelController| {
+                    c.lb.clone()
+                        .policy
+                        .lock()
+                        .unwrap()
+                        .as_mut()
+                        .unwrap()
+                        .subchannel_update(sc, &state, c);
+                },
+            )));
         }
     }
 }

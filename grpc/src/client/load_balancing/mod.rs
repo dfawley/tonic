@@ -431,7 +431,7 @@ impl Eq for WeakSubchannel {}
 
 pub(crate) struct ExternalSubchannel {
     pub(crate) isc: Arc<InternalSubchannel>,
-    pub(crate) watcher: Mutex<Option<Arc<SubchannelStateWatcher>>>,
+    watcher: Mutex<Option<Arc<SubchannelStateWatcher>>>,
 }
 
 impl ExternalSubchannel {
@@ -440,6 +440,10 @@ impl ExternalSubchannel {
             isc,
             watcher: Mutex::default(),
         }
+    }
+
+    pub(super) fn set_watcher(&self, watcher: Arc<SubchannelStateWatcher>) {
+        self.watcher.lock().unwrap().replace(watcher);
     }
 }
 

@@ -29,14 +29,11 @@ use super::service_config::ServiceConfig;
 use super::transport::{TransportRegistry, GLOBAL_TRANSPORT_REGISTRY};
 use super::{
     load_balancing::{
-        self, pick_first, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyRegistry, LbState,
-        ParsedJsonLbConfig, PickResult, Picker, Subchannel, ExternalSubchannel, SubchannelState,
-        WorkScheduler, GLOBAL_LB_REGISTRY,
+        self, pick_first, ExternalSubchannel, LbPolicy, LbPolicyBuilder, LbPolicyOptions,
+        LbPolicyRegistry, LbState, ParsedJsonLbConfig, PickResult, Picker, Subchannel,
+        SubchannelState, WorkScheduler, GLOBAL_LB_REGISTRY,
     },
-    subchannel::{
-        InternalSubchannel, InternalSubchannelPool, NopBackoff, SubchannelKey,
-        SubchannelStateWatcher,
-    },
+    subchannel::{InternalSubchannelPool, NopBackoff, SubchannelKey, SubchannelStateWatcher},
 };
 use super::{
     name_resolution::{
@@ -310,8 +307,8 @@ impl ActiveChannel {
                 // TODO: handle picker errors (queue or fail RPC)
                 match result {
                     PickResult::Pick(pr) => {
-                        if let Some(sc) =
-                            (pr.subchannel.as_ref() as &dyn Any).downcast_ref::<ExternalSubchannel>()
+                        if let Some(sc) = (pr.subchannel.as_ref() as &dyn Any)
+                            .downcast_ref::<ExternalSubchannel>()
                         {
                             return sc.isc.call(method, request).await;
                         } else {
@@ -399,8 +396,8 @@ impl load_balancing::ChannelController for InternalChannelController {
         let isc = self.subchannel_pool.get_or_create_subchannel(&key);
 
         let sc = Arc::new(ExternalSubchannel::new(isc.clone()));
-        let watcher = Arc::new(SubchannelStateWatcher::new(sc.clone()));
-        sc.watcher.lock().unwrap().replace(watcher.clone());
+        let watcher = Arc::new(SubchannelStateWatcher::new(sc.clone(), self.wqtx.clone()));
+        sc.set_watcher(watcher.clone());
         isc.register_connectivity_state_watcher(watcher.clone());
         sc
     }

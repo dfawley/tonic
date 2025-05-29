@@ -9,7 +9,6 @@ use crate::client::{
         Subchannel, SubchannelState, WorkScheduler, GLOBAL_LB_REGISTRY,
     },
     name_resolution::{Address, Endpoint, ResolverUpdate},
-    subchannel::{InternalSubchannel, InternalSubchannelPool},
     transport::{Transport, GLOBAL_TRANSPORT_REGISTRY},
     ConnectivityState,
 };

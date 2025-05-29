@@ -4,7 +4,6 @@ use crate::client::{
         WorkScheduler,
     },
     name_resolution::Address,
-    subchannel::InternalSubchannel,
 };
 use crate::service::{Message, Request, Response, Service};
 use std::{
