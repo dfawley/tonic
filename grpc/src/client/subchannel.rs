@@ -173,9 +173,9 @@ impl Drop for InternalSubchannelState {
 
 pub(crate) struct InternalSubchannel {
     key: SubchannelKey,
-    work_scheduler: WorkQueueTx,
     transport: Arc<dyn Transport>,
     backoff: Arc<dyn Backoff>,
+    unregister_fn: Option<Box<dyn FnOnce(SubchannelKey) + Send + Sync>>,
     state_machine_event_sender: mpsc::UnboundedSender<SubchannelStateMachineEvent>,
     inner: Arc<Mutex<InnerSubchannel>>,
 }
@@ -226,17 +226,17 @@ impl Debug for SubchannelStateMachineEvent {
 impl InternalSubchannel {
     pub(super) fn new(
         key: SubchannelKey,
-        work_scheduler: WorkQueueTx,
         transport: Arc<dyn Transport>,
         backoff: Arc<dyn Backoff>,
+        unregister_fn: Option<Box<dyn FnOnce(SubchannelKey) + Send + Sync>>,
     ) -> Arc<InternalSubchannel> {
         println!("creating new internal subchannel for: {:?}", &key);
         let (tx, mut rx) = mpsc::unbounded_channel::<SubchannelStateMachineEvent>();
         let isc = Arc::new(Self {
             key: key.clone(),
-            work_scheduler,
             transport,
             backoff: backoff.clone(),
+            unregister_fn,
             state_machine_event_sender: tx,
             inner: Arc::new(Mutex::new(InnerSubchannel {
                 state: InternalSubchannelState::Idle,
@@ -441,12 +441,9 @@ impl InternalSubchannel {
 impl Drop for InternalSubchannel {
     fn drop(&mut self) {
         println!("dropping internal subchannel {:?}", self.key);
-        let key = self.key.clone();
-        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
-            move |c: &mut InternalChannelController| {
-                c.subchannel_pool.unregister_subchannel(&key);
-            },
-        )));
+        if let Some(unregister_fn_owned) = self.unregister_fn.take() {
+            unregister_fn_owned(self.key.clone());
+        }
     }
 }
 
@@ -510,11 +507,18 @@ impl InternalSubchannelPool {
             .transport_registry
             .get_transport(key.address.network_type)
             .unwrap();
+        let work_scheduler = self.work_scheduler.clone();
         let isc = InternalSubchannel::new(
             key.clone(),
-            self.work_scheduler.clone(),
             transport,
             Arc::new(NopBackoff {}),
+            Some(Box::new(move |k: SubchannelKey| {
+                let _ = work_scheduler.send(WorkQueueItem::Closure(Box::new(
+                    move |c: &mut InternalChannelController| {
+                        c.subchannel_pool.unregister_subchannel(&k);
+                    },
+                )));
+            })),
         );
         self.subchannels.insert(key.clone(), Arc::downgrade(&isc));
         isc
