@@ -177,7 +177,7 @@ pub(crate) struct InternalSubchannel {
     backoff: Arc<dyn Backoff>,
     unregister_fn: Option<Box<dyn FnOnce(SubchannelKey) + Send + Sync>>,
     state_machine_event_sender: mpsc::UnboundedSender<SubchannelStateMachineEvent>,
-    inner: Arc<Mutex<InnerSubchannel>>,
+    inner: Mutex<InnerSubchannel>,
 }
 
 struct InnerSubchannel {
@@ -228,7 +228,7 @@ impl InternalSubchannel {
         key: SubchannelKey,
         transport: Arc<dyn Transport>,
         backoff: Arc<dyn Backoff>,
-        unregister_fn: Option<Box<dyn FnOnce(SubchannelKey) + Send + Sync>>,
+        unregister_fn: Box<dyn FnOnce(SubchannelKey) + Send + Sync>,
     ) -> Arc<InternalSubchannel> {
         println!("creating new internal subchannel for: {:?}", &key);
         let (tx, mut rx) = mpsc::unbounded_channel::<SubchannelStateMachineEvent>();
@@ -236,14 +236,14 @@ impl InternalSubchannel {
             key: key.clone(),
             transport,
             backoff: backoff.clone(),
-            unregister_fn,
+            unregister_fn: Some(unregister_fn),
             state_machine_event_sender: tx,
-            inner: Arc::new(Mutex::new(InnerSubchannel {
+            inner: Mutex::new(InnerSubchannel {
                 state: InternalSubchannelState::Idle,
                 watchers: Vec::new(),
                 backoff_task: None,
                 disconnect_task: None,
-            })),
+            }),
         });
 
         // This long running task implements the subchannel state machine. When
@@ -315,10 +315,6 @@ impl InternalSubchannel {
     }
 
     fn notify_watchers(&self, state: SubchannelState) {
-        // TODO(easwars): See if there is a way to call all watchers in a single
-        // work serializer task. Currently, that is not possible since we need
-        // to capture a reference to self in the closure, and self may not live
-        // long enough.
         let mut inner = self.inner.lock().unwrap();
         inner.state = InternalSubchannelState::Idle;
         for w in &inner.watchers {
@@ -512,13 +508,13 @@ impl InternalSubchannelPool {
             key.clone(),
             transport,
             Arc::new(NopBackoff {}),
-            Some(Box::new(move |k: SubchannelKey| {
+            Box::new(move |k: SubchannelKey| {
                 let _ = work_scheduler.send(WorkQueueItem::Closure(Box::new(
                     move |c: &mut InternalChannelController| {
                         c.subchannel_pool.unregister_subchannel(&k);
                     },
                 )));
-            })),
+            }),
         );
         self.subchannels.insert(key.clone(), Arc::downgrade(&isc));
         isc
