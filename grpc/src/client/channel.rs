@@ -33,7 +33,10 @@ use super::{
         LbPolicyRegistry, LbState, ParsedJsonLbConfig, PickResult, Picker, Subchannel,
         SubchannelState, WorkScheduler, GLOBAL_LB_REGISTRY,
     },
-    subchannel::{InternalSubchannelPool, NopBackoff, SubchannelKey, SubchannelStateWatcher},
+    subchannel::{
+        InternalSubchannel, InternalSubchannelPool, NopBackoff, SubchannelKey,
+        SubchannelStateWatcher,
+    },
 };
 use super::{
     name_resolution::{
@@ -310,7 +313,7 @@ impl ActiveChannel {
                         if let Some(sc) = (pr.subchannel.as_ref() as &dyn Any)
                             .downcast_ref::<ExternalSubchannel>()
                         {
-                            return sc.isc.call(method, request).await;
+                            return sc.isc.as_ref().unwrap().call(method, request).await;
                         } else {
                             panic!("picked subchannel is not an implementation provided by the channel");
                         }
@@ -350,7 +353,8 @@ impl name_resolution::WorkScheduler for ResolverWorkScheduler {
 
 pub(crate) struct InternalChannelController {
     pub(super) lb: Arc<GracefulSwitchBalancer>, // called and passes mutable parent to it, so must be Arc.
-    pub(super) subchannel_pool: InternalSubchannelPool,
+    transport_registry: TransportRegistry,
+    pub(super) subchannel_pool: Arc<InternalSubchannelPool>,
     resolve_now: Arc<Notify>,
     wqtx: WorkQueueTx,
     picker: Arc<Watcher<Arc<dyn Picker>>>,
@@ -369,12 +373,21 @@ impl InternalChannelController {
 
         Self {
             lb,
-            subchannel_pool: InternalSubchannelPool::new(wqtx.clone(), transport_registry),
+            transport_registry,
+            subchannel_pool: Arc::new(InternalSubchannelPool::new()),
             resolve_now,
             wqtx,
             picker,
             connectivity_state,
         }
+    }
+
+    fn new_esc_for_isc(&self, isc: Arc<InternalSubchannel>) -> Arc<dyn Subchannel> {
+        let sc = Arc::new(ExternalSubchannel::new(isc.clone(), self.wqtx.clone()));
+        let watcher = Arc::new(SubchannelStateWatcher::new(sc.clone(), self.wqtx.clone()));
+        sc.set_watcher(watcher.clone());
+        isc.register_connectivity_state_watcher(watcher.clone());
+        sc
     }
 }
 
@@ -393,13 +406,31 @@ impl name_resolution::ChannelController for InternalChannelController {
 impl load_balancing::ChannelController for InternalChannelController {
     fn new_subchannel(&mut self, address: &Address) -> Arc<dyn Subchannel> {
         let key = SubchannelKey::new(address.clone());
-        let isc = self.subchannel_pool.get_or_create_subchannel(&key);
+        if let Some(isc) = self.subchannel_pool.lookup_subchannel(&key) {
+            return self.new_esc_for_isc(isc);
+        }
 
-        let sc = Arc::new(ExternalSubchannel::new(isc.clone()));
-        let watcher = Arc::new(SubchannelStateWatcher::new(sc.clone(), self.wqtx.clone()));
-        sc.set_watcher(watcher.clone());
-        isc.register_connectivity_state_watcher(watcher.clone());
-        sc
+        // If we get here, it means one of two things:
+        // 1. provided key is not found in the map
+        // 2. provided key points to an unpromotable value, which can occur if
+        //    its internal subchannel has been dropped but hasn't been
+        //    unregistered yet.
+
+        let transport = self
+            .transport_registry
+            .get_transport(address.network_type)
+            .unwrap();
+        let scp = self.subchannel_pool.clone();
+        let isc = InternalSubchannel::new(
+            key.clone(),
+            transport,
+            Arc::new(NopBackoff {}),
+            Box::new(move |k: SubchannelKey| {
+                scp.unregister_subchannel(&k);
+            }),
+        );
+        let _ = self.subchannel_pool.register_subchannel(&key, isc.clone());
+        self.new_esc_for_isc(isc)
     }
 
     fn update_picker(&mut self, update: LbState) {

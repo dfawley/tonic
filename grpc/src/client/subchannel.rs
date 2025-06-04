@@ -6,7 +6,7 @@ use super::{
     ConnectivityState,
 };
 use crate::{
-    client::channel::WorkQueueItem,
+    client::{channel::WorkQueueItem, subchannel},
     service::{Request, Response, Service},
 };
 use core::panic;
@@ -15,7 +15,7 @@ use std::{
     error::Error,
     fmt::{Debug, Display},
     ops::Sub,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, RwLock, Weak},
 };
 use tokio::{
     sync::{mpsc, watch, Notify},
@@ -198,7 +198,7 @@ impl Service for InternalSubchannel {
         }
 
         let svc = svc.unwrap().clone();
-        return svc.clone().call(method, request).await;
+        return svc.call(method, request).await;
     }
 }
 
@@ -437,9 +437,8 @@ impl InternalSubchannel {
 impl Drop for InternalSubchannel {
     fn drop(&mut self) {
         println!("dropping internal subchannel {:?}", self.key);
-        if let Some(unregister_fn_owned) = self.unregister_fn.take() {
-            unregister_fn_owned(self.key.clone());
-        }
+        let unregister_fn = self.unregister_fn.take();
+        unregister_fn.unwrap()(self.key.clone());
     }
 }
 
@@ -468,64 +467,47 @@ impl Debug for SubchannelKey {
     }
 }
 pub(super) struct InternalSubchannelPool {
-    work_scheduler: WorkQueueTx,
-    transport_registry: TransportRegistry,
-    subchannels: BTreeMap<SubchannelKey, Weak<InternalSubchannel>>,
+    subchannels: RwLock<BTreeMap<SubchannelKey, Weak<InternalSubchannel>>>,
 }
 
 impl InternalSubchannelPool {
-    pub(super) fn new(work_scheduler: WorkQueueTx, transport_registry: TransportRegistry) -> Self {
+    pub(super) fn new() -> Self {
         Self {
-            work_scheduler,
-            transport_registry,
-            subchannels: BTreeMap::new(),
+            subchannels: RwLock::new(BTreeMap::new()),
         }
     }
 
-    pub(super) fn get_or_create_subchannel(
-        &mut self,
-        key: &SubchannelKey,
-    ) -> Arc<InternalSubchannel> {
-        println!("looking up subchannel for: {:?}", key);
-        if let Some(weak_isc) = self.subchannels.get(key) {
+    pub(super) fn lookup_subchannel(&self, key: &SubchannelKey) -> Option<Arc<InternalSubchannel>> {
+        println!("looking up subchannel for: {:?} in the pool", key);
+        if let Some(weak_isc) = self.subchannels.read().unwrap().get(key) {
             if let Some(isc) = weak_isc.upgrade() {
-                return isc;
+                return Some(isc);
             }
         }
+        None
+    }
 
-        // If we get here, it means one of two things:
-        // 1. provided key is not found in the map
-        // 2. provided key points to an unpromotable value, which can occur if
-        //    its internal subchannel has been dropped but hasn't been
-        //    unregistered yet.
-
-        let transport = self
-            .transport_registry
-            .get_transport(key.address.network_type)
-            .unwrap();
-        let work_scheduler = self.work_scheduler.clone();
-        let isc = InternalSubchannel::new(
-            key.clone(),
-            transport,
-            Arc::new(NopBackoff {}),
-            Box::new(move |k: SubchannelKey| {
-                let _ = work_scheduler.send(WorkQueueItem::Closure(Box::new(
-                    move |c: &mut InternalChannelController| {
-                        c.subchannel_pool.unregister_subchannel(&k);
-                    },
-                )));
-            }),
-        );
-        self.subchannels.insert(key.clone(), Arc::downgrade(&isc));
+    pub(super) fn register_subchannel(
+        &self,
+        key: &SubchannelKey,
+        isc: Arc<InternalSubchannel>,
+    ) -> Arc<InternalSubchannel> {
+        println!("registering subchannel for: {:?} with the pool", key);
+        self.subchannels
+            .write()
+            .unwrap()
+            .insert(key.clone(), Arc::downgrade(&isc));
         isc
     }
 
-    pub(super) fn unregister_subchannel(&mut self, key: &SubchannelKey) {
-        if let Some(weak_isc) = self.subchannels.get(key) {
+    pub(super) fn unregister_subchannel(&self, key: &SubchannelKey) {
+        let mut subchannels = self.subchannels.write().unwrap();
+        if let Some(weak_isc) = subchannels.get(key) {
             if let Some(isc) = weak_isc.upgrade() {
                 return;
             }
-            self.subchannels.remove(key);
+            println!("removing subchannel for: {:?} from the pool", key);
+            subchannels.remove(key);
             return;
         }
         panic!("attempt to unregister subchannel for unknown key {:?}", key);

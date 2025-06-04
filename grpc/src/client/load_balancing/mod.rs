@@ -33,9 +33,13 @@ use std::{
 use tokio::sync::{mpsc::Sender, Notify};
 use tonic::{metadata::MetadataMap, Status};
 
-use crate::service::{Request, Response, Service};
+use crate::{
+    client::channel::WorkQueueTx,
+    service::{Request, Response, Service},
+};
 
 use crate::client::{
+    channel::{InternalChannelController, WorkQueueItem},
     name_resolution::{Address, ResolverUpdate},
     subchannel::InternalSubchannel,
     ConnectivityState,
@@ -430,14 +434,16 @@ impl PartialEq for WeakSubchannel {
 impl Eq for WeakSubchannel {}
 
 pub(crate) struct ExternalSubchannel {
-    pub(crate) isc: Arc<InternalSubchannel>,
+    pub(crate) isc: Option<Arc<InternalSubchannel>>,
+    work_scheduler: WorkQueueTx,
     watcher: Mutex<Option<Arc<SubchannelStateWatcher>>>,
 }
 
 impl ExternalSubchannel {
-    pub(super) fn new(isc: Arc<InternalSubchannel>) -> Self {
+    pub(super) fn new(isc: Arc<InternalSubchannel>, work_scheduler: WorkQueueTx) -> Self {
         ExternalSubchannel {
-            isc,
+            isc: Some(isc),
+            work_scheduler,
             watcher: Mutex::default(),
         }
     }
@@ -449,13 +455,13 @@ impl ExternalSubchannel {
 
 impl Hash for ExternalSubchannel {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.isc.address().hash(state);
+        self.address().hash(state);
     }
 }
 
 impl PartialEq for ExternalSubchannel {
     fn eq(&self, other: &Self) -> bool {
-        self.isc.address() == other.isc.address()
+        self.address() == other.address()
     }
 }
 
@@ -463,12 +469,12 @@ impl Eq for ExternalSubchannel {}
 
 impl Subchannel for ExternalSubchannel {
     fn address(&self) -> Address {
-        self.isc.address()
+        self.isc.as_ref().unwrap().address()
     }
 
     fn connect(&self) {
         println!("connect called for subchannel: {}", self);
-        self.isc.connect(false);
+        self.isc.as_ref().unwrap().connect(false);
     }
 }
 
@@ -477,25 +483,31 @@ impl private::Sealed for ExternalSubchannel {}
 
 impl Drop for ExternalSubchannel {
     fn drop(&mut self) {
-        if let Some(watcher) = self.watcher.lock().unwrap().take() {
-            println!(
-                "unregistering connectivity state watcher for subchannel {}",
-                self
-            );
-            self.isc.unregister_connectivity_state_watcher(watcher);
-        }
+        let watcher = self.watcher.lock().unwrap().take();
+        let address = self.address().address.clone();
+        let isc = self.isc.take();
+        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+            move |c: &mut InternalChannelController| {
+                println!("unregistering connectivity state watcher for {}", address);
+                isc.as_ref()
+                    .unwrap()
+                    .unregister_connectivity_state_watcher(watcher.unwrap());
+            },
+            // The internal subchannel is dropped from here (i.e., from inside
+            // the work serializer), if this is the last reference to it.
+        )));
     }
 }
 
 impl Debug for ExternalSubchannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel {}", self.isc.address())
+        write!(f, "Subchannel {}", self.address())
     }
 }
 
 impl Display for ExternalSubchannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel {}", self.isc.address())
+        write!(f, "Subchannel {}", self.address())
     }
 }
 
