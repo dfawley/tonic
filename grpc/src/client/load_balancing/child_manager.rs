@@ -23,6 +23,8 @@
 // policy in use.  Complete tests must be written before it can be used in
 // production.  Also, support for the work scheduler is missing.
 
+use std::collections::HashSet;
+use std::sync::Mutex;
 use std::{collections::HashMap, error::Error, hash::Hash, mem, sync::Arc};
 
 use crate::client::load_balancing::{
@@ -42,10 +44,11 @@ pub struct ChildManager<T> {
     subchannels: HashMap<WeakSubchannel, Arc<T>>,
     children: HashMap<Arc<T>, Child>,
     sharder: Box<dyn ResolverUpdateSharder<T>>,
-    from_children_tx: mpsc::UnboundedSender<Arc<T>>,
-    to_parent_rx: mpsc::Receiver<Arc<T>>,
     updated: bool, // true iff a child has updated its state since the last call to has_updated.
+    work_requests: Arc<Mutex<HashSet<Arc<T>>>>,
 }
+
+pub trait ChildIdentifier: PartialEq + Hash + Eq + Send + Sync + 'static {}
 
 struct Child {
     policy: Box<dyn LbPolicy>,
@@ -61,7 +64,7 @@ pub struct ChildUpdate {
     pub child_update: ResolverUpdate,
 }
 
-pub trait ResolverUpdateSharder<T: PartialEq + Hash + Eq + Send>: Send {
+pub trait ResolverUpdateSharder<T: ChildIdentifier>: Send {
     /// Performs the operation of sharding an aggregate ResolverUpdate into one
     /// or more ChildUpdates.  Called automatically by the ChildManager when its
     /// resolver_update method is called.  The key in the returned map is the
@@ -72,34 +75,19 @@ pub trait ResolverUpdateSharder<T: PartialEq + Hash + Eq + Send>: Send {
     ) -> Result<HashMap<T, ChildUpdate>, Box<dyn Error + Send + Sync>>;
 }
 
-impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> ChildManager<T> {
+impl<T: ChildIdentifier> ChildManager<T> {
     /// Creates a new ChildManager LB policy.  shard_update is called whenever a
     /// resolver_update operation occurs.
     pub fn new(
         work_scheduler: Arc<dyn WorkScheduler>,
         sharder: Box<dyn ResolverUpdateSharder<T>>,
     ) -> Self {
-        let (from_children_tx, mut from_children_rx) = mpsc::unbounded_channel::<Arc<T>>();
-        let (to_parent_tx, to_parent_rx) = mpsc::channel::<Arc<T>>(1);
-        let ws = work_scheduler.clone();
-        tokio::task::spawn(async move {
-            println!("starting schedule_work() handler task");
-            while let Some(m) = from_children_rx.recv().await {
-                to_parent_tx
-                    .send(m.clone())
-                    .await
-                    .expect("Failed to send work to parent");
-                ws.schedule_work();
-            }
-            println!("exiting schedule_work() handler task");
-        });
         ChildManager {
             subchannels: HashMap::default(),
             children: HashMap::default(),
             sharder,
-            from_children_tx,
-            to_parent_rx,
             updated: false,
+            work_requests: Arc::default(),
         }
     }
 
@@ -150,7 +138,7 @@ impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> ChildManager<T> {
     }
 }
 
-impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> LbPolicy for ChildManager<T> {
+impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
     fn resolver_update(
         &mut self,
         resolver_update: ResolverUpdate,
@@ -175,9 +163,9 @@ impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> LbPolicy for ChildManager
                         child_id.clone(),
                         Child {
                             policy: update.child_policy_builder.build(LbPolicyOptions {
-                                work_scheduler: Arc::new(WrappedWorkScheduler::new(
+                                work_scheduler: Arc::new(ChildScheduler::new(
                                     child_id.clone(),
-                                    self.from_children_tx.clone(),
+                                    self.work_requests.clone(),
                                 )),
                             }),
                             state: LbState::initial(),
@@ -224,20 +212,16 @@ impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> LbPolicy for ChildManager
     }
 
     fn work(&mut self, _channel_controller: &mut dyn ChannelController) {
-        // The schedule_work() handler task writes to this channel before
-        // calling schedule_work() on the parent. So, when we get here, we know
-        // for a fact that the channel is not empty. We can't do a recv()
-        // because we can't call .await from a non-async context. But, we do
-        // know that we can safely unwrap the result from try_recv().
-        let child_id = self.to_parent_rx.try_recv().unwrap();
-
+        let children = mem::take(&mut *self.work_requests.lock().unwrap());
         // It is possible that work was queued for a child that got removed as
         // part of a subsequent resolver_update. So, it is safe to ignore such a
         // child here.
-        if let Some(child) = self.children.get_mut(&child_id) {
-            let mut channel_controller = WrappedController::new(_channel_controller);
-            child.policy.work(&mut channel_controller);
-            self.resolve_child_controller(channel_controller, child_id.clone());
+        for child_id in children {
+            if let Some(child) = self.children.get_mut(&child_id) {
+                let mut channel_controller = WrappedController::new(_channel_controller);
+                child.policy.work(&mut channel_controller);
+                self.resolve_child_controller(channel_controller, child_id.clone());
+            }
         }
     }
 }
@@ -274,24 +258,22 @@ impl ChannelController for WrappedController<'_> {
     }
 }
 
-struct WrappedWorkScheduler<T: Send + Sync + 'static> {
+struct ChildScheduler<T: ChildIdentifier> {
     child_identifier: Arc<T>,
-    from_children_tx: mpsc::UnboundedSender<Arc<T>>,
+    work_requests: Arc<Mutex<HashSet<Arc<T>>>>,
 }
 
-impl<T: Send + Sync + 'static> WrappedWorkScheduler<T> {
-    fn new(child_identifier: Arc<T>, from_children_tx: mpsc::UnboundedSender<Arc<T>>) -> Self {
+impl<T: ChildIdentifier> ChildScheduler<T> {
+    fn new(child_identifier: Arc<T>, work_requests: Arc<Mutex<HashSet<Arc<T>>>>) -> Self {
         Self {
             child_identifier,
-            from_children_tx,
+            work_requests,
         }
     }
 }
 
-impl<T: Send + Sync> WorkScheduler for WrappedWorkScheduler<T> {
+impl<T: ChildIdentifier> WorkScheduler for ChildScheduler<T> {
     fn schedule_work(&self) {
-        self.from_children_tx
-            .send(self.child_identifier.clone())
-            .expect("Failed to send work to child manager");
+        (*self.work_requests.lock().unwrap()).insert(self.child_identifier.clone());
     }
 }
