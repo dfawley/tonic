@@ -44,6 +44,7 @@ pub struct ChildManager<T> {
     sharder: Box<dyn ResolverUpdateSharder<T>>,
     from_children_tx: mpsc::UnboundedSender<Arc<T>>,
     to_parent_rx: mpsc::Receiver<Arc<T>>,
+    updated: bool, // true iff a child has updated its state since the last call to has_updated.
 }
 
 struct Child {
@@ -98,6 +99,7 @@ impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> ChildManager<T> {
             sharder,
             from_children_tx,
             to_parent_rx,
+            updated: false,
         }
     }
 
@@ -106,6 +108,10 @@ impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> ChildManager<T> {
         self.children
             .iter()
             .map(|(id, child)| (id.as_ref(), &child.state))
+    }
+
+    pub fn has_updated(&mut self) -> bool {
+        mem::take(&mut self.updated)
     }
 
     // Called to update all accounting in the ChildManager from operations
@@ -128,6 +134,7 @@ impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> ChildManager<T> {
         // Update the tracked state if the child produced an update.
         if let Some(state) = channel_controller.picker_update {
             self.children.get_mut(&child_id.clone()).unwrap().state = state;
+            self.updated = true;
         };
         // Prune subchannels created by this child that are no longer
         // referenced.
