@@ -46,6 +46,7 @@ pub struct ChildManager<T> {
     sharder: Box<dyn ResolverUpdateSharder<T>>,
     updated: bool, // true iff a child has updated its state since the last call to has_updated.
     work_requests: Arc<Mutex<HashSet<Arc<T>>>>,
+    work_scheduler: Arc<dyn WorkScheduler>,
 }
 
 pub trait ChildIdentifier: PartialEq + Hash + Eq + Send + Sync + 'static {}
@@ -88,6 +89,7 @@ impl<T: ChildIdentifier> ChildManager<T> {
             sharder,
             updated: false,
             work_requests: Arc::default(),
+            work_scheduler,
         }
     }
 
@@ -165,6 +167,7 @@ impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
                             policy: update.child_policy_builder.build(LbPolicyOptions {
                                 work_scheduler: Arc::new(ChildScheduler::new(
                                     child_id.clone(),
+                                    self.work_scheduler.clone(),
                                     self.work_requests.clone(),
                                 )),
                             }),
@@ -211,14 +214,14 @@ impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
         self.resolve_child_controller(channel_controller, child_id.clone());
     }
 
-    fn work(&mut self, _channel_controller: &mut dyn ChannelController) {
+    fn work(&mut self, channel_controller: &mut dyn ChannelController) {
         let children = mem::take(&mut *self.work_requests.lock().unwrap());
         // It is possible that work was queued for a child that got removed as
         // part of a subsequent resolver_update. So, it is safe to ignore such a
         // child here.
         for child_id in children {
             if let Some(child) = self.children.get_mut(&child_id) {
-                let mut channel_controller = WrappedController::new(_channel_controller);
+                let mut channel_controller = WrappedController::new(channel_controller);
                 child.policy.work(&mut channel_controller);
                 self.resolve_child_controller(channel_controller, child_id.clone());
             }
@@ -261,13 +264,19 @@ impl ChannelController for WrappedController<'_> {
 struct ChildScheduler<T: ChildIdentifier> {
     child_identifier: Arc<T>,
     work_requests: Arc<Mutex<HashSet<Arc<T>>>>,
+    work_scheduler: Arc<dyn WorkScheduler>,
 }
 
 impl<T: ChildIdentifier> ChildScheduler<T> {
-    fn new(child_identifier: Arc<T>, work_requests: Arc<Mutex<HashSet<Arc<T>>>>) -> Self {
+    fn new(
+        child_identifier: Arc<T>,
+        work_scheduler: Arc<dyn WorkScheduler>,
+        work_requests: Arc<Mutex<HashSet<Arc<T>>>>,
+    ) -> Self {
         Self {
             child_identifier,
             work_requests,
+            work_scheduler,
         }
     }
 }
@@ -275,5 +284,6 @@ impl<T: ChildIdentifier> ChildScheduler<T> {
 impl<T: ChildIdentifier> WorkScheduler for ChildScheduler<T> {
     fn schedule_work(&self) {
         (*self.work_requests.lock().unwrap()).insert(self.child_identifier.clone());
+        self.work_scheduler.schedule_work();
     }
 }
