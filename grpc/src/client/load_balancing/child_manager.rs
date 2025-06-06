@@ -42,12 +42,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 // An LbPolicy implementation that manages multiple children.
 pub struct ChildManager<T> {
     subchannels: HashMap<WeakSubchannel, Arc<T>>,
-
-    //what is supposed to be the key?
-
     children: HashMap<Arc<T>, Child>,
-
-
     sharder: Box<dyn ResolverUpdateSharder<T>>,
     updated: bool, // true iff a child has updated its state since the last call to has_updated.
     work_requests: Arc<Mutex<HashSet<Arc<T>>>>,
@@ -78,10 +73,6 @@ pub trait ResolverUpdateSharder<T: ChildIdentifier>: Send {
     fn shard_update(
         &self,
         resolver_update: ResolverUpdate,
-        //T is an endpoint and ChildUpdate struct is going to have a builder
-        //pass in pickfirst into that builder
-        //child update field in the ChildUpdate struct 
-        //would contain any attributes in the input resolverupdate
     ) -> Result<HashMap<T, ChildUpdate>, Box<dyn Error + Send + Sync>>;
 }
 
@@ -149,7 +140,7 @@ impl<T: ChildIdentifier> ChildManager<T> {
     }
 }
 
-impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> LbPolicy for ChildManager<T> {
+impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
     fn resolver_update(
         &mut self,
         resolver_update: ResolverUpdate,
@@ -198,15 +189,6 @@ impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> LbPolicy for ChildManager
         // Keep only the subchannels associated with currently active children.
         self.subchannels
             .retain(|_, child_id| self.children.contains_key(child_id));
-        println!("--- subchannels after retain ---");
-        for (weak_sc, child_id) in &self.subchannels {
-            let sc_str = match weak_sc.upgrade() {
-                Some(sc) => format!("{}", sc),
-                None => "<dropped>".to_string(),
-            };
-
-        println!("  Subchannel: {}", sc_str);
-        }
         Ok(())
     }
 
@@ -217,16 +199,6 @@ impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> LbPolicy for ChildManager
         channel_controller: &mut dyn ChannelController,
     ) {
         // Determine which child created this subchannel.
-
-        //this may not be what subchannels actually contains
-        println!("--- subchannels in subchannel update ---");
-        for (weak_sc, child_id) in &self.subchannels {
-            let sc_str = match weak_sc.upgrade() {
-                Some(sc) => format!("{}", sc),
-                None => "<dropped>".to_string(),
-            };
-            println!("  Subchannel: {}", sc_str);
-        }
         let child_id = self
             .subchannels
             .get(&WeakSubchannel::new(subchannel.clone()))
@@ -254,6 +226,15 @@ impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> LbPolicy for ChildManager
                 self.resolve_child_controller(channel_controller, child_id.clone());
             }
         }
+    }
+    
+    fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController) {
+        todo!()
+        // let policy = &mut self.children.get_mut(&child_id.clone()).unwrap().policy;
+        // let mut channel_controller = WrappedController::new(channel_controller);
+        // // Call the proper child.
+        // policy.exit_idle(&mut channel_controller);
+        // self.resolve_child_controller(channel_controller, child_id.clone());
     }
 }
 

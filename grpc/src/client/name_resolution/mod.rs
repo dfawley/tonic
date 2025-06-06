@@ -25,6 +25,8 @@ use core::fmt;
 
 use super::service_config::{self, ServiceConfig};
 use crate::{attributes::Attributes, rt};
+
+use super::load_balancing::child_manager::ChildIdentifier;
 use std::{
     error::Error,
     fmt::{Display, Formatter},
@@ -249,6 +251,10 @@ pub struct Endpoint {
     /// Attributes contains arbitrary data about this endpoint intended for
     /// consumption by the LB policy.
     pub attributes: Attributes,
+}
+
+impl ChildIdentifier for Endpoint {
+
 }
 
 #[non_exhaustive]
