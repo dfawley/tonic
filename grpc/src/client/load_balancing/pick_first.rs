@@ -3,16 +3,16 @@ use std::{
     error::Error,
     hash::Hash,
     ops::Sub,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex, Weak},
     time::Duration,
 };
 
 use crate::{
     client::{
         load_balancing::{
-            ChannelController, Failing, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState,
-            ParsedJsonLbConfig, Pick, PickResult, Picker, QueuingPicker, Subchannel,
-            ExternalSubchannel, SubchannelState, WorkScheduler,
+            ChannelController, ExternalSubchannel, Failing, LbPolicy, LbPolicyBuilder,
+            LbPolicyOptions, LbState, ParsedJsonLbConfig, Pick, PickResult, Picker, QueuingPicker,
+            Subchannel, SubchannelState, WeakSubchannelMap, WorkScheduler,
         },
         name_resolution::{Address, Endpoint, ResolverUpdate},
         service_config::LbConfig,
@@ -201,7 +201,7 @@ impl LbPolicy for PickFirstPolicy {
 
         // Handle updates for the currently selected subchannel.
         if let Some(selected_sc) = &self.selected_subchannel {
-            if *selected_sc == subchannel.clone() {
+            if selected_sc.address() == subchannel.address() {
                 // Any state change for the currently connected subchannel means
                 // that we are no longer connected.
                 self.move_to_idle(channel_controller);
@@ -466,7 +466,7 @@ impl Picker for IdlePicker {
 }
 
 struct SubchannelList {
-    subchannels: HashMap<Arc<dyn Subchannel>, SubchannelData>,
+    subchannels: WeakSubchannelMap<SubchannelData>,
     ordered_subchannels: Vec<Arc<dyn Subchannel>>,
     current_idx: usize,
     num_initial_notifications_seen: usize,
@@ -475,7 +475,7 @@ struct SubchannelList {
 impl SubchannelList {
     fn new(addresses: &Vec<Address>, channel_controller: &mut dyn ChannelController) -> Self {
         let mut scl = SubchannelList {
-            subchannels: HashMap::new(),
+            subchannels: WeakSubchannelMap::new(),
             ordered_subchannels: Vec::new(),
             current_idx: 0,
             num_initial_notifications_seen: 0,
@@ -589,7 +589,11 @@ impl SubchannelList {
     fn connect_to_all_subchannels(&mut self, channel_controller: &mut dyn ChannelController) {
         for (sc, data) in &mut self.subchannels {
             if data.state.as_ref().unwrap().connectivity_state == ConnectivityState::Idle {
-                sc.connect();
+                let weak = unsafe { Weak::from_raw(*sc) };
+                if let Some(sc) = weak.upgrade() {
+                    sc.connect();
+                    let _ = Weak::into_raw(weak);
+                }
             }
         }
     }

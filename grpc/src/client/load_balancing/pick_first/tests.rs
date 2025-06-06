@@ -344,7 +344,7 @@ async fn verify_connecting_picker_from_policy(
         TestEvent::UpdatePicker(update) => {
             assert!(update.connectivity_state == ConnectivityState::Connecting);
             let req = test_utils::new_request();
-            assert!(update.picker.pick(&req) == PickResult::Queue);
+            assert!(update.picker.pick(&req).is_queue());
             update.picker.clone()
         }
         other => panic!("unexpected event {}", other),
@@ -365,7 +365,7 @@ async fn verify_ready_picker_from_policy(
             let req = test_utils::new_request();
             match update.picker.pick(&req) {
                 PickResult::Pick(pick) => {
-                    assert!(pick.subchannel == subchannel.clone());
+                    assert!(pick.subchannel.address() == subchannel.address());
                     update.picker.clone()
                 }
                 other => panic!("unexpected pick result {}", other),
@@ -481,7 +481,7 @@ async fn pickfirst_resolver_error_after_a_valid_update_in_ready() {
     let req = test_utils::new_request();
     match picker.pick(&req) {
         PickResult::Pick(pick) => {
-            assert!(pick.subchannel == subchannels[0].clone());
+            assert!(pick.subchannel.address() == subchannels[0].address());
         }
         other => panic!("unexpected pick result {}", other),
     }
@@ -938,7 +938,7 @@ async fn pickfirst_resolver_update_with_completely_new_address_list() {
     let picker = verify_idle_picker_from_policy(&mut rx_events).await;
     verify_resolution_request(&mut rx_events).await;
     let req = test_utils::new_request();
-    assert!(picker.pick(&req) == PickResult::Queue);
+    assert!(picker.pick(&req).is_queue());
     verify_schedule_work_from_policy(&mut rx_events).await;
     lb_policy.work(tcc);
 
@@ -1067,7 +1067,7 @@ async fn pickfirst_resolver_update_removes_connected_address() {
     let picker = verify_idle_picker_from_policy(&mut rx_events).await;
     verify_resolution_request(&mut rx_events).await;
     let req = test_utils::new_request();
-    assert!(picker.pick(&req) == PickResult::Queue);
+    assert!(picker.pick(&req).is_queue());
     verify_schedule_work_from_policy(&mut rx_events).await;
     lb_policy.work(tcc);
 
@@ -1089,7 +1089,7 @@ async fn pickfirst_resolver_update_removes_connected_address() {
     let picker = verify_idle_picker_from_policy(&mut rx_events).await;
     verify_resolution_request(&mut rx_events).await;
     let req = test_utils::new_request();
-    assert!(picker.pick(&req) == PickResult::Queue);
+    assert!(picker.pick(&req).is_queue());
     verify_schedule_work_from_policy(&mut rx_events).await;
     lb_policy.work(tcc);
 
@@ -1144,7 +1144,7 @@ async fn pickfirst_connected_subchannel_goes_down() {
     let picker = verify_idle_picker_from_policy(&mut rx_events).await;
     verify_resolution_request(&mut rx_events).await;
     let req = test_utils::new_request();
-    assert!(picker.pick(&req) == PickResult::Queue);
+    assert!(picker.pick(&req).is_queue());
     verify_schedule_work_from_policy(&mut rx_events).await;
     lb_policy.work(tcc);
 
@@ -1194,7 +1194,7 @@ async fn pickfirst_all_subchannels_goes_down() {
     let picker = verify_idle_picker_from_policy(&mut rx_events).await;
     verify_resolution_request(&mut rx_events).await;
     let req = test_utils::new_request();
-    assert!(picker.pick(&req) == PickResult::Queue);
+    assert!(picker.pick(&req).is_queue());
     verify_schedule_work_from_policy(&mut rx_events).await;
     lb_policy.work(tcc);
 

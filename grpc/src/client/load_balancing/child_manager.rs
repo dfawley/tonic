@@ -25,11 +25,12 @@
 
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::Weak;
 use std::{collections::HashMap, error::Error, hash::Hash, mem, sync::Arc};
 
 use crate::client::load_balancing::{
     ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState,
-    WeakSubchannel, WorkScheduler,
+    WeakSubchannelMap, WorkScheduler,
 };
 use crate::client::name_resolution::{Address, ResolverUpdate};
 
@@ -37,10 +38,11 @@ use super::{Subchannel, SubchannelState};
 
 // An LbPolicy implementation that manages multiple children.
 pub struct ChildManager<T> {
-    subchannel_child_map: HashMap<WeakSubchannel, usize>,
+    subchannel_child_map: WeakSubchannelMap<usize>,
     children: Vec<Child<T>>,
     update_sharder: Box<dyn ResolverUpdateSharder<T>>,
     pending_work: Arc<Mutex<HashSet<usize>>>,
+    updated: bool, // true iff a child has updated its state since the last call to has_updated
 }
 
 pub trait ChildIdentifier: PartialEq + Hash + Eq + Send + Sync + 'static {}
@@ -83,6 +85,7 @@ impl<T: ChildIdentifier> ChildManager<T> {
             subchannel_child_map: Default::default(),
             children: Default::default(),
             pending_work: Default::default(),
+            updated: false,
         }
     }
 
@@ -91,6 +94,10 @@ impl<T: ChildIdentifier> ChildManager<T> {
         self.children
             .iter()
             .map(|child| (&child.identifier, &child.state))
+    }
+
+    pub fn has_updated(&mut self) -> bool {
+        mem::take(&mut self.updated)
     }
 
     // Called to update all accounting in the ChildManager from operations
@@ -111,6 +118,7 @@ impl<T: ChildIdentifier> ChildManager<T> {
         }
         // Update the tracked state if the child produced an update.
         if let Some(state) = channel_controller.picker_update {
+            self.updated = true;
             self.children[child_idx].state = state;
         };
     }
@@ -141,13 +149,17 @@ impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
         let old_subchannel_child_map = mem::take(&mut self.subchannel_child_map);
 
         // Reverse the old subchannel map.
-        let mut old_child_subchannels_map: HashMap<usize, Vec<WeakSubchannel>> = HashMap::new();
+        let mut old_child_subchannels_map: HashMap<usize, Vec<Arc<dyn Subchannel>>> =
+            HashMap::new();
 
         for (subchannel, child_idx) in old_subchannel_child_map {
-            old_child_subchannels_map
-                .entry(child_idx)
-                .or_default()
-                .push(subchannel);
+            let weak = unsafe { Weak::from_raw(subchannel) };
+            if let Some(strong) = weak.upgrade() {
+                old_child_subchannels_map
+                    .entry(child_idx)
+                    .or_default()
+                    .push(strong);
+            }
         }
 
         // Build a map of the old children from their IDs for efficient lookups.
@@ -236,10 +248,7 @@ impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
         channel_controller: &mut dyn ChannelController,
     ) {
         // Determine which child created this subchannel.
-        let child_idx = *self
-            .subchannel_child_map
-            .get(&WeakSubchannel::new(&subchannel))
-            .unwrap();
+        let child_idx = *self.subchannel_child_map.get(&subchannel).unwrap();
         let policy = &mut self.children[child_idx].policy;
         // Wrap the channel_controller to track the child's operations.
         let mut channel_controller = WrappedController::new(channel_controller);

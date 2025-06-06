@@ -20,10 +20,14 @@ use core::panic;
 use serde::de;
 use std::{
     any::Any,
-    collections::HashMap,
+    collections::{
+        hash_map::{IntoIter, Iter, IterMut, Values},
+        HashMap,
+    },
     error::Error,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
+    mem,
     ops::{Add, Sub},
     sync::{
         atomic::{AtomicI64, Ordering::Relaxed},
@@ -251,24 +255,11 @@ impl PickResult {
         };
         pick
     }
-}
 
-impl PartialEq for PickResult {
-    fn eq(&self, other: &Self) -> bool {
+    pub fn is_queue(&self) -> bool {
         match self {
-            PickResult::Pick(pick) => match other {
-                PickResult::Pick(other_pick) => pick.subchannel == other_pick.subchannel.clone(),
-                _ => false,
-            },
-            PickResult::Queue => matches!(other, PickResult::Queue),
-            PickResult::Fail(status) => {
-                // TODO: implement me.
-                false
-            }
-            PickResult::Drop(status) => {
-                // TODO: implement me.
-                false
-            }
+            PickResult::Queue => true,
+            _ => false,
         }
     }
 }
@@ -311,29 +302,6 @@ pub struct Pick {
     pub on_complete: Option<Box<dyn Fn(&Response) + Send + Sync>>,
 }
 
-pub trait DynHash {
-    fn dyn_hash(&self, state: &mut Box<&mut dyn Hasher>);
-}
-
-impl<T: Hash> DynHash for T {
-    fn dyn_hash(&self, state: &mut Box<&mut dyn Hasher>) {
-        self.hash(state);
-    }
-}
-
-pub trait DynPartialEq {
-    fn dyn_eq(&self, other: &&dyn Any) -> bool;
-}
-
-impl<T: Eq + PartialEq + 'static> DynPartialEq for T {
-    fn dyn_eq(&self, other: &&dyn Any) -> bool {
-        let Some(other) = other.downcast_ref::<T>() else {
-            return false;
-        };
-        self.eq(other)
-    }
-}
-
 mod private {
     pub trait Sealed {}
 }
@@ -357,7 +325,7 @@ pub trait SealedSubchannel: private::Sealed {}
 ///
 /// When a Subchannel is dropped, it is disconnected automatically, and no
 /// subsequent state updates will be provided for it to the LB policy.
-pub trait Subchannel: SealedSubchannel + DynHash + DynPartialEq + Any + Send + Sync {
+pub trait Subchannel: SealedSubchannel + Any + Send + Sync {
     /// Returns the address of the Subchannel.
     /// TODO: Consider whether this should really be public.
     fn address(&self) -> Address;
@@ -375,20 +343,6 @@ impl dyn Subchannel {
     }
 }
 
-impl Hash for dyn Subchannel {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.dyn_hash(&mut Box::new(state as &mut dyn Hasher));
-    }
-}
-
-impl PartialEq for dyn Subchannel {
-    fn eq(&self, other: &Self) -> bool {
-        self.dyn_eq(&Box::new(other as &dyn Any))
-    }
-}
-
-impl Eq for dyn Subchannel {}
-
 impl Debug for dyn Subchannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Subchannel: {}", self.address())
@@ -401,43 +355,95 @@ impl Display for dyn Subchannel {
     }
 }
 
-struct WeakSubchannel(Weak<dyn Subchannel>);
-
-impl From<Arc<dyn Subchannel>> for WeakSubchannel {
-    fn from(subchannel: Arc<dyn Subchannel>) -> Self {
-        WeakSubchannel(Arc::downgrade(&subchannel))
-    }
+#[derive(Default)]
+struct WeakSubchannelMap<V> {
+    m: HashMap<*const dyn Subchannel, V>,
 }
 
-impl WeakSubchannel {
-    pub fn new(subchannel: &Arc<dyn Subchannel>) -> Self {
-        WeakSubchannel(Arc::downgrade(subchannel))
-    }
+// unsafe impl<V: Send> Send for WeakSubchannelMap<V> {}
 
-    pub fn upgrade(&self) -> Option<Arc<dyn Subchannel>> {
-        self.0.upgrade()
-    }
-}
-
-impl Hash for WeakSubchannel {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        if let Some(strong) = self.upgrade() {
-            return strong.dyn_hash(&mut Box::new(state as &mut dyn Hasher));
+impl<V> WeakSubchannelMap<V> {
+    pub fn new() -> Self {
+        WeakSubchannelMap {
+            m: Default::default(),
         }
-        panic!("WeakSubchannel is not valid");
     }
-}
 
-impl PartialEq for WeakSubchannel {
-    fn eq(&self, other: &Self) -> bool {
-        if let Some(strong) = self.upgrade() {
-            return strong.dyn_eq(&Box::new(other as &dyn Any));
+    pub fn insert(&mut self, sc: Arc<dyn Subchannel>, v: V) -> Option<V> {
+        let weak = Arc::downgrade(&sc);
+        if self.m.contains_key(&weak.as_ptr()) {
+            // The key is not updated by this operation, so we need weak to be freed.
+            self.m.insert(weak.as_ptr(), v)
+        } else {
+            // The weak reference will not be lost as part of this operation.
+            self.m.insert(weak.into_raw(), v)
         }
-        false
+    }
+
+    pub fn get(&self, sc: &Arc<dyn Subchannel>) -> Option<&V> {
+        self.m.get(&Arc::as_ptr(&sc))
+    }
+
+    pub fn get_mut(&mut self, sc: &Arc<dyn Subchannel>) -> Option<&mut V> {
+        self.m.get_mut(&Arc::as_ptr(&sc))
+    }
+
+    pub fn values(&self) -> Values<'_, *const dyn Subchannel, V> {
+        todo!();
+        //self.m.values()
+    }
+
+    pub fn contains_key(&self, sc: &Arc<dyn Subchannel>) -> bool {
+        self.m.contains_key(&Arc::as_ptr(&sc))
+    }
+
+    pub fn remove(&mut self, sc: Arc<dyn Subchannel>) -> Option<V> {
+        self.m.remove(&Arc::into_raw(sc))
+    }
+
+    pub fn prune_unreferenced(&mut self) {
+        self.m.retain(|k, _| {
+            // Convert the pointer into a Weak<>, and if it upgrades, then keep it.
+            let weak = unsafe { Weak::from_raw(k) };
+            if weak.upgrade().is_some() {
+                _ = weak.into_raw();
+                // No drop weak.. it's stolen by into_raw.
+                return true;
+            }
+            // drop(weak);
+            return false;
+        })
     }
 }
 
-impl Eq for WeakSubchannel {}
+impl<V> IntoIterator for WeakSubchannelMap<V> {
+    type IntoIter = IntoIter<*const dyn Subchannel, V>;
+    type Item = (*const dyn Subchannel, V);
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        let m = mem::take(&mut self.m);
+        m.into_iter()
+    }
+}
+
+impl<'a, V> IntoIterator for &'a mut WeakSubchannelMap<V> {
+    type IntoIter = IterMut<'a, *const dyn Subchannel, V>;
+    type Item = (&'a *const dyn Subchannel, &'a mut V);
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.m.iter_mut()
+    }
+}
+
+impl<V> Drop for WeakSubchannelMap<V> {
+    fn drop(&mut self) {
+        for (k, _) in &self.m {
+            unsafe {
+                Weak::from_raw(k);
+            }
+        }
+    }
+}
 
 pub(crate) struct ExternalSubchannel {
     pub(crate) isc: Option<Arc<InternalSubchannel>>,
@@ -517,7 +523,7 @@ impl Display for ExternalSubchannel {
     }
 }
 
-pub trait ForwardingSubchannel: DynHash + DynPartialEq + Any + Send + Sync {
+pub trait ForwardingSubchannel: Any + Send + Sync {
     fn delegate(&self) -> Arc<dyn Subchannel>;
 
     fn address(&self) -> Address {
