@@ -275,9 +275,12 @@ impl ActiveChannel {
             runtime: Arc::new(TokioRuntime {}),
         };
         let resolver = rb.build(&target, resolver_opts);
-
+        //spawn a task and run 
         let jh = runtime.spawn(Box::pin(async move {
             let mut resolver = resolver;
+            //reading from channel until receive returns 
+            //for every w, it sees if it is a closure or scheduleresolver
+            //whatever it queues out of the channel, it runs that work
             while let Some(w) = rx.recv().await {
                 match w {
                     WorkQueueItem::Closure(func) => func(&mut channel_controller),

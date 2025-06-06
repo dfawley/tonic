@@ -47,6 +47,8 @@ use crate::client::{
 
 pub mod child_manager;
 pub mod pick_first;
+pub mod round_robin;
+
 
 #[cfg(test)]
 pub mod test_utils;
@@ -147,6 +149,9 @@ pub trait LbPolicy: Send {
     /// Called by the channel in response to a call from the LB policy to the
     /// WorkScheduler's request_work method.
     fn work(&mut self, channel_controller: &mut dyn ChannelController);
+
+    /// Called by pickfirst whenever the LB policy is idle and wants to reconnect
+    fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController);
 }
 
 /// Controls channel behaviors.

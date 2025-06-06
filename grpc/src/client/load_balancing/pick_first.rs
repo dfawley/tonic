@@ -45,7 +45,7 @@ pub(crate) fn thread_rng_shuffler() -> Box<EndpointShuffler> {
 }
 
 #[cfg(test)]
-mod tests;
+mod test;
 
 pub static POLICY_NAME: &str = "pick_first";
 
@@ -128,6 +128,7 @@ impl LbPolicy for PickFirstPolicy {
         config: Option<&LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        //if there is valid data in endpoints
         match update.endpoints {
             Ok(mut endpoints) => {
                 println!(
@@ -221,6 +222,16 @@ impl LbPolicy for PickFirstPolicy {
         // from the name resolver. This will start connecting from the first
         // address in the list.
         self.subchannel_list = Some(SubchannelList::new(&self.addresses, channel_controller));
+    }
+
+    fn exit_idle(& mut self, channel_controller: &mut dyn ChannelController) {
+        if self.connectivity_state == ConnectivityState::Idle {
+            self.subchannel_list = Some(SubchannelList::new(&self.addresses, channel_controller));
+            self.move_to_connecting(channel_controller);
+            if let Some(subchannel_list) = self.subchannel_list.as_mut() {
+                let connected = subchannel_list.connect_to_next_subchannel(channel_controller);
+            }
+        }
     }
 }
 
@@ -465,6 +476,7 @@ impl Picker for IdlePicker {
     }
 }
 
+//list of subchannels that pick_first is currently connecting too
 struct SubchannelList {
     subchannels: HashMap<Arc<dyn Subchannel>, SubchannelData>,
     ordered_subchannels: Vec<Arc<dyn Subchannel>>,

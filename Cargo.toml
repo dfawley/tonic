@@ -28,12 +28,12 @@ members = [
   "tests/use_arc_self",
   "tests/default_stubs",
   "tests/deprecated_methods",
-  "tests/skip_debug",
+  "tests/skip_debug", "routeguide",
 ]
 resolver = "2"
 
 [workspace.package]
-rust-version = "1.75"
+rust-version = "1.85"
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
