@@ -32,3 +32,4 @@ pub mod inmemory;
 pub mod rt;
 pub mod server;
 pub mod service;
+pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;

@@ -13,7 +13,7 @@ pub type Response =
 
 #[async_trait]
 pub trait Service: Send + Sync {
-    async fn call(&self, method: String, request: Request) -> Response;
+    async fn call(&mut self, method: String, request: Request) -> Result<Response, Status>;
 }
 
 pub trait Message: Any + Send + Sync {}

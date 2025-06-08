@@ -23,6 +23,9 @@ tonic = { version = "0.13.0", path = "../tonic", default-features = false, featu
 tower-service = "0.3.3"
 url = "2.5.0"
 hickory-resolver = { version = "0.25.1", optional = true }
+hyper-util = "0.1.14"
+hyper = { version = "1.6.0", features = ["client", "http2"] }
+tower = "0.5.2"
 
 [dev-dependencies]
 hickory-server =  "0.25.2"
