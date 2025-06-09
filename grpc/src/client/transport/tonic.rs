@@ -1,11 +1,11 @@
 use http::Uri;
 use http_body::Body;
 use hyper::{client::conn::http2::Builder, rt::Executor};
-use hyper_util::client::legacy::connect::HttpConnector;
 use std::{
     collections::HashMap,
     error::Error,
     future::Future,
+    net::SocketAddr,
     pin::Pin,
     str::FromStr,
     sync::{
@@ -29,7 +29,7 @@ use crate::{
     },
     rt::{
         self,
-        hyper_wrapper::{HyperCompatExec, HyperCompatTimer},
+        hyper_wrapper::{HyperCompatExec, HyperCompatTimer, HyperStream},
         Runtime,
     },
     server,
@@ -94,12 +94,16 @@ impl transport::Transport for TonicTransportBuilder {
         config: Arc<SubchannelConfig>,
     ) -> Result<Box<dyn ConnectedTransport>, String> {
         let runtime = config.runtime.clone();
-        let mut settings = Builder::<HyperCompatExec>::new(HyperCompatExec(runtime.clone()))
-            .timer(HyperCompatTimer(runtime.clone()))
-            .initial_stream_window_size(config.init_stream_window_size)
-            .initial_connection_window_size(config.init_connection_window_size)
-            .keep_alive_interval(config.http2_keep_alive_interval)
-            .clone();
+        let mut settings = Builder::<HyperCompatExec>::new(HyperCompatExec {
+            inner: runtime.clone(),
+        })
+        .timer(HyperCompatTimer {
+            inner: runtime.clone(),
+        })
+        .initial_stream_window_size(config.init_stream_window_size)
+        .initial_connection_window_size(config.init_connection_window_size)
+        .keep_alive_interval(config.http2_keep_alive_interval)
+        .clone();
 
         if let Some(val) = config.http2_keep_alive_timeout {
             settings.keep_alive_timeout(val);
@@ -117,25 +121,29 @@ impl transport::Transport for TonicTransportBuilder {
             settings.max_header_list_size(val);
         }
 
-        // hyper's HttpConnector uses tokio internally. We will need to write
-        // a custom connector to support other runtimes.
-        let mut http = HttpConnector::new();
-        // TODO: Handle https.
-        http.enforce_http(false);
-        http.set_nodelay(config.tcp_nodelay);
-        http.set_keepalive(config.tcp_keepalive);
-        http.set_connect_timeout(config.connect_timeout);
-
-        let uri = Uri::from_maybe_shared(format!("http://{}", config.address))
-            .map_err(|e| e.to_string())?; // TODO: err msg
-
-        let stream = http
-            .call(uri.clone())
-            .await
-            .map_err(|err| err.to_string())?;
+        let addr: SocketAddr =
+            SocketAddr::from_str(&config.address).map_err(|err| err.to_string())?;
+        let tcp_stream_fut = runtime.tcp_stream(
+            addr,
+            rt::TcpOptions {
+                enable_nodelay: config.tcp_nodelay,
+                keepalive: config.tcp_keepalive,
+            },
+        );
+        let tcp_stream = if let Some(timeout) = config.connect_timeout {
+            tokio::select! {
+            _ = runtime.sleep(timeout) => {
+                return Err("timed out waiting for TCP stream to connect".to_string())
+            }
+            tcp_stream = tcp_stream_fut => { tcp_stream? }
+            }
+        } else {
+            tcp_stream_fut.await?
+        };
+        let tcp_stream = HyperStream::new(tcp_stream);
 
         let (sender, connection) = settings
-            .handshake(stream)
+            .handshake(tcp_stream)
             .await
             .map_err(|err| err.to_string())?;
         let closed_notifier = Arc::new(Notify::new());
@@ -156,6 +164,8 @@ impl transport::Transport for TonicTransportBuilder {
             .service(sender);
 
         let service = BoxService::new(service);
+        let uri = Uri::from_maybe_shared(format!("http://{}", config.address))
+            .map_err(|e| e.to_string())?; // TODO: err msg
         let grpc = Grpc::with_origin(TonicService { inner: service }, uri);
 
         Ok(Box::new(ConnectedTonicTransport {

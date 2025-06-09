@@ -26,6 +26,8 @@ hickory-resolver = { version = "0.25.1", optional = true }
 hyper-util = "0.1.14"
 hyper = { version = "1.6.0", features = ["client", "http2"] }
 tower = "0.5.2"
+socket2 = "0.5.10"
+pin-project-lite = "0.2.16"
 
 [dev-dependencies]
 hickory-server =  "0.25.2"
