@@ -24,20 +24,20 @@ use tower_service::Service as TowerService;
 
 use crate::{
     client::{
-        name_resolution::{
-            Address, ChannelController, Resolver, ResolverBuilder, ResolverOptions, ResolverUpdate,
-            GLOBAL_RESOLVER_REGISTRY, TCP_IP_NETWORK_TYPE,
-        },
+        name_resolution::TCP_IP_NETWORK_TYPE,
         transport::{self, ConnectedTransport, GLOBAL_TRANSPORT_REGISTRY},
     },
-    rt::{self, HyperCompatExec, HyperCompatTimer, Runtime},
+    rt::{
+        self,
+        hyper_wrapper::{HyperCompatExec, HyperCompatTimer},
+        Runtime,
+    },
     server,
     service::{Request, Response, Service},
 };
 use once_cell::sync::Lazy;
 use tokio::{
     io::AsyncWriteExt,
-    net::TcpStream,
     sync::{mpsc, oneshot, Mutex, Notify},
     time::sleep,
 };
