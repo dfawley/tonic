@@ -221,15 +221,17 @@ impl LbPolicy for PickFirstPolicy {
         // Build a new subchannel list with the most recent addresses received
         // from the name resolver. This will start connecting from the first
         // address in the list.
+
+        //can only do meaningful when it has channel controller
+        //called when lb policy has work to do, anything the lb policy wants to do that
         self.subchannel_list = Some(SubchannelList::new(&self.addresses, channel_controller));
     }
-
     fn exit_idle(& mut self, channel_controller: &mut dyn ChannelController) {
         if self.connectivity_state == ConnectivityState::Idle {
             self.subchannel_list = Some(SubchannelList::new(&self.addresses, channel_controller));
             self.move_to_connecting(channel_controller);
             if let Some(subchannel_list) = self.subchannel_list.as_mut() {
-                let connected = subchannel_list.connect_to_next_subchannel(channel_controller);
+                let _ = subchannel_list.connect_to_next_subchannel(channel_controller);
             }
         }
     }
@@ -411,6 +413,7 @@ impl PickFirstPolicy {
     }
 
     fn move_to_connecting(&mut self, channel_controller: &mut dyn ChannelController) {
+        println!("state is connecting");
         self.connectivity_state = ConnectivityState::Connecting;
         channel_controller.update_picker(LbState {
             connectivity_state: ConnectivityState::Connecting,
@@ -476,7 +479,6 @@ impl Picker for IdlePicker {
     }
 }
 
-//list of subchannels that pick_first is currently connecting too
 struct SubchannelList {
     subchannels: HashMap<Arc<dyn Subchannel>, SubchannelData>,
     ordered_subchannels: Vec<Arc<dyn Subchannel>>,

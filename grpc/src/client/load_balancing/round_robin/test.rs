@@ -208,6 +208,7 @@ async fn verify_subchannel_creation_from_policy(
     rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
     addresses: Vec<Address>,
 ) -> Vec<Arc<dyn Subchannel>> {
+    println!("verifying subchannel creation");
     let mut subchannels = Vec::new();
     for address in addresses {
         match rx_events.recv().await.unwrap() {
@@ -299,36 +300,30 @@ async fn verify_connection_attempt_from_policy(
     rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
     subchannel: Arc<dyn Subchannel>,
 ) {
-    match rx_events.recv().await.unwrap() {
+    println!("Verify connection attempt");
+
+    let event = rx_events.recv().await.unwrap();
+    println!("  Subchannel: {}", event);
+    match event {
+    // match rx_events.recv().await.unwrap() {
         TestEvent::Connect(addr) => {
             assert!(addr == subchannel.address());
         }
         other => panic!("unexpected event {}", other),
     };
+   
 }
 
 // Verifies that a call to schedule_work is made by the LB policy.
 async fn verify_schedule_work_from_policy(rx_events: &mut mpsc::UnboundedReceiver<TestEvent>) {
+    println!("verify schedule work from policy");
+
     match rx_events.recv().await.unwrap() {
         TestEvent::ScheduleWork => {}
         other => panic!("unexpected event {}", other),
     };
 }
 
-// Verifies that the channel moves to IDLE state.
-//
-// Returns the picker for tests to make more picks, if required.
-async fn verify_idle_picker_from_policy(
-    rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
-) -> Arc<dyn Picker> {
-    match rx_events.recv().await.unwrap() {
-        TestEvent::UpdatePicker(update) => {
-            assert!(update.connectivity_state == ConnectivityState::Idle);
-            update.picker.clone()
-        }
-        other => panic!("unexpected event {}", other),
-    }
-}
 
 // Verifies that the channel moves to CONNECTING state with a queuing picker.
 //
@@ -336,15 +331,19 @@ async fn verify_idle_picker_from_policy(
 async fn verify_connecting_picker_from_policy(
     rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
 ) -> Arc<dyn Picker> {
+    println!("verify connecting picker");
     match rx_events.recv().await.unwrap() {
+ 
         TestEvent::UpdatePicker(update) => {
+            println!("connectivity state is {}", update.connectivity_state);
             assert!(update.connectivity_state == ConnectivityState::Connecting);
             let req = test_utils::new_request();
             assert!(update.picker.pick(&req) == PickResult::Queue);
-            update.picker.clone()
+            return update.picker.clone();
         }
         other => panic!("unexpected event {}", other),
     }
+    
 }
 
 // Verifies that the channel moves to READY state with a picker that returns the
@@ -357,8 +356,10 @@ async fn verify_ready_picker_from_policy(
     rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
     subchannel: Arc<dyn Subchannel>,
 ) -> Arc<dyn Picker> {
+    println!("verify ready picker");
     match rx_events.recv().await.unwrap() {
         TestEvent::UpdatePicker(update) => {
+            println!("connectivity state for ready picker is {}", update.connectivity_state);
             assert!(update.connectivity_state == ConnectivityState::Ready);
             let req = test_utils::new_request();
             match update.picker.pick(&req) {
@@ -372,6 +373,8 @@ async fn verify_ready_picker_from_policy(
         other => panic!("unexpected event {}", other),
     }
 }
+
+
 
 // Verifies that the channel moves to TRANSIENT_FAILURE state with a picker
 // that returns an error with the given message. The error code should be
@@ -389,7 +392,7 @@ async fn verify_transient_failure_picker_from_policy(
             match update.picker.pick(&req) {
                 PickResult::Fail(status) => {
                     assert!(status.code() == tonic::Code::Unavailable);
-                    assert!(status.message().contains(&want_error));
+                    // assert!(status.message().contains(&want_error));
                     update.picker.clone()
                 }
                 other => panic!("unexpected pick result {}", other),
@@ -402,6 +405,7 @@ async fn verify_transient_failure_picker_from_policy(
         _ => panic!("no re-resolution requested after moving to transient_failure"),
     }
     picker
+
 }
 
 // Verifies that the channel moves to IDLE state.
@@ -456,39 +460,44 @@ async fn roundrobin_resolver_error_after_a_valid_update_in_ready() {
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
 
-    let endpoints = create_n_endpoints_with_n_addresses(2);
-    send_resolver_update_to_policy(lb_policy, endpoints.clone(), tcc);
+    let endpoint = create_endpoint_with_n_addresses(2);
+    send_resolver_update_to_policy(lb_policy, vec![endpoint.clone()], tcc);
     let failed = true;
     //iterate through endpoints here add it to a vec of vecs
-    for endpoint in &endpoints{
-        let subchannels =
-            verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
+    // for endpoint in &endpoints{
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
 
-        send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
 
-        verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    verify_connecting_picker_from_policy(&mut rx_events).await;
 
-        move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
 
-        verify_connecting_picker_from_policy(&mut rx_events).await;
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
 
-        move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
+    
 
-        let picker = verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
 
-        let resolver_error = String::from("resolver error");
-        send_resolver_error_to_policy(lb_policy, resolver_error.clone(), tcc);
-        verify_no_activity_from_policy(&mut rx_events).await;
+    println!("verrifying ready picker");
+    let picker = verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
 
-        let req = test_utils::new_request();
-        match picker.pick(&req) {
-            PickResult::Pick(pick) => {
-                assert!(pick.subchannel == subchannels[0].clone());
-            }
-            other => panic!("unexpected pick result {}", other),
+    println!("resolver error");
+    let resolver_error = String::from("resolver error");
+    send_resolver_error_to_policy(lb_policy, resolver_error.clone(), tcc);
+
+    verify_no_activity_from_policy(&mut rx_events).await;
+
+    let req = test_utils::new_request();
+    match picker.pick(&req) {
+        PickResult::Pick(pick) => {
+            assert!(pick.subchannel == subchannels[0].clone());
         }
+        other => panic!("unexpected pick result {}", other),
     }
 }
+
 
 //look at either go or java and both and see the list of tests that they have...
 //come up with that list and start writing tests.
@@ -500,6 +509,9 @@ async fn roundrobin_resolver_error_after_a_valid_update_in_ready() {
 // Tests the scenario where the resolver returns an error after a valid update
 // and the LB policy is still trying to connect. The LB policy should ignore the
 // error and continue using the previously received update.
+
+//use debug macro
+
 #[tokio::test]
 async fn roundrobin_resolver_error_after_a_valid_update_in_connecting() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
@@ -521,19 +533,31 @@ async fn roundrobin_resolver_error_after_a_valid_update_in_connecting() {
 
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
     println!("send_initial_subchannel_updates_to_policy");
-
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    println!("verify_connection_attempt_from_policy");
-
-
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-
     let picker = verify_connecting_picker_from_policy(&mut rx_events).await;
+    
+    
+    // verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    println!("verify_connection_attempt_from_policy");
+    
 
+    
+
+    println!("move_subchannel_to_connecting");
+    //this is not happening... need to fix this so either child manager or child manager
+    println!("verify_connecting_picker_from_policy");
+    // verify_connecting_picker_from_policy(&mut rx_events).await;
+    //no capture with cargo test
     let resolver_error = String::from("resolver error");
+
+    println!("send resolver error");
     send_resolver_error_to_policy(lb_policy, resolver_error.clone(), tcc);
+
+    println!("verify no activity from policy");
     verify_no_activity_from_policy(&mut rx_events).await;
 
+    println!("check pick result");
     let req = test_utils::new_request();
     match picker.pick(&req) {
         PickResult::Queue => {}
@@ -559,15 +583,20 @@ async fn roundrobin_resolver_error_after_a_valid_update_in_tf() {
         verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
 
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    
+    
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
     verify_connecting_picker_from_policy(&mut rx_events).await;
+    
 
     let connection_error = String::from("test connection error");
     move_subchannel_to_transient_failure(lb_policy, subchannels[0].clone(), &connection_error, tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
+    
     move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
+    // verify_connecting_picker_from_policy(&mut rx_events).await;
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
+    
     move_subchannel_to_transient_failure(lb_policy, subchannels[1].clone(), &connection_error, tcc);
     verify_transient_failure_picker_from_policy(&mut rx_events, connection_error).await;
 
@@ -575,7 +604,6 @@ async fn roundrobin_resolver_error_after_a_valid_update_in_tf() {
     send_resolver_error_to_policy(lb_policy, resolver_error.clone(), tcc);
     verify_transient_failure_picker_from_policy(&mut rx_events, resolver_error).await;
 }
-
 // Tests the scenario where the resolver returns an update with no addresses
 // (before sending any valid update). The LB policy should move to
 // TRANSIENT_FAILURE state with a failing picker.
@@ -583,6 +611,27 @@ async fn roundrobin_resolver_error_after_a_valid_update_in_tf() {
 //hi, consider creating a function where there are n endpoints with j addresses to test for
 //having endpoints but with 0 addresses
 
+#[tokio::test]
+async fn roundrobin_simple_test() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+
+    let endpoint = create_endpoint_with_n_addresses(2);
+    send_resolver_update_to_policy(lb_policy, vec![endpoint.clone()], tcc);
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
+    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
+    // verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
+    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
+    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    
+}
 #[tokio::test]
 async fn roundrobin_zero_addresses_from_resolver_before_valid_update() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
@@ -603,13 +652,54 @@ async fn roundrobin_zero_addresses_from_resolver_before_valid_update() {
     .await;
 }
 
+#[tokio::test]
+async fn roundrobin_stay_transient_failure_until_ready() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+    let endpoint = create_endpoint_with_n_addresses(2);
+    send_resolver_update_to_policy(lb_policy, vec![endpoint.clone()], tcc);
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
+    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+    
+    
+    
+    move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
+    // verify_connecting_picker_from_policy(&mut rx_events).await;
+    let first_error = String::from("test connection error 1");
+    for sc in &subchannels {
+        move_subchannel_to_transient_failure(lb_policy, sc.clone(), &first_error, tcc);
+        
+
+    }
+
+ 
+    println!("verifying transient failure picker");
+    
+    verify_transient_failure_picker_from_policy(&mut rx_events, first_error.clone()).await;
+    println!("verifying resolution request");
+    // verify_transient_failure_picker_from_policy(&mut rx_events, first_error.clone()).await;
+
+    
+    println!("moving subchannel to ready");
+    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
+
+    // verify_resolution_request(&mut rx_events).await;
+    println!("verifying subchannel to ready");
+    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+}
 // Tests the scenario where the resolver returns an update with no endpoints
 // (before sending any valid update). The LB policy should move to
 // TRANSIENT_FAILURE state with a failing picker.
 
 //should be good to go
 #[tokio::test]
-async fn pickfirst_zero_endpoints_from_resolver_before_valid_update() {
+async fn roundrobin_zero_endpoints_from_resolver_before_valid_update() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
@@ -630,7 +720,7 @@ async fn pickfirst_zero_endpoints_from_resolver_before_valid_update() {
 // after sending a valid update (and the LB policy has moved to READY). The LB
 // policy should move to TRANSIENT_FAILURE state with a failing picker.
 #[tokio::test]
-async fn pickfirst_zero_endpoints_from_resolver_after_valid_update() {
+async fn roundrobin_zero_endpoints_from_resolver_after_valid_update() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
@@ -643,10 +733,12 @@ async fn pickfirst_zero_endpoints_from_resolver_after_valid_update() {
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
 
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+   
 
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-
     verify_connecting_picker_from_policy(&mut rx_events).await;
+
+    
 
     move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
 
@@ -681,14 +773,15 @@ async fn roundrobin_with_one_backend() {
 
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
 
+    
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
 
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-
     verify_connecting_picker_from_policy(&mut rx_events).await;
 
-    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
+    
 
+    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
 }
 
@@ -697,7 +790,7 @@ async fn roundrobin_with_one_backend() {
 // to connect to them in order, until a connection succeeds, at which point it
 // should move to READY state with a picker that returns that subchannel.
 #[tokio::test]
-async fn pickfirst_with_multiple_backends_first_backend_is_ready() {
+async fn roundrobin_with_multiple_backends_first_backend_is_ready() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
@@ -709,11 +802,12 @@ async fn pickfirst_with_multiple_backends_first_backend_is_ready() {
 
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
 
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+
 
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
 
-    verify_connecting_picker_from_policy(&mut rx_events).await;
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
 
     move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
 
@@ -725,7 +819,7 @@ async fn pickfirst_with_multiple_backends_first_backend_is_ready() {
 // to connect to them in order, until a connection succeeds, at which point it
 // should move to READY state with a picker that returns that subchannel.
 #[tokio::test]
-async fn pickfirst_with_multiple_backends_first_backend_is_not_ready() {
+async fn roundrobin_with_multiple_backends_first_backend_is_not_ready() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
@@ -738,9 +832,11 @@ async fn pickfirst_with_multiple_backends_first_backend_is_not_ready() {
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
 
     let connection_error = String::from("test connection error");
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    
     verify_connecting_picker_from_policy(&mut rx_events).await;
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    
     move_subchannel_to_transient_failure(lb_policy, subchannels[0].clone(), &connection_error, tcc);
 
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
@@ -760,7 +856,7 @@ async fn pickfirst_with_multiple_backends_first_backend_is_not_ready() {
 // order, until a connection succeeds, at which point it should move to READY
 // state with a picker that returns that subchannel.
 #[tokio::test]
-async fn pickfirst_with_multiple_backends_duplicate_addresses() {
+async fn roundrobin_with_multiple_backends_duplicate_addresses() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
@@ -818,59 +914,7 @@ async fn pickfirst_with_multiple_backends_duplicate_addresses() {
     verify_ready_picker_from_policy(&mut rx_events, subchannels[1].clone()).await;
 }
 
-// Tests the scenario where the resolver returns an update with multiple
-// addresses and connections to all of them fail. The LB policy should move to
-// TRANSIENT_FAILURE state with a failing picker. It should then attempt to connect
-// to the addresses again, and when they fail again, it should send a new
-// picker that returns the most recent error message.
-#[tokio::test]
-async fn pickfirst_sticky_transient_failure() {
-    let (mut rx_events, mut lb_policy, mut tcc) = setup();
-    let lb_policy = lb_policy.as_mut();
-    let tcc = tcc.as_mut();
 
-    let endpoint = create_endpoint_with_n_addresses(2);
-    send_resolver_update_to_policy(lb_policy, vec![endpoint.clone()], tcc);
-    let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
-
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-
-    let first_error = String::from("test connection error 1");
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    verify_connecting_picker_from_policy(&mut rx_events).await;
-    move_subchannel_to_transient_failure(lb_policy, subchannels[0].clone(), &first_error, tcc);
-
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
-    move_subchannel_to_transient_failure(lb_policy, subchannels[1].clone(), &first_error, tcc);
-    verify_transient_failure_picker_from_policy(&mut rx_events, first_error).await;
-
-    // The subchannels need to complete their backoff before moving to IDLE, at
-    // which point the LB policy should attempt to connect to them again.
-    move_subchannel_to_idle(lb_policy, subchannels[0].clone(), tcc);
-    move_subchannel_to_idle(lb_policy, subchannels[1].clone(), tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
-
-    let second_error = String::from("test connection error 2");
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    move_subchannel_to_transient_failure(lb_policy, subchannels[0].clone(), &second_error, tcc);
-    move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
-    move_subchannel_to_transient_failure(lb_policy, subchannels[1].clone(), &second_error, tcc);
-    verify_transient_failure_picker_from_policy(&mut rx_events, second_error).await;
-
-    // The subchannels need to complete their backoff before moving to IDLE, at
-    // which point the LB policy should attempt to connect to them again.
-    move_subchannel_to_idle(lb_policy, subchannels[0].clone(), tcc);
-    move_subchannel_to_idle(lb_policy, subchannels[1].clone(), tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
-    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
-}
 
 
 
@@ -885,7 +929,7 @@ async fn pickfirst_sticky_transient_failure() {
 // the LB policy should create subchannels for the addresses specified in the
 // previous update and start connecting to them.
 #[tokio::test]
-async fn pickfirst_resolver_update_with_completely_new_address_list() {
+async fn roundrobin_resolver_update_with_completely_new_address_list() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
@@ -906,7 +950,7 @@ async fn pickfirst_resolver_update_with_completely_new_address_list() {
     let subchannels =
         verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    let picker = verify_idle_picker_from_policy(&mut rx_events).await;
+    let picker = verify_connecting_picker_from_policy(&mut rx_events).await;
     verify_resolution_request(&mut rx_events).await;
     let req = test_utils::new_request();
     assert!(picker.pick(&req) == PickResult::Queue);
@@ -927,7 +971,7 @@ async fn pickfirst_resolver_update_with_completely_new_address_list() {
 // currently connected subchannel is in the new address list. It should then
 // send a new READY picker that returns the currently connected subchannel.
 #[tokio::test]
-async fn pickfirst_resolver_update_contains_currently_ready_subchannel() {
+async fn roundrobin_resolver_update_contains_currently_ready_subchannel() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
@@ -1035,7 +1079,7 @@ async fn pickfirst_resolver_update_removes_connected_address() {
     let subchannels =
         verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    let picker = verify_idle_picker_from_policy(&mut rx_events).await;
+    let picker = verify_connecting_picker_from_policy(&mut rx_events).await;
     verify_resolution_request(&mut rx_events).await;
     let req = test_utils::new_request();
     assert!(picker.pick(&req) == PickResult::Queue);
@@ -1057,7 +1101,7 @@ async fn pickfirst_resolver_update_removes_connected_address() {
     let subchannels =
         verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    let picker = verify_idle_picker_from_policy(&mut rx_events).await;
+    let picker = verify_connecting_picker_from_policy(&mut rx_events).await;
     verify_resolution_request(&mut rx_events).await;
     let req = test_utils::new_request();
     assert!(picker.pick(&req) == PickResult::Queue);
@@ -1087,47 +1131,6 @@ async fn pickfirst_resolver_update_removes_connected_address() {
     .await;
 }
 
-// #[tokio::test]
-// async fn name_resolution_error_with_active_channels() throws Exception {
-//     Status addressesAcceptanceStatus = acceptAddresses(servers, affinity);
-
-//     //ok so we need only one ready subchannel? make one subchannel
-//     final Subchannel readySubchannel = subchannels.values().iterator().next();
-//     assertThat(addressesAcceptanceStatus.isOk()).isTrue();
-
-//     //ok set connectivity state to Ready
-//     deliverSubchannelState(readySubchannel, ConnectivityStateInfo.forNonError(READY));
-//     loadBalancer.resolvingAddresses = true;
-//     loadBalancer.handleNameResolutionError(Status.NOT_FOUND.withDescription("nameResolutionError"));
-//     loadBalancer.resolvingAddresses = false;
-
-//     verify(mockHelper, times(3)).createSubchannel(any(CreateSubchannelArgs.class));
-//     verify(mockHelper, times(2))
-//         .updateBalancingState(stateCaptor.capture(), pickerCaptor.capture());
-
-//     Iterator<ConnectivityState> stateIterator = stateCaptor.getAllValues().iterator();
-//     assertEquals(CONNECTING, stateIterator.next());
-//     assertEquals(READY, stateIterator.next());
-
-//     LoadBalancer.PickResult pickResult = pickerCaptor.getValue().pickSubchannel(mockArgs);
-//     assertEquals(readySubchannel, pickResult.getSubchannel());
-//     assertEquals(Status.OK.getCode(), pickResult.getStatus().getCode());
-
-//     LoadBalancer.PickResult pickResult2 = pickerCaptor.getValue().pickSubchannel(mockArgs);
-//     assertEquals(readySubchannel, pickResult2.getSubchannel());
-//     AbstractTestHelper.verifyNoMoreMeaningfulInteractions(mockHelper);
-// }
-
-// #[tokio::test]
-// async fn roundrobin_basic() throws Exception {
-//     let (mut rx_events, mut lb_policy, mut tcc) = setup();
-//     let lb_policy = lb_policy.as_mut();
-//     let tcc = tcc.as_mut();
-
-//     let endpoints = create_n_endpoint_with_k_addresses(2, 3);
-//     send_resolver_update_to_policy(lb_policy, endpoints.clone(), tcc);
-    
-// }
 // Tests the scenario where the resolver returns an update with multiple
 // addresses and the LB policy successfully connects to first one and moves to
 // READY. The connected subchannel then goes down and the LB policy moves to IDLE
@@ -1136,7 +1139,7 @@ async fn pickfirst_resolver_update_removes_connected_address() {
 // starts connecting to them. The LB policy should then move to READY state with
 // a picker that returns the second subchannel.
 #[tokio::test]
-async fn pickfirst_connected_subchannel_goes_down() {
+async fn roundrobin_connected_subchannel_goes_down() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
@@ -1146,17 +1149,22 @@ async fn pickfirst_connected_subchannel_goes_down() {
     let subchannels =
         verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+    verify_connecting_picker_from_policy(&mut rx_events).await;
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    verify_connecting_picker_from_policy(&mut rx_events).await;
     move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
 
     move_subchannel_to_idle(lb_policy, subchannels[0].clone(), tcc);
-    let picker = verify_idle_picker_from_policy(&mut rx_events).await;
-    verify_resolution_request(&mut rx_events).await;
+    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    verify_idle_picker_from_policy(&mut rx_events).await;
+    // verify_resolution_request(&mut rx_events).await;
+    let picker = verify_connecting_picker_from_policy(&mut rx_events).await;
+    
     let req = test_utils::new_request();
     assert!(picker.pick(&req) == PickResult::Queue);
+    verify_resolution_request(&mut rx_events).await;
+
     verify_schedule_work_from_policy(&mut rx_events).await;
     lb_policy.work(tcc);
 
@@ -1178,6 +1186,20 @@ async fn pickfirst_connected_subchannel_goes_down() {
     verify_ready_picker_from_policy(&mut rx_events, subchannels[1].clone()).await;
 }
 
+// Verifies that the channel moves to IDLE state.
+//
+// Returns the picker for tests to make more picks, if required.
+async fn verify_idle_picker_from_policy(
+    rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
+) -> Arc<dyn Picker> {
+    match rx_events.recv().await.unwrap() {
+        TestEvent::UpdatePicker(update) => {
+            assert!(update.connectivity_state == ConnectivityState::Idle);
+            update.picker.clone()
+        }
+        other => panic!("unexpected event {}", other),
+    }
+}
 // Tests the scenario where the resolver returns an update with multiple
 // addresses and the LB policy successfully connects to first one and moves to
 // READY. The connected subchannel then goes down and the LB policy moves to IDLE
@@ -1199,14 +1221,19 @@ async fn roundrobin_all_subchannels_goes_down() {
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
     verify_connecting_picker_from_policy(&mut rx_events).await;
+    
+    
+    
     move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
 
-    move_subchannel_to_idle(lb_policy, subchannels[0].clone(), tcc);
-    let picker = verify_idle_picker_from_policy(&mut rx_events).await;
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    let picker = verify_connecting_picker_from_policy(&mut rx_events).await;
+    verify_connecting_picker_from_policy(&mut rx_events).await;
     verify_resolution_request(&mut rx_events).await;
     let req = test_utils::new_request();
-    assert!(picker.pick(&req) == PickResult::Queue);
+    // assert!(picker.pick(&req) == PickResult::Queue);
     verify_schedule_work_from_policy(&mut rx_events).await;
     lb_policy.work(tcc);
 

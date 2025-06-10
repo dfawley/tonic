@@ -89,6 +89,7 @@ impl Display for TestEvent {
     }
 }
 
+//perhaps add stub balancer
 pub(crate) struct FakeChannel {
     pub tx_events: mpsc::UnboundedSender<TestEvent>,
 }

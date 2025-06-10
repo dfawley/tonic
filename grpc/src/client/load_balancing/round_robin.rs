@@ -15,7 +15,7 @@ use crate::client::{
     ConnectivityState,
 };
 
-use std::{collections::HashMap, collections::HashSet, error::Error, hash::Hash, mem, sync::Arc};
+use std::{collections::{HashMap, HashSet}, error::Error, hash::Hash, mem, sync::{atomic::{AtomicUsize, Ordering}, Arc}};
 
 use crate::service::{Message, Request, Response, Service};
 use core::panic;
@@ -50,14 +50,17 @@ struct RoundRobinBuilder {}
 
 impl LbPolicyBuilder for RoundRobinBuilder {
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy> {
-        let resolver_update_sharder = ResolverUpdateSharderStruct {builder:GLOBAL_LB_REGISTRY.get_policy("pick_first").unwrap()};
-        let lb_policy = Box::new(ChildManager::<Endpoint>::new(options.work_scheduler, Box::new(resolver_update_sharder)));
+        super::GLOBAL_LB_REGISTRY.add_builder(WrappedPickFirstBuilder {});
+        let resolver_update_sharder = ResolverUpdateSharderStruct {builder:GLOBAL_LB_REGISTRY.get_policy("wrapped_pick_first").unwrap()};
+        let lb_policy = Box::new(ChildManager::<Endpoint>::new(options.work_scheduler.clone(), Box::new(resolver_update_sharder)));
         Box::new(RoundRobinPolicy {
             child_manager: lb_policy,
+            work_scheduler: options.work_scheduler,
             addresses: vec![],
             last_resolver_error: None,
             last_connection_error: None,
-            connectivity_state: ConnectivityState::Connecting,
+            connectivity_state: ConnectivityState::Idle,
+            sent_connecting_state: false,
         })
     }
 
@@ -75,11 +78,13 @@ struct RoundRobinPolicy {
 
     //builder or built?
     child_manager: Box<ChildManager<Endpoint>>,
- 
+    work_scheduler: Arc<dyn WorkScheduler>,
     addresses: Vec<Address>,                 // Most recent addresses from the name resolver.
     last_resolver_error: Option<String>,     // Most recent error from the name resolver.
     last_connection_error: Option<Arc<dyn Error + Send + Sync>>, // Most recent error from any subchannel.
     connectivity_state: ConnectivityState, // Overall connectivity state of the channel.
+    sent_connecting_state:bool,
+    // subchannels: Vec<Arc <dyn Subchannel>>,
     // num_transient_failures: usize, // Number of transient failures after the end of the first pass.
 }
 
@@ -114,7 +119,50 @@ impl RoundRobinPolicy {
         });
         channel_controller.request_resolution();
     }
+
+
+
+    fn move_to_connecting(&mut self, is_idle: bool, channel_controller: &mut dyn ChannelController) {
+        self.connectivity_state = ConnectivityState::Connecting;
+        println!("sending a picker with connecting");
+        channel_controller.update_picker(LbState {
+            connectivity_state: ConnectivityState::Connecting,
+            picker: Arc::new(QueuingPicker {}),
+        });
+        self.sent_connecting_state = true;
+        if is_idle {
+            channel_controller.request_resolution();
+        }
+    }
+
+
 }
+
+struct RoundRobinPicker {
+    pickers: Vec<Arc<dyn Picker>>,
+    next: AtomicUsize,
+}
+
+impl RoundRobinPicker {
+    pub fn new(pickers: Vec<Arc<dyn Picker>>) -> Self {
+        Self {
+            pickers,
+            next: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Picker for RoundRobinPicker {
+    fn pick(&self, request: &Request) -> PickResult {
+        let len = self.pickers.len();
+        if len == 0 {
+            return PickResult::Queue;
+        }
+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % len;
+        self.pickers[idx].pick(request)
+    }
+}
+
 pub fn reg() {
     super::GLOBAL_LB_REGISTRY.add_builder(RoundRobinBuilder {});
 }
@@ -124,7 +172,7 @@ struct WrapperPickFirstPolicy {pick_first: Box<dyn LbPolicy>}
 
 struct WrappedPickFirstBuilder {}
 
-pub static WRAPPED_PICKFIRST_NAME: &str = "wrapped_pick_First";
+pub static WRAPPED_PICKFIRST_NAME: &str = "wrapped_pick_first";
 
 impl LbPolicyBuilder for WrappedPickFirstBuilder{
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy> {
@@ -155,10 +203,9 @@ impl LbPolicy for WrapperPickFirstPolicy {
             if state.connectivity_state == ConnectivityState::Idle {
                     self.exit_idle(&mut wrapped_channel_controller);
             }
-               
-            }
-        result
         }
+        result
+    }
         
 
     
@@ -175,7 +222,7 @@ impl LbPolicy for WrapperPickFirstPolicy {
             if state.connectivity_state == ConnectivityState::Idle {
                 self.exit_idle(&mut wrapped_channel_controller);
             }
-               
+
         }
     }
 
@@ -203,7 +250,7 @@ impl<'a> WrappedController<'a> {
         Self {
             channel_controller,
             // created_subchannels: vec![],
-            picker_update: None,
+            picker_update: None, //change into bool
         }
     }
 }
@@ -260,8 +307,6 @@ impl ResolverUpdateSharder<Endpoint> for ResolverUpdateSharderStruct {
 
 
 
-
-
 impl LbPolicy for RoundRobinPolicy {
     fn resolver_update(
         &mut self,
@@ -278,7 +323,20 @@ impl LbPolicy for RoundRobinPolicy {
                     "received update from resolver with endpoints: {:?}",
                     endpoints
                 );
+                if endpoints.is_empty() {
+                    self.last_resolver_error = Some("received empty address list from the name resolver".to_string());
+                    // No endpoints were returned by the resolver.
+                    
+                    self.move_to_transient_failure(channel_controller);
+                    return Err("received empty address list from the name resolver".into());
+                }
                 let new_addresses: Vec<Address> = self.address_list_from_endpoints(&endpoints);
+                if new_addresses.is_empty(){
+                    self.last_resolver_error = Some("received empty address list from the name resolver".to_string());
+                    
+                    self.move_to_transient_failure(channel_controller);
+                    return Err("received empty address list from the name resolver".into());
+                }
                 let result = self.child_manager.resolver_update(cloned_update, config, channel_controller);
                 self.addresses = new_addresses;
 
@@ -289,21 +347,19 @@ impl LbPolicy for RoundRobinPolicy {
                 println!("received error from resolver: {}", error);
                 // self.last_resolver_error = Some(error);
 
-                // // Enter or stay in TF, if there is no good previous update from
-                // // the resolver, or if already in TF. Regardless, send a new
-                // // failing picker with the updated error information.
-                if self.addresses.is_empty()
-                    || self.connectivity_state == ConnectivityState::TransientFailure
-                {
-                    self.move_to_transient_failure(channel_controller);
-                }
+                // self.move_to_transient_failure(channel_controller);
+                // if self.addresses.is_empty()
+                //     || self.connectivity_state == ConnectivityState::TransientFailure
+                // {
+                println!("moving to transient failure");
+                self.move_to_transient_failure(channel_controller);
+                // }
 
                 // Continue using the previous good update, if one exists.
             }
         }
         Ok(())
     }
-
     fn subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
@@ -312,12 +368,86 @@ impl LbPolicy for RoundRobinPolicy {
     ) {
         println!("received update for {}: {}", subchannel, state);
 
-        // Handle the update for this subchannel, provided it's included in the
-        // subchannel list (if the list exists).
-
         self.child_manager.subchannel_update(subchannel, state, channel_controller);
-    }
+        // let child_states_vec: Vec<_> = self.child_manager.child_states().collect();
 
+        // let mut found_ready = false;
+        // let mut found_connecting_or_idle = false;
+        // let mut found_idle = false;
+
+        // for (_, state) in &child_states_vec {
+        //     match state.connectivity_state {
+        //         ConnectivityState::Idle => {
+        //             found_idle = true;
+        //             found_connecting_or_idle = true;
+        //             break;
+        //         }
+        //         ConnectivityState::Connecting  => {
+        //             found_connecting_or_idle = true;
+        //             break;
+        //         }
+        //         ConnectivityState::Ready => {
+        //             found_ready = true;
+        //             break;
+        //         }
+                
+        //         _ => {}
+        //     }
+        // }
+        // if !found_ready{
+
+        // }
+
+        // let prev_state = self.connectivity_state;
+        // let new_state = if found_ready {
+        //     ConnectivityState::Ready
+        // } else if found_connecting_or_idle {
+        //     ConnectivityState::Connecting
+        // } else {
+        //     ConnectivityState::TransientFailure
+        // };
+
+        
+        // self.connectivity_state = new_state;
+        // match new_state {
+        //     ConnectivityState::TransientFailure => {
+        //         println!("state is transient failure");
+        //         self.move_to_transient_failure(channel_controller);
+        //     }
+        //     ConnectivityState::Ready => {
+        //         println!("state is Ready");
+        //         let ready_pickers = child_states_vec
+        //             .iter()
+        //             .filter(|(_, state)| state.connectivity_state == ConnectivityState::Ready)
+        //             .map(|(_, state)| state.picker.clone())
+        //             .collect();
+
+        //         let picker = Arc::new(RoundRobinPicker::new(ready_pickers));
+        //         channel_controller.update_picker(LbState {
+        //             connectivity_state: self.connectivity_state,
+        //             picker,
+        //         });
+        //         self.sent_connecting_state = false;
+        //     }
+        //     ConnectivityState::Connecting => {
+        //         println!("state is connecting");
+        //         if !self.sent_connecting_state{
+        //             self.move_to_connecting(found_idle, channel_controller);
+        //         }
+        //     }
+        //     ConnectivityState::Idle => {
+        //         println!("state is idle so connect");
+        //         if !self.sent_connecting_state{
+        //             self.move_to_connecting(found_idle, channel_controller);
+        //         }
+                
+        //     }
+        // }
+        
+    // }
+        
+    }
+   
     fn work(&mut self, channel_controller: &mut dyn ChannelController) {
         // Build a new subchannel list with the most recent addresses received
         // from the name resolver. This will start connecting from the first
@@ -329,16 +459,20 @@ impl LbPolicy for RoundRobinPolicy {
     }
 
     fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController) {
-        // Build a new subchannel list with the most recent addresses received
-        // from the name resolver. This will start connecting from the first
-        // address in the list.
+ 
 
         self.child_manager.exit_idle(channel_controller);
 
-        // self.subchannel_list = Some(SubchannelList::new(&self.addresses, channel_controller));
     }
 }
 
+pub struct RoundRobinQueuingPicker {
+    work_scheduler: Arc<dyn WorkScheduler>,
+}
 
-
-
+impl Picker for RoundRobinQueuingPicker {
+    fn pick(&self, _request: &Request) -> PickResult {
+        self.work_scheduler.schedule_work();
+        PickResult::Queue
+    }
+}
