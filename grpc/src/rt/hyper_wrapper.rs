@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::{Runtime, TcpStream};
 
+/// Adapts a runtime to a hyper compatible executor.
 #[derive(Clone)]
 pub(crate) struct HyperCompatExec {
     pub(crate) inner: Arc<dyn Runtime>,
@@ -47,6 +48,7 @@ impl Future for HyperCompatSleep {
 
 impl hyper::rt::Sleep for HyperCompatSleep {}
 
+/// Adapts a runtime to a hyper compatible timer.
 pub(crate) struct HyperCompatTimer {
     pub(crate) inner: Arc<dyn Runtime>,
 }
@@ -67,7 +69,7 @@ impl Timer for HyperCompatTimer {
 pin_project! {
 /// A wrapper to make any `TcpStream` compatible with Hyper. It implements
 /// Tokio's async IO traits. Callers are expected to use
-    pub struct HyperStream {
+    pub(crate) struct HyperStream {
         #[pin]
         inner: Box<dyn TcpStream>,
     }

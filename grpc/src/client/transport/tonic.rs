@@ -1,3 +1,4 @@
+use futures_core::Stream;
 use http::Uri;
 use http_body::Body;
 use hyper::{client::conn::http2::Builder, rt::Executor};
@@ -41,10 +42,30 @@ use tokio::{
     sync::{mpsc, oneshot, Mutex, Notify},
     time::sleep,
 };
-use tonic::{async_trait, client::Grpc, IntoRequest, Status};
+use tonic::{async_trait, client::Grpc, codec::Codec, IntoRequest, Status};
 use tonic::{client::GrpcService, transport::Endpoint as TonicEndpoint};
 
-use super::SubchannelConfig;
+#[cfg(test)]
+mod test;
+
+pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+pub(crate) struct SubchannelConfig {
+    pub(crate) address: String,
+    pub(crate) runtime: Arc<dyn Runtime>,
+    pub(crate) init_stream_window_size: Option<u32>,
+    pub(crate) init_connection_window_size: Option<u32>,
+    pub(crate) http2_keep_alive_interval: Option<Duration>,
+    pub(crate) http2_keep_alive_timeout: Option<Duration>,
+    pub(crate) http2_keep_alive_while_idle: Option<bool>,
+    pub(crate) http2_max_header_list_size: Option<u32>,
+    pub(crate) http2_adaptive_window: Option<bool>,
+    pub(crate) concurrency_limit: Option<usize>,
+    pub(crate) rate_limit: Option<(u64, Duration)>,
+    pub(crate) tcp_keepalive: Option<Duration>,
+    pub(crate) tcp_nodelay: bool,
+    pub(crate) connect_timeout: Option<Duration>,
+}
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -68,31 +89,37 @@ impl Drop for ConnectedTonicTransport {
     }
 }
 
-#[async_trait]
-impl Service for ConnectedTonicTransport {
-    async fn call(&mut self, method: String, request: Request) -> Result<Response, Status> {
+impl ConnectedTonicTransport {
+    async fn call<S, M1, M2, C>(
+        &mut self,
+        method: String,
+        request: tonic::Request<S>,
+        codec: C,
+    ) -> Result<tonic::Response<tonic::Streaming<M2>>, Status>
+    where
+        S: Stream<Item = M1> + Send + 'static,
+        C: Codec<Encode = M1, Decode = M2>,
+        M1: Send + Sync + 'static,
+        M2: Send + Sync + 'static,
+    {
         self.grpc.ready().await.map_err(|e| {
             tonic::Status::unknown(format!("Service was not ready: {}", e.to_string()))
         })?;
         let path = http::uri::PathAndQuery::from_maybe_shared(method)
             .map_err(|err| tonic::Status::internal(format!("Failed to parse path: {}", err)))?;
-        Ok(self.grpc.streaming(request, path, todo!()).await)
+        self.grpc.streaming(request, path, codec).await
     }
-}
 
-#[async_trait]
-impl ConnectedTransport for ConnectedTonicTransport {
     async fn disconnected(&self) {
         self.closed.notified().await
     }
 }
 
-#[async_trait]
-impl transport::Transport for TonicTransportBuilder {
+impl TonicTransportBuilder {
     async fn connect(
         &self,
         config: Arc<SubchannelConfig>,
-    ) -> Result<Box<dyn ConnectedTransport>, String> {
+    ) -> Result<ConnectedTonicTransport, String> {
         let runtime = config.runtime.clone();
         let mut settings = Builder::<HyperCompatExec>::new(HyperCompatExec {
             inner: runtime.clone(),
@@ -168,11 +195,11 @@ impl transport::Transport for TonicTransportBuilder {
             .map_err(|e| e.to_string())?; // TODO: err msg
         let grpc = Grpc::with_origin(TonicService { inner: service }, uri);
 
-        Ok(Box::new(ConnectedTonicTransport {
+        Ok(ConnectedTonicTransport {
             grpc,
             task_handle,
             closed: closed_notifier,
-        }))
+        })
     }
 }
 
@@ -188,7 +215,7 @@ impl From<hyper::client::conn::http2::SendRequest<tonic::body::Body>> for SendRe
 
 impl tower::Service<http::Request<tonic::body::Body>> for SendRequest {
     type Response = http::Response<tonic::body::Body>;
-    type Error = crate::BoxError;
+    type Error = BoxError;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -206,21 +233,14 @@ impl tower::Service<http::Request<tonic::body::Body>> for SendRequest {
     }
 }
 
-pub fn reg() {
-    GLOBAL_TRANSPORT_REGISTRY.add_transport(TCP_IP_NETWORK_TYPE, TonicTransportBuilder::new());
-}
-
 struct TonicService {
-    inner: BoxService<
-        http::Request<tonic::body::Body>,
-        http::Response<tonic::body::Body>,
-        crate::BoxError,
-    >,
+    inner:
+        BoxService<http::Request<tonic::body::Body>, http::Response<tonic::body::Body>, BoxError>,
 }
 
 impl GrpcService<tonic::body::Body> for TonicService {
     type ResponseBody = tonic::body::Body;
-    type Error = crate::BoxError;
+    type Error = BoxError;
     type Future = BoxFuture<'static, Result<http::Response<Self::ResponseBody>, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
