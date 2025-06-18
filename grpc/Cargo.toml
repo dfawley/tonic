@@ -27,6 +27,8 @@ hyper = { version = "1.6.0", features = ["client", "http2"] }
 tower = "0.5.2"
 socket2 = "0.5.10"
 pin-project-lite = "0.2.16"
+protobuf = { version = "4.31.1-release" }
+bytes = "1.10.1"
 
 [dev-dependencies]
 async-stream = "0.3.6"
@@ -37,4 +39,8 @@ prost = "0.13.5"
 [features]
 default = ["hickory_dns"]
 hickory_dns = ["dep:hickory-resolver"]
+test-data = ["dep:protobuf-codegen"]
 
+
+[build-dependencies]
+protobuf-codegen = { version = "4.31.1-release", optional = true }

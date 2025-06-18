@@ -1,8 +1,15 @@
-mod routeguide;
-use routeguide::{
-    route_guide_server::RouteGuide, Feature, Point, Rectangle, RouteNote, RouteSummary,
-};
-use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
+mod routeguide {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/generated/routeguide.rs"
+    ));
+}
+
+use routeguide::route_guide_server::{RouteGuide, RouteGuideServer};
+
+use routeguide::protos::{Feature, Point, PointView, Rectangle, RouteNote, RouteSummary};
+
+use std::{collections::HashMap, hash::Hash, pin::Pin, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 
@@ -13,12 +20,11 @@ use tonic::{
 };
 
 use crate::{
-    client::transport::tonic::{
-        test::routeguide::route_guide_server::RouteGuideServer, SubchannelConfig,
-        TonicTransportBuilder,
-    },
+    client::transport::tonic::{SubchannelConfig, TonicTransportBuilder},
+    codec::ProtoCodec,
     rt::tokio::TokioRuntime,
 };
+use protobuf::proto;
 
 #[tokio::test]
 pub async fn test_rpc() {
@@ -54,18 +60,18 @@ pub async fn test_rpc() {
         connect_timeout: Some(Duration::from_secs(60)),
     });
     let mut conn = builder.connect(config.clone()).await.unwrap();
-    let outbound = tokio_stream::once(routeguide::RouteNote {
-        location: Some(routeguide::Point {
+    let outbound = tokio_stream::once(proto! {RouteNote {
+         location: Point {
             latitude: 12,
             longitude: 13,
-        }),
+        },
         message: "Note 1".to_string(),
-    });
+    }});
     let mut inbound: tonic::Streaming<RouteNote> = conn
         .call(
             "/routeguide.RouteGuide/RouteChat".to_string(),
             Request::new(outbound),
-            ProstCodec::default(),
+            ProtoCodec::default(),
         )
         .await
         .unwrap()
@@ -74,15 +80,15 @@ pub async fn test_rpc() {
         println!("NOTE = {note:?}");
     }
 
-    let outbound = tokio_stream::once(routeguide::Point {
+    let outbound = tokio_stream::once(proto! {Point {
         latitude: 12,
         longitude: 13,
-    });
+    }});
     let mut inbound: tonic::Streaming<Feature> = conn
         .call(
             "/routeguide.RouteGuide/GetFeature".to_string(),
             Request::new(outbound),
-            ProstCodec::default(),
+            ProtoCodec::default(),
         )
         .await
         .unwrap()
@@ -101,10 +107,8 @@ pub struct RouteGuideService {}
 impl RouteGuide for RouteGuideService {
     async fn get_feature(&self, request: Request<Point>) -> Result<Response<Feature>, Status> {
         println!("GetFeature = {:?}", request);
-        let resp = Feature {
-            name: "some feature".to_string(),
-            ..Default::default()
-        };
+        let mut resp = Feature::default();
+        resp.set_name("some feature".to_string());
         Ok(Response::new(resp))
     }
 
@@ -139,7 +143,7 @@ impl RouteGuide for RouteGuideService {
             while let Some(note) = stream.next().await {
                 let note = note?;
 
-                let location = note.location.unwrap();
+                let location = note.location().to_owned();
 
                 let location_notes = notes.entry(location).or_insert(vec![]);
                 location_notes.push(note);
@@ -154,4 +158,17 @@ impl RouteGuide for RouteGuideService {
     }
 }
 
+impl PartialEq for Point {
+    fn eq(&self, other: &Self) -> bool {
+        self.latitude() == other.latitude() && self.longitude() == other.longitude()
+    }
+}
+
 impl Eq for Point {}
+
+impl Hash for Point {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.latitude().hash(state);
+        self.longitude().hash(state);
+    }
+}
