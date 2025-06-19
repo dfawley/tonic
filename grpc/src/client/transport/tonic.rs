@@ -45,6 +45,7 @@ use tokio::{
 use tonic::{async_trait, client::Grpc, codec::Codec, IntoRequest, Status};
 use tonic::{client::GrpcService, transport::Endpoint as TonicEndpoint};
 
+#[cfg(feature = "test-data")]
 #[cfg(test)]
 mod test;
 

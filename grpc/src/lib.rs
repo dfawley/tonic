@@ -27,6 +27,7 @@
 
 pub mod attributes;
 pub mod client;
+pub mod codec;
 pub mod credentials;
 pub mod inmemory;
 pub mod rt;
