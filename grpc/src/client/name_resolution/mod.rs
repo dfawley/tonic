@@ -303,6 +303,19 @@ impl Hash for Address {
     }
 }
 
+impl fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Print all addresses, separated by commas
+        let addresses = self
+            .addresses
+            .iter()
+            .map(|addr| format!("{}", addr))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(f, "Endpoint {{ addresses: [{}], attributes: {:?} }}", addresses, self.attributes)
+    }
+}
+
 impl Display for Address {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.network_type, self.address)

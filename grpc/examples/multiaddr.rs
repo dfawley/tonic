@@ -2,6 +2,8 @@ use std::any::Any;
 
 use futures_util::StreamExt;
 use grpc::client::load_balancing::pick_first;
+use grpc::client::load_balancing::round_robin;
+
 use grpc::client::transport;
 use grpc::service::{Message, Request, Response, Service};
 use grpc::{client::ChannelOptions, inmemory};

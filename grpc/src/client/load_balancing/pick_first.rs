@@ -128,7 +128,6 @@ impl LbPolicy for PickFirstPolicy {
         config: Option<&LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        //if there is valid data in endpoints
         match update.endpoints {
             Ok(mut endpoints) => {
                 println!(
@@ -199,15 +198,19 @@ impl LbPolicy for PickFirstPolicy {
                 return;
             }
         }
-
+        
         // Handle updates for the currently selected subchannel.
         if let Some(selected_sc) = &self.selected_subchannel {
             if *selected_sc == subchannel.clone() {
                 // Any state change for the currently connected subchannel means
                 // that we are no longer connected.
+                // if state.connectivity_state != ConnectivityState::Ready{
+                println!("moving to idle");
+            
                 self.move_to_idle(channel_controller);
                 return;
-            }
+                }
+            // }
         }
 
         debug_assert!(
@@ -221,21 +224,29 @@ impl LbPolicy for PickFirstPolicy {
         // Build a new subchannel list with the most recent addresses received
         // from the name resolver. This will start connecting from the first
         // address in the list.
-
-        //can only do meaningful when it has channel controller
-        //called when lb policy has work to do, anything the lb policy wants to do that
         self.subchannel_list = Some(SubchannelList::new(&self.addresses, channel_controller));
     }
+
     fn exit_idle(& mut self, channel_controller: &mut dyn ChannelController) {
+        println!("child calls exit_idle");
         if self.connectivity_state == ConnectivityState::Idle {
+            let prev_list = &self.subchannel_list;
             self.subchannel_list = Some(SubchannelList::new(&self.addresses, channel_controller));
             self.move_to_connecting(channel_controller);
+            // if let Some(subchannel_list) = self.subchannel_list.as_mut() {
+            // Initiate connection attempt to the first subchannel in the list
             if let Some(subchannel_list) = self.subchannel_list.as_mut() {
-                let _ = subchannel_list.connect_to_next_subchannel(channel_controller);
+                subchannel_list.connect_after_idle();
             }
+            // self.subcconnect_to_all_subchannels(channel_controller);
+            // if let Some(subchannel_list) = self.subchannel_list.as_mut() {
+            //     println!("connecting to all subchannels");
+            //     let _ = subchannel_list.connect_to_next_subchannel(channel_controller);
+            // }
         }
     }
 }
+
 
 fn shuffle_endpoints(endpoints: &mut [Endpoint]) {
     let mut rng = rand::thread_rng();
@@ -413,7 +424,6 @@ impl PickFirstPolicy {
     }
 
     fn move_to_connecting(&mut self, channel_controller: &mut dyn ChannelController) {
-        println!("state is connecting");
         self.connectivity_state = ConnectivityState::Connecting;
         channel_controller.update_picker(LbState {
             connectivity_state: ConnectivityState::Connecting,
@@ -605,6 +615,12 @@ impl SubchannelList {
             if data.state.as_ref().unwrap().connectivity_state == ConnectivityState::Idle {
                 sc.connect();
             }
+        }
+    }
+
+    fn connect_after_idle(&mut self) {
+        for sc in &self.ordered_subchannels {
+            sc.connect();
         }
     }
 }

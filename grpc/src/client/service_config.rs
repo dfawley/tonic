@@ -24,6 +24,8 @@ pub struct ServiceConfig;
 
 /// A convenience wrapper for an LB policy's configuration object.
 #[derive(Debug)]
+#[derive(Clone)]
+
 pub struct LbConfig {
     config: Arc<dyn Any + Send + Sync>,
 }
@@ -40,6 +42,8 @@ impl LbConfig {
     pub fn convert_to<T: 'static + Send + Sync>(
         &self,
     ) -> Result<Arc<T>, Box<dyn Error + Send + Sync>> {
+        println!("TypeId in LbConfig: {:?}", self.config.type_id());
+        
         match self.config.clone().downcast::<T>() {
             Ok(c) => Ok(c),
             Err(e) => Err("failed to downcast to config type".into()),

@@ -19,7 +19,7 @@ use serde_json::json;
 use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
-use crate::credentials::Credentials;
+use crate::{client::load_balancing::round_robin, credentials::Credentials};
 use crate::rt;
 use crate::service::{Request, Response, Service};
 use crate::{attributes::Attributes, rt::tokio::TokioRuntime};

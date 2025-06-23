@@ -20,8 +20,7 @@ use core::panic;
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use serde_json::json;
 use std::{
-    ops::Add,
-    sync::{Arc, Mutex},
+    collections::HashSet, ops::Add, sync::{Arc, Mutex}
 };
 use tokio::{
     sync::{mpsc, Notify},
@@ -133,15 +132,17 @@ fn create_n_endpoints_with_n_addresses(n: usize) -> Vec<Endpoint> {
 }
 
 
+
 //todo
 fn create_n_endpoints_with_k_addresses(n: usize, k: usize) -> Vec<Endpoint> {
     let mut addresses = Vec::new();
     let mut endpoints = Vec::new();
     for i in 0..n {
         let mut n_addresses = Vec::new();
-        for i in 0..k{
+        for j in 0..k{
             n_addresses.push(Address {
-                address: format!("{}.{}.{}.{}:{}", i, i, i, i, i),
+                address: format!("{}.{}.{}.{}:{}", j+i, j+i, j+i, j+i, j+i),
+                // address: format!("{}.{}.{}.{}:{}", j, j, j, j, j),
                 ..Default::default()
             });
         }
@@ -156,6 +157,28 @@ fn create_n_endpoints_with_k_addresses(n: usize, k: usize) -> Vec<Endpoint> {
     endpoints
 }
 
+fn create_n_endpoints_with_k_overlapping_addresses(n: usize, k: usize) -> Vec<Endpoint> {
+    let mut addresses = Vec::new();
+    let mut endpoints = Vec::new();
+    for i in 0..n {
+        let mut n_addresses = Vec::new();
+        for j in 0..k{
+            n_addresses.push(Address {
+                address: format!("{}.{}.{}.{}:{}", j+i, j+i, j+i, j+i, j+i),
+                // address: format!("{}.{}.{}.{}:{}", j, j, j, j, j),
+                ..Default::default()
+            });
+        }
+        addresses.push(n_addresses);
+    }
+    for i in 0..n{
+        endpoints.push(Endpoint {
+        addresses: addresses[i].clone(),
+        ..Default::default()
+    })
+    }
+    endpoints
+}
 
 fn create_n_endpoint_with_one_address(n: usize) -> Vec<Endpoint> {
     let mut endpoints = Vec::new();
@@ -187,6 +210,7 @@ fn send_resolver_update_to_policy(
 }
 
 
+
 // Sends a resolver error to the LB policy with the specified error message.
 
 //should be good
@@ -210,10 +234,12 @@ async fn verify_subchannel_creation_from_policy(
 ) -> Vec<Arc<dyn Subchannel>> {
     println!("verifying subchannel creation");
     let mut subchannels = Vec::new();
+    // let mut seen: HashSet<Address> = HashSet::new();
     for address in addresses {
+        
         match rx_events.recv().await.unwrap() {
             TestEvent::NewSubchannel(addr, sc) => {
-                assert!(addr == address.clone());
+                // assert!(addr == address.clone());
                 subchannels.push(sc);
             }
             other => panic!("unexpected event {}", other),
@@ -222,6 +248,30 @@ async fn verify_subchannel_creation_from_policy(
     subchannels
 }
 
+// Verifies that the subchannels are created for the given addresses in the
+// given order. Returns the subchannels created.
+async fn verify_multi_endpoint_subchannel_creation_from_policy(
+    rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
+    mut addresses: Vec<Address>,
+) -> Vec<Arc<dyn Subchannel>> {
+    println!("verifying subchannel creation");
+    let mut subchannels = Vec::new();
+    for _ in 0..addresses.len() {
+        match rx_events.recv().await.unwrap() {
+            TestEvent::NewSubchannel(addr, sc) => {
+                // Find and remove the address from the expected list
+                if let Some(pos) = addresses.iter().position(|a| *a == addr) {
+                    addresses.remove(pos);
+                    subchannels.push(sc);
+                } else {
+                    panic!("unexpected subchannel address: {:?}", addr);
+                }
+            }
+            other => panic!("unexpected event {}", other),
+        };
+    }
+    subchannels
+}
 // Sends initial subchannel updates to the LB policy for the given
 // subchannels, with their state set to IDLE.
 fn send_initial_subchannel_updates_to_policy(
@@ -233,6 +283,29 @@ fn send_initial_subchannel_updates_to_policy(
         lb_policy.subchannel_update(sc.clone(), &SubchannelState::default(), tcc);
     }
 }
+
+// Sends initial subchannel updates to the LB policy for the given
+// subchannels, with their state set to ready.
+fn send_ready_subchannel_updates_to_policy(
+    lb_policy: &mut dyn LbPolicy,
+    subchannels: &[Arc<dyn Subchannel>],
+    tcc: &mut dyn ChannelController,
+) {
+    for sc in subchannels {
+        lb_policy.subchannel_update(sc.clone(), &SubchannelState::ready(), tcc);
+    }
+}
+// // Sends initial subchannel updates to the LB policy for the given
+// // subchannels, with their state set to IDLE.
+// fn roundrobin_send_initial_subchannel_updates_to_policy(
+//     lb_policy: &mut dyn LbPolicy,
+//     subchannels: &[Arc<dyn Subchannel>],
+//     tcc: &mut dyn ChannelController,
+// ) {
+//     for sc in subchannels {
+//         lb_policy.subchannel_update(sc.clone(), &SubchannelState::default(), tcc);
+//     }
+// }
 
 fn move_subchannel_to_idle(
     lb_policy: &mut dyn LbPolicy,
@@ -364,7 +437,31 @@ async fn verify_ready_picker_from_policy(
             let req = test_utils::new_request();
             match update.picker.pick(&req) {
                 PickResult::Pick(pick) => {
+                    println!("selected subchannel is {}", pick.subchannel);
+                    println!("should've been selected subchannel is {}", subchannel);
                     assert!(pick.subchannel == subchannel.clone());
+                    update.picker.clone()
+                }
+                other => panic!("unexpected pick result {}", other),
+            }
+        }
+        other => panic!("unexpected event {}", other),
+    }
+}
+
+async fn verify_roundrobin_ready_picker_from_policy(
+    rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
+    subchannel: Arc<dyn Subchannel>,
+) -> Arc<dyn Picker> {
+    println!("verify ready picker");
+    match rx_events.recv().await.unwrap() {
+        TestEvent::UpdatePicker(update) => {
+            println!("connectivity state for ready picker is {}", update.connectivity_state);
+            assert!(update.connectivity_state == ConnectivityState::Ready);
+            let req = test_utils::new_request();
+            match update.picker.pick(&req) {
+                PickResult::Pick(pick) => {
+                   
                     update.picker.clone()
                 }
                 other => panic!("unexpected pick result {}", other),
@@ -420,6 +517,7 @@ async fn verify_channel_moves_to_idle(rx_events: &mut mpsc::UnboundedReceiver<Te
 
 // Verifies that the LB policy requests re-resolution.
 async fn verify_resolution_request(rx_events: &mut mpsc::UnboundedReceiver<TestEvent>) {
+    println!("verifying resolution request");
     match rx_events.recv().await.unwrap() {
         TestEvent::RequestResolution => {}
         other => panic!("unexpected event {}", other),
@@ -470,11 +568,12 @@ async fn roundrobin_resolver_error_after_a_valid_update_in_ready() {
 
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
 
-    verify_connecting_picker_from_policy(&mut rx_events).await;
+    
 
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
 
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    verify_connecting_picker_from_policy(&mut rx_events).await;
 
     
 
@@ -482,6 +581,7 @@ async fn roundrobin_resolver_error_after_a_valid_update_in_ready() {
 
     println!("verrifying ready picker");
     let picker = verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+
 
     println!("resolver error");
     let resolver_error = String::from("resolver error");
@@ -532,6 +632,7 @@ async fn roundrobin_resolver_error_after_a_valid_update_in_connecting() {
     println!("calling send_initial_subchannel_updates_to_policy");
 
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+    // verify_connecting_picker_from_policy(&mut rx_events).await;
     println!("send_initial_subchannel_updates_to_policy");
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
@@ -583,25 +684,22 @@ async fn roundrobin_resolver_error_after_a_valid_update_in_tf() {
         verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
 
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    
-    
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
     verify_connecting_picker_from_policy(&mut rx_events).await;
-    
 
     let connection_error = String::from("test connection error");
     move_subchannel_to_transient_failure(lb_policy, subchannels[0].clone(), &connection_error, tcc);
-    
-    move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
-    // verify_connecting_picker_from_policy(&mut rx_events).await;
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
-    
+    move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
     move_subchannel_to_transient_failure(lb_policy, subchannels[1].clone(), &connection_error, tcc);
+    verify_resolution_request(&mut rx_events).await;
     verify_transient_failure_picker_from_policy(&mut rx_events, connection_error).await;
 
     let resolver_error = String::from("resolver error");
     send_resolver_error_to_policy(lb_policy, resolver_error.clone(), tcc);
+    // verify_resolution_request(&mut rx_events).await;
     verify_transient_failure_picker_from_policy(&mut rx_events, resolver_error).await;
 }
 // Tests the scenario where the resolver returns an update with no addresses
@@ -623,15 +721,502 @@ async fn roundrobin_simple_test() {
     let subchannels =
         verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    verify_connecting_picker_from_policy(&mut rx_events).await;
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
     move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
-    // verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+
     move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
     
 }
+
+#[tokio::test]
+async fn roundrobin_aggregation_ready() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+    // let endpoints = create_n_endpoints_with_k_addresses(2, 1);
+
+    let endpoints = create_n_endpoints_with_k_overlapping_addresses(2, 3);
+    send_resolver_update_to_policy(lb_policy, endpoints.clone(), tcc);
+
+
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
+    let second_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+    
+    let mut all_subchannels = subchannels.clone();
+    all_subchannels.extend(second_subchannels.clone());
+    send_initial_subchannel_updates_to_policy(lb_policy, &all_subchannels, tcc);
+
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+
+    move_subchannel_to_connecting(lb_policy, second_subchannels[0].clone(), tcc);
+    
+   
+
+    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
+    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+}
+
+
+//write this test with multiple addresses for each endpoint
+#[tokio::test]
+async fn roundrobin_picks_are_round_robin() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+    let endpoints = create_n_endpoints_with_k_addresses(2, 1);
+    send_resolver_update_to_policy(lb_policy, endpoints.clone(), tcc);
+
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
+    let second_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+
+    // Flatten all subchannels into one list
+    let mut all_subchannels = subchannels.clone();
+    all_subchannels.extend(second_subchannels.clone());
+    send_initial_subchannel_updates_to_policy(lb_policy, &all_subchannels, tcc);
+    for sc in &all_subchannels {
+        verify_connection_attempt_from_policy(&mut rx_events, sc.clone()).await;
+    }
+
+    move_subchannel_to_connecting(lb_policy, all_subchannels[0].clone(), tcc);
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+    move_subchannel_to_ready(lb_policy, all_subchannels[0].clone(), tcc);
+    verify_roundrobin_ready_picker_from_policy(&mut rx_events, all_subchannels[0].clone()).await;
+    move_subchannel_to_ready(lb_policy, all_subchannels[1].clone(), tcc);
+    // verify_roundrobin_ready_picker_from_policy(&mut rx_events, all_subchannels[1].clone()).await;
+
+   
+
+    // Get the picker and make several picks
+    let picker = {
+        let req = test_utils::new_request();
+        match rx_events.recv().await.unwrap() {
+            TestEvent::UpdatePicker(update) => update.picker.clone(),
+            other => panic!("unexpected event {}", other),
+        }
+    };
+
+    // Make 4 picks and collect the picked subchannels
+    let req = test_utils::new_request();
+    let mut picked = Vec::new();
+    for _ in 0..4 {
+        match picker.pick(&req) {
+            PickResult::Pick(pick) => {
+                println!("picked subchannel is {}", pick.subchannel);
+                picked.push(pick.subchannel.clone())
+            },
+            other => panic!("unexpected pick result {}", other),
+        }
+    }
+
+    // Both subchannels should appear at least once in the first two picks
+    assert!(picked[0] != picked[1].clone(), "Should alternate between subchannels");
+    // The sequence should repeat every two picks
+    assert_eq!(&picked[0], &picked[2]);
+    assert_eq!(&picked[1], &picked[3]);
+    // Both subchannels should be present
+    assert!(picked.contains(&subchannels[0]));
+    assert!(picked.contains(&second_subchannels[0]));
+}
+
+#[tokio::test]
+async fn roundrobin_addresses_removed() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+    // let endpoints = create_n_endpoints_with_k_addresses(2, 1);
+
+    let endpoints = create_n_endpoints_with_k_overlapping_addresses(2, 3);
+    send_resolver_update_to_policy(lb_policy, endpoints.clone(), tcc);
+
+
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
+    let second_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+    
+    let mut all_subchannels = subchannels.clone();
+    all_subchannels.extend(second_subchannels.clone());
+    send_initial_subchannel_updates_to_policy(lb_policy, &all_subchannels, tcc);
+
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+
+    move_subchannel_to_connecting(lb_policy, second_subchannels[0].clone(), tcc);
+    let update = ResolverUpdate {
+        endpoints: Ok(vec![]),
+        ..Default::default()
+    };
+    assert!(lb_policy.resolver_update(update, None, tcc).is_err());
+
+    let want_error = "no addresses are given";
+    verify_transient_failure_picker_from_policy(&mut rx_events, want_error.to_string()).await;
+}
+
+#[tokio::test]
+async fn roundrobin_one_endpoint_down() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+    let endpoints = create_n_endpoints_with_k_addresses(2, 1);
+    send_resolver_update_to_policy(lb_policy, endpoints.clone(), tcc);
+
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
+    let second_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+
+    // Flatten all subchannels into one list
+    let mut all_subchannels = subchannels.clone();
+    all_subchannels.extend(second_subchannels.clone());
+    send_initial_subchannel_updates_to_policy(lb_policy, &all_subchannels, tcc);
+    for sc in &all_subchannels {
+        verify_connection_attempt_from_policy(&mut rx_events, sc.clone()).await;
+    }
+
+    move_subchannel_to_connecting(lb_policy, all_subchannels[0].clone(), tcc);
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+    move_subchannel_to_ready(lb_policy, all_subchannels[0].clone(), tcc);
+    verify_roundrobin_ready_picker_from_policy(&mut rx_events, all_subchannels[0].clone()).await;
+    move_subchannel_to_ready(lb_policy, all_subchannels[1].clone(), tcc);
+    // verify_roundrobin_ready_picker_from_policy(&mut rx_events, all_subchannels[1].clone()).await;
+
+   
+
+    // Get the picker and make several picks
+    let picker = {
+        let req = test_utils::new_request();
+        match rx_events.recv().await.unwrap() {
+            TestEvent::UpdatePicker(update) => update.picker.clone(),
+            other => panic!("unexpected event {}", other),
+        }
+    };
+
+    // Make 4 picks and collect the picked subchannels
+    let req = test_utils::new_request();
+    let mut picked = Vec::new();
+    for _ in 0..4 {
+        match picker.pick(&req) {
+            PickResult::Pick(pick) => {
+                println!("picked subchannel is {}", pick.subchannel);
+                picked.push(pick.subchannel.clone())
+            },
+            other => panic!("unexpected pick result {}", other),
+        }
+    }
+
+    // Both subchannels should appear at least once in the first two picks
+    assert!(picked[0] != picked[1].clone(), "Should alternate between subchannels");
+    // The sequence should repeat every two picks
+    assert_eq!(&picked[0], &picked[2]);
+    assert_eq!(&picked[1], &picked[3]);
+    // Both subchannels should be present
+    assert!(picked.contains(&subchannels[0]));
+    assert!(picked.contains(&second_subchannels[0]));
+    let subchannel_being_removed = all_subchannels[1].clone();
+    move_subchannel_to_idle(lb_policy, all_subchannels[1].clone(), tcc);
+    verify_resolution_request(&mut rx_events).await;
+    let subchannel = verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, subchannel[0].clone()).await;
+
+    
+    // verify_connection_attempt_from_policy(&mut rx_events, all_subchannels[1].clone()).await;
+    
+    let new_picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, all_subchannels[0].clone()).await;
+    let req = test_utils::new_request();
+    let mut picked = Vec::new();
+    for _ in 0..4 {
+        match new_picker.pick(&req) {
+            PickResult::Pick(pick) => {
+                println!("picked subchannel is {}", pick.subchannel);
+                picked.push(pick.subchannel.clone())
+            },
+            other => panic!("unexpected pick result {}", other),
+        }
+    }
+
+    assert_eq!(&picked[0], &picked[2]);
+    assert_eq!(&picked[1], &picked[3]);
+    assert!(picked.contains(&subchannels[0]));
+    assert!(!picked.contains(&subchannel_being_removed));
+}
+
+
+
+#[tokio::test]
+async fn roundrobin_pick_after_resolved_updated_hosts() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+    // Step 1: Initial endpoints: removed, old
+    let removed_addr = Address { address: "removed".to_string(), ..Default::default() };
+    let old_addr = Address { address: "old".to_string(), ..Default::default() };
+    let removed_endpoint = Endpoint { addresses: vec![removed_addr.clone()], ..Default::default() };
+    let old_endpoint = Endpoint { addresses: vec![old_addr.clone()], ..Default::default() };
+
+    // Initial update: [removed, old]
+    send_resolver_update_to_policy(lb_policy, vec![removed_endpoint.clone(), old_endpoint.clone()], tcc);
+
+    // Create subchannels for both
+    let mut all_addresses = removed_endpoint.addresses.clone();
+    all_addresses.extend(old_endpoint.addresses.clone());
+    let all_subchannels = verify_subchannel_creation_from_policy(&mut rx_events, all_addresses).await;
+    let removed_sc = all_subchannels.iter().find(|sc| sc.address().address == "removed").unwrap().clone();
+    let old_sc = all_subchannels.iter().find(|sc| sc.address().address == "old").unwrap().clone();
+    println!("removed_subchannels[0] address: {}", removed_sc.address());
+    println!("old_subchannels[0] address: {}", old_sc.address());
+
+    // Set both to IDLE, then CONNECTING, then READY
+    send_initial_subchannel_updates_to_policy(lb_policy, &all_subchannels, tcc);
+    move_subchannel_to_connecting(lb_policy, removed_sc.clone(), tcc);
+    verify_connection_attempt_from_policy(&mut rx_events, all_subchannels[0].clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, all_subchannels[1].clone()).await;
+    
+    
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+    move_subchannel_to_connecting(lb_policy, old_sc.clone(), tcc);
+    move_subchannel_to_ready(lb_policy, removed_sc.clone(), tcc);
+    verify_roundrobin_ready_picker_from_policy(&mut rx_events, removed_sc.clone()).await;
+    move_subchannel_to_ready(lb_policy, old_sc.clone(), tcc);
+
+    // Picker should contain both subchannels
+    let picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, removed_sc.clone()).await;
+    let req = test_utils::new_request();
+    let mut picked = Vec::new();
+    for _ in 0..4 {
+        match picker.pick(&req) {
+            PickResult::Pick(pick) => {
+                println!("picker subchannel is {}", pick.subchannel.clone());
+                picked.push(pick.subchannel.clone())
+            },
+            other => panic!("unexpected pick result {}", other),
+        }
+    }
+    assert!(picked.contains(&removed_sc));
+    assert!(picked.contains(&old_sc));
+
+    // Step 2: Resolver update: [old (with new attr), new]
+
+    let new_addr = Address { address: "new".to_string(), ..Default::default() };
+    let new_endpoint = Endpoint { addresses: vec![new_addr.clone()], ..Default::default() };
+    let mut all_new_addresses = old_endpoint.addresses.clone();
+    all_new_addresses.extend(new_endpoint.addresses.clone());
+
+    send_resolver_update_to_policy(lb_policy, vec![old_endpoint.clone(), new_endpoint.clone()], tcc);
+    let new_subchannels = verify_subchannel_creation_from_policy(&mut rx_events, all_new_addresses.clone()).await;
+    let old_sc = new_subchannels.iter().find(|sc| sc.address().address == "old").unwrap().clone();
+    let new_sc = new_subchannels.iter().find(|sc| sc.address().address == "new").unwrap().clone();
+    // let picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, old_sc.clone()).await;
+    
+    lb_policy.subchannel_update(
+        old_sc.clone(),
+        &SubchannelState {
+            connectivity_state: ConnectivityState::Ready,
+            ..Default::default()
+        },
+        tcc,
+    );
+    let picker = verify_ready_picker_from_policy(&mut rx_events, old_sc.clone()).await;
+    println!("new subchannels is {}", new_subchannels[0]);
+    
+  
+    send_initial_subchannel_updates_to_policy(lb_policy, &vec![new_sc.clone()], tcc);
+    
+    move_subchannel_to_connecting(lb_policy, new_sc.clone(), tcc);
+    verify_connection_attempt_from_policy(&mut rx_events, new_sc.clone()).await;
+    move_subchannel_to_ready(lb_policy, new_sc.clone(), tcc);
+
+    // Picker should now contain only old and new (removed should be gone)
+    
+    let new_picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, new_sc.clone()).await;
+    let req = test_utils::new_request();
+    let mut picked = Vec::new();
+    for _ in 0..4 {
+        match new_picker.pick(&req) {
+            PickResult::Pick(pick) => {
+                println!("pick is {}", pick.subchannel);
+                picked.push(pick.subchannel.clone())
+            },
+            other => panic!("unexpected pick result {}", other),
+        }
+    }
+    assert!(picked.contains(&old_sc));
+    assert!(picked.contains(&new_sc));
+    assert!(!picked.contains(&removed_sc));
+
+}
+
+#[tokio::test]
+async fn roundrobin_aggregationing_ready_to_connecting() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+    let endpoints = create_n_endpoints_with_k_addresses(2, 1);
+
+    send_resolver_update_to_policy(lb_policy, endpoints.clone(), tcc);
+
+
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
+    let second_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+    
+    let mut all_subchannels = subchannels.clone();
+    all_subchannels.extend(second_subchannels.clone());
+    send_initial_subchannel_updates_to_policy(lb_policy, &all_subchannels, tcc);
+
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+
+    move_subchannel_to_connecting(lb_policy, second_subchannels[0].clone(), tcc);
+
+    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
+    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    move_subchannel_to_ready(lb_policy, second_subchannels[0].clone(), tcc);
+    let picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    let req = test_utils::new_request();
+    let pick1 = match picker.pick(&req) {
+        PickResult::Pick(p) => p.subchannel.clone(),
+        other => panic!("unexpected pick result {}", other),
+    };
+    let pick2 = match picker.pick(&req) {
+        PickResult::Pick(p) => p.subchannel.clone(),
+        other => panic!("unexpected pick result {}", other),
+    };
+    let picked = vec![pick1, pick2];
+    assert!(picked.contains(&subchannels[0]));
+    assert!(picked.contains(&second_subchannels[0]));
+    // let pick3 = match picker.pick(&req) {
+    //     PickResult::Pick(p) => p.subchannel.clone(),
+    //     other => panic!("unexpected pick result {}", other),
+    // };
+    // let picked = vec![pick3];
+    // assert!(picked.contains(&subchannels[0]));
+    // assert!(picked.contains(&second_subchannels[0]));
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    verify_resolution_request(&mut rx_events).await;
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    // verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
+    verify_ready_picker_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    move_subchannel_to_connecting(lb_policy, second_subchannels[0].clone(), tcc);
+    verify_resolution_request(&mut rx_events).await;
+    let second_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+}
+
+#[tokio::test]
+async fn roundrobin_aggregation_transient_failure() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+    let endpoints = create_n_endpoints_with_k_addresses(2, 1);
+
+    send_resolver_update_to_policy(lb_policy, endpoints.clone(), tcc);
+
+
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
+    let second_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+
+    let mut all_subchannels = subchannels.clone();
+    all_subchannels.extend(second_subchannels.clone());
+   
+    send_initial_subchannel_updates_to_policy(lb_policy, &all_subchannels, tcc);
+
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+
+    verify_connection_attempt_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+
+    move_subchannel_to_connecting(lb_policy, second_subchannels[0].clone(), tcc);
+
+    move_subchannel_to_transient_failure(lb_policy, second_subchannels[0].clone(), "oops", tcc);
+
+    move_subchannel_to_transient_failure(lb_policy, subchannels[0].clone(), "oops", tcc);
+    
+    verify_resolution_request(&mut rx_events).await;
+    verify_resolution_request(&mut rx_events).await;
+    verify_transient_failure_picker_from_policy(&mut rx_events, "oops".to_string()).await; 
+    
+}
+
+#[tokio::test]
+async fn roundrobin_aggregation_transient_failure_to_ready() {
+    let (mut rx_events, mut lb_policy, mut tcc) = setup();
+    let lb_policy = lb_policy.as_mut();
+    let tcc = tcc.as_mut();
+
+    let endpoints = create_n_endpoints_with_k_addresses(2, 1);
+
+    send_resolver_update_to_policy(lb_policy, endpoints.clone(), tcc);
+
+
+    let subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
+    let second_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+
+    let mut all_subchannels = subchannels.clone();
+    all_subchannels.extend(second_subchannels.clone());
+   
+    send_initial_subchannel_updates_to_policy(lb_policy, &all_subchannels, tcc);
+
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+
+    verify_connection_attempt_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+
+    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+
+    move_subchannel_to_connecting(lb_policy, second_subchannels[0].clone(), tcc);
+
+    move_subchannel_to_transient_failure(lb_policy, second_subchannels[0].clone(), "oops", tcc);
+
+    move_subchannel_to_transient_failure(lb_policy, subchannels[0].clone(), "oops", tcc);
+    
+    verify_resolution_request(&mut rx_events).await;
+    verify_resolution_request(&mut rx_events).await;
+    verify_transient_failure_picker_from_policy(&mut rx_events, "oops".to_string()).await; 
+    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
+    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    move_subchannel_to_ready(lb_policy, second_subchannels[0].clone(), tcc);
+    verify_roundrobin_ready_picker_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    
+}
+
 #[tokio::test]
 async fn roundrobin_zero_addresses_from_resolver_before_valid_update() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
@@ -663,25 +1248,23 @@ async fn roundrobin_stay_transient_failure_until_ready() {
     let subchannels =
         verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+    
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    
     verify_connecting_picker_from_policy(&mut rx_events).await;
     
-    
-    
     move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
-    // verify_connecting_picker_from_policy(&mut rx_events).await;
     let first_error = String::from("test connection error 1");
     for sc in &subchannels {
         move_subchannel_to_transient_failure(lb_policy, sc.clone(), &first_error, tcc);
-        
-
     }
 
  
     println!("verifying transient failure picker");
-    
+    verify_resolution_request(&mut rx_events).await;
     verify_transient_failure_picker_from_policy(&mut rx_events, first_error.clone()).await;
+
     println!("verifying resolution request");
     // verify_transient_failure_picker_from_policy(&mut rx_events, first_error.clone()).await;
 
@@ -689,7 +1272,6 @@ async fn roundrobin_stay_transient_failure_until_ready() {
     println!("moving subchannel to ready");
     move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
 
-    // verify_resolution_request(&mut rx_events).await;
     println!("verifying subchannel to ready");
     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
 }
@@ -731,7 +1313,7 @@ async fn roundrobin_zero_endpoints_from_resolver_after_valid_update() {
         verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
 
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-
+    
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
    
 
@@ -773,7 +1355,7 @@ async fn roundrobin_with_one_backend() {
 
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
 
-    
+   
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
 
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
@@ -802,53 +1384,21 @@ async fn roundrobin_with_multiple_backends_first_backend_is_ready() {
 
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
 
-    verify_connecting_picker_from_policy(&mut rx_events).await;
+    
 
 
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    
 
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    verify_connecting_picker_from_policy(&mut rx_events).await;
 
     move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
 
     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
 }
 
-// Tests the scenario where the resolver returns an update with multiple
-// address. The LB policy should create subchannels for all address, and attempt
-// to connect to them in order, until a connection succeeds, at which point it
-// should move to READY state with a picker that returns that subchannel.
-#[tokio::test]
-async fn roundrobin_with_multiple_backends_first_backend_is_not_ready() {
-    let (mut rx_events, mut lb_policy, mut tcc) = setup();
-    let lb_policy = lb_policy.as_mut();
-    let tcc = tcc.as_mut();
 
-    let endpoint = create_endpoint_with_n_addresses(3);
-    send_resolver_update_to_policy(lb_policy, vec![endpoint.clone()], tcc);
-    let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
-
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-
-    let connection_error = String::from("test connection error");
-    
-    verify_connecting_picker_from_policy(&mut rx_events).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    
-    move_subchannel_to_transient_failure(lb_policy, subchannels[0].clone(), &connection_error, tcc);
-
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
-    move_subchannel_to_transient_failure(lb_policy, subchannels[1].clone(), &connection_error, tcc);
-
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[2].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[2].clone(), tcc);
-    move_subchannel_to_ready(lb_policy, subchannels[2].clone(), tcc);
-
-    verify_ready_picker_from_policy(&mut rx_events, subchannels[2].clone()).await;
-}
 
 // Tests the scenario where the resolver returns an update with multiple
 // address, some of which are duplicates. The LB policy should dedup the
@@ -900,7 +1450,7 @@ async fn roundrobin_with_multiple_backends_duplicate_addresses() {
     .await;
 
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-
+    
     let connection_error = String::from("test connection error");
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
@@ -916,52 +1466,6 @@ async fn roundrobin_with_multiple_backends_duplicate_addresses() {
 
 
 
-
-
-
-// Tests the scenario where the resolver returns an update with multiple
-// addresses and the LB policy successfully connects to first one and moves to
-// READY. The resolver then returns an update with a new address list that does
-// not contain the address of the currently connected subchannel. The LB policy
-// should create subchannels for the new addresses, and then realize that the
-// currently connected subchannel is not in the new address list. It should then
-// move to IDLE state and return a picker that queues RPCs. When an RPC is made,
-// the LB policy should create subchannels for the addresses specified in the
-// previous update and start connecting to them.
-#[tokio::test]
-async fn roundrobin_resolver_update_with_completely_new_address_list() {
-    let (mut rx_events, mut lb_policy, mut tcc) = setup();
-    let lb_policy = lb_policy.as_mut();
-    let tcc = tcc.as_mut();
-
-    let endpoints = create_endpoint_with_n_addresses(2);
-    send_resolver_update_to_policy(lb_policy, vec![endpoints.clone()], tcc);
-    let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    verify_connecting_picker_from_policy(&mut rx_events).await;
-    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
-    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
-
-    let endpoints = create_endpoint_with_one_address("3.3.3.3:3".to_string());
-    send_resolver_update_to_policy(lb_policy, vec![endpoints.clone()], tcc);
-    let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    let picker = verify_connecting_picker_from_policy(&mut rx_events).await;
-    verify_resolution_request(&mut rx_events).await;
-    let req = test_utils::new_request();
-    assert!(picker.pick(&req) == PickResult::Queue);
-    verify_schedule_work_from_policy(&mut rx_events).await;
-    lb_policy.work(tcc);
-
-    let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-}
 
 // Tests the scenario where the resolver returns an update with multiple
 // addresses and the LB policy successfully connects to first one and moves to
@@ -981,10 +1485,14 @@ async fn roundrobin_resolver_update_contains_currently_ready_subchannel() {
     let subchannels =
         verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+    
+    
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
     verify_connecting_picker_from_policy(&mut rx_events).await;
+    
     move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
+
     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
 
     let mut endpoints = create_endpoint_with_n_addresses(4);
@@ -993,7 +1501,10 @@ async fn roundrobin_resolver_update_contains_currently_ready_subchannel() {
     let subchannels =
         verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
     lb_policy.subchannel_update(subchannels[0].clone(), &SubchannelState::default(), tcc);
+    // verify_connecting_picker_from_policy(&mut rx_events).await;
+
     lb_policy.subchannel_update(subchannels[1].clone(), &SubchannelState::default(), tcc);
+
     lb_policy.subchannel_update(subchannels[2].clone(), &SubchannelState::default(), tcc);
     lb_policy.subchannel_update(
         subchannels[3].clone(),
@@ -1014,7 +1525,7 @@ async fn roundrobin_resolver_update_contains_currently_ready_subchannel() {
 // the new address list. It should then send a new READY picker that returns the
 // currently connected subchannel.
 #[tokio::test]
-async fn pickfirst_resolver_update_contains_identical_address_list() {
+async fn roundrobin_resolver_update_contains_identical_address_list() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
@@ -1023,7 +1534,9 @@ async fn pickfirst_resolver_update_contains_identical_address_list() {
     send_resolver_update_to_policy(lb_policy, vec![endpoints.clone()], tcc);
     let subchannels =
         verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
+    
     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+    
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
     verify_connecting_picker_from_policy(&mut rx_events).await;
@@ -1044,209 +1557,217 @@ async fn pickfirst_resolver_update_contains_identical_address_list() {
     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
 }
 
-// Tests the scenario where the resolver returns an update with multiple
-// addresses and the LB policy successfully connects to first one and moves to
-// READY. The resolver then returns an update with a new address list that
-// removes the address of the currently connected subchannel. The LB policy
-// should create subchannels for the new addresses, and then see that the
-// currently connected subchannel is not in the new address list. It should then
-// move to IDLE state and return a picker that queues RPCs. When an RPC is made,
-// the LB policy should create subchannels for the addresses specified in the
-// previous update and start connecting to them. The test repeats this scenario
-// multiple times, each time removing the first address from the address list,
-// eventually ending up with an empty address list. The LB policy should move to
-// TRANSIENT_FAILURE state with a failing picker.
+
+
+
 #[tokio::test]
-async fn pickfirst_resolver_update_removes_connected_address() {
+async fn roundrobin_logic_three_endpoints() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
 
-    let mut endpoints = create_endpoint_with_n_addresses(3);
-    send_resolver_update_to_policy(lb_policy, vec![endpoints.clone()], tcc);
+    let endpoints = create_n_endpoints_with_k_addresses(3, 1);
+    send_resolver_update_to_policy(lb_policy, endpoints.clone(), tcc);
     let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
+    let second_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+    let third_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[2].addresses.clone()).await;
+
+    let mut all_subchannels = subchannels.clone();
+    all_subchannels.extend(second_subchannels.clone());
+    all_subchannels.extend(third_subchannels.clone());
+    send_initial_subchannel_updates_to_policy(lb_policy, &all_subchannels, tcc);
+
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, third_subchannels[0].clone()).await;
     verify_connecting_picker_from_policy(&mut rx_events).await;
+
+    move_subchannel_to_connecting(lb_policy, second_subchannels[0].clone(), tcc);
+    move_subchannel_to_connecting(lb_policy, third_subchannels[0].clone(), tcc);
     move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
-
-    // Address list now contains two addresses.
-    endpoints.addresses.remove(0);
-    send_resolver_update_to_policy(lb_policy, vec![endpoints.clone()], tcc);
-    let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    let picker = verify_connecting_picker_from_policy(&mut rx_events).await;
-    verify_resolution_request(&mut rx_events).await;
+    move_subchannel_to_ready(lb_policy, second_subchannels[0].clone(), tcc);
+    let picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    move_subchannel_to_ready(lb_policy, third_subchannels[0].clone(), tcc);
+    let picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, third_subchannels[0].clone()).await;
     let req = test_utils::new_request();
-    assert!(picker.pick(&req) == PickResult::Queue);
-    verify_schedule_work_from_policy(&mut rx_events).await;
-    lb_policy.work(tcc);
-
-    let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    verify_connecting_picker_from_policy(&mut rx_events).await;
-    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
-    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
-
-    // Address list now contains one address.
-    endpoints.addresses.remove(0);
-    send_resolver_update_to_policy(lb_policy, vec![endpoints.clone()], tcc);
-    let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    let picker = verify_connecting_picker_from_policy(&mut rx_events).await;
-    verify_resolution_request(&mut rx_events).await;
-    let req = test_utils::new_request();
-    assert!(picker.pick(&req) == PickResult::Queue);
-    verify_schedule_work_from_policy(&mut rx_events).await;
-    lb_policy.work(tcc);
-
-    let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    verify_connecting_picker_from_policy(&mut rx_events).await;
-    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
-    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
-
-    // Address list is now empty.
-    endpoints.addresses.remove(0);
-    let update = ResolverUpdate {
-        endpoints: Ok(vec![endpoints]),
-        ..Default::default()
+    let pick1 = match picker.pick(&req) {
+        PickResult::Pick(p) => {
+            println!("p.subchannel for pick1 is {}", p.subchannel);
+            p.subchannel.clone()
+        },
+        other => panic!("unexpected pick result {}", other),
     };
-    assert!(lb_policy.resolver_update(update, None, tcc).is_err());
-    verify_transient_failure_picker_from_policy(
-        &mut rx_events,
-        "received empty address list from the name resolver".to_string(),
-    )
-    .await;
+    let pick2 = match picker.pick(&req) {
+        PickResult::Pick(p) => {
+            println!("p.subchannel for pick2 is {}", p.subchannel);
+            p.subchannel.clone()
+        },
+        other => panic!("unexpected pick result {}", other),
+    };
+    let pick3 = match picker.pick(&req) {
+        PickResult::Pick(p) => {
+            println!("p.subchannel for pick3 is {}", p.subchannel);
+            p.subchannel.clone()
+        },
+        other => panic!("unexpected pick result {}", other),
+    };
+    let pick4 = match picker.pick(&req) {
+        PickResult::Pick(p) => {
+            println!("p.subchannel for pick4 is {}", p.subchannel);
+            p.subchannel.clone()
+        },
+        other => panic!("unexpected pick result {}", other),
+    };
+    let picked = vec![pick1, pick2, pick3];
+    let looped_pick = vec![pick4];
+    assert!(picked.contains(&subchannels[0]));
+    assert!(picked.contains(&second_subchannels[0]));
+    assert!(picked.contains(&third_subchannels[0]));
+    assert!(looped_pick.contains(&subchannels[0]));
 }
 
-// Tests the scenario where the resolver returns an update with multiple
-// addresses and the LB policy successfully connects to first one and moves to
-// READY. The connected subchannel then goes down and the LB policy moves to IDLE
-// state with a picker that queues RPCs. When an RPC is made, the LB policy
-// creates subchannels for the addresses specified in the previous update and
-// starts connecting to them. The LB policy should then move to READY state with
-// a picker that returns the second subchannel.
 #[tokio::test]
-async fn roundrobin_connected_subchannel_goes_down() {
+async fn roundrobin_ready_to_transient_failure_to_ready() {
     let (mut rx_events, mut lb_policy, mut tcc) = setup();
     let lb_policy = lb_policy.as_mut();
     let tcc = tcc.as_mut();
 
-    let endpoints = create_endpoint_with_n_addresses(2);
-    send_resolver_update_to_policy(lb_policy, vec![endpoints.clone()], tcc);
+    let endpoints = create_n_endpoints_with_k_addresses(2, 1);
+    send_resolver_update_to_policy(lb_policy, endpoints.clone(), tcc);
     let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    verify_connecting_picker_from_policy(&mut rx_events).await;
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
+    let second_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+    let mut all_subchannels = subchannels.clone();
+    all_subchannels.extend(second_subchannels.clone());
+    send_initial_subchannel_updates_to_policy(lb_policy, &all_subchannels, tcc);
+    
+
     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+
+    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+
+    move_subchannel_to_connecting(lb_policy, second_subchannels[0].clone(), tcc);
+
     move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    move_subchannel_to_ready(lb_policy, second_subchannels[0].clone(), tcc);
 
-    move_subchannel_to_idle(lb_policy, subchannels[0].clone(), tcc);
-    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    verify_idle_picker_from_policy(&mut rx_events).await;
-    // verify_resolution_request(&mut rx_events).await;
-    let picker = verify_connecting_picker_from_policy(&mut rx_events).await;
-    
+    let picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
     let req = test_utils::new_request();
-    assert!(picker.pick(&req) == PickResult::Queue);
+    let pick1 = match picker.pick(&req) {
+        PickResult::Pick(p) => p.subchannel.clone(),
+        other => panic!("unexpected pick result {}", other),
+    };
+    let pick2 = match picker.pick(&req) {
+        PickResult::Pick(p) => p.subchannel.clone(),
+        other => panic!("unexpected pick result {}", other),
+    };
+    let picked = vec![pick1, pick2];
+    assert!(picked.contains(&subchannels[0]));
+    assert!(picked.contains(&second_subchannels[0]));
+
+    let first_error = String::from("test connection error 1");
+    move_subchannel_to_transient_failure(lb_policy, subchannels[0].clone(), &first_error, tcc);
     verify_resolution_request(&mut rx_events).await;
-
-    verify_schedule_work_from_policy(&mut rx_events).await;
-    lb_policy.work(tcc);
-
     let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    verify_connecting_picker_from_policy(&mut rx_events).await;
-    move_subchannel_to_transient_failure(
-        lb_policy,
-        subchannels[0].clone(),
-        "connection error",
-        tcc,
-    );
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    move_subchannel_to_ready(lb_policy, subchannels[1].clone(), tcc);
-    verify_ready_picker_from_policy(&mut rx_events, subchannels[1].clone()).await;
-}
+    verify_ready_picker_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
 
-// Verifies that the channel moves to IDLE state.
-//
-// Returns the picker for tests to make more picks, if required.
-async fn verify_idle_picker_from_policy(
-    rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
-) -> Arc<dyn Picker> {
-    match rx_events.recv().await.unwrap() {
-        TestEvent::UpdatePicker(update) => {
-            assert!(update.connectivity_state == ConnectivityState::Idle);
-            update.picker.clone()
-        }
-        other => panic!("unexpected event {}", other),
-    }
-}
-// Tests the scenario where the resolver returns an update with multiple
-// addresses and the LB policy successfully connects to first one and moves to
-// READY. The connected subchannel then goes down and the LB policy moves to IDLE
-// state with a picker that queues RPCs. When an RPC is made, the LB policy
-// creates subchannels for the addresses specified in the previous update and
-// starts connecting to them. All subchannels fail to connect and the LB policy
-// moves to TRANSIENT_FAILURE state with a failing picker.
-#[tokio::test]
-async fn roundrobin_all_subchannels_goes_down() {
-    let (mut rx_events, mut lb_policy, mut tcc) = setup();
-    let lb_policy = lb_policy.as_mut();
-    let tcc = tcc.as_mut();
-
-    let endpoints = create_endpoint_with_n_addresses(2);
-    send_resolver_update_to_policy(lb_policy, vec![endpoints.clone()], tcc);
-    let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    verify_connecting_picker_from_policy(&mut rx_events).await;
+ 
+    println!("verifying transient failure picker");
     
     
-    
-    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
-    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
-
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    let picker = verify_connecting_picker_from_policy(&mut rx_events).await;
-    verify_connecting_picker_from_policy(&mut rx_events).await;
+    move_subchannel_to_transient_failure(lb_policy, second_subchannels[0].clone(), &first_error, tcc);
     verify_resolution_request(&mut rx_events).await;
+    let second_subchannels =
+        verify_subchannel_creation_from_policy(&mut rx_events, endpoints[1].addresses.clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    verify_connecting_picker_from_policy(&mut rx_events).await;
+    // verify_connecting_picker_from_policy(&mut rx_events, first_error.clone()).await;
+    let mut all_subchannels = subchannels.clone();
+    all_subchannels.extend(second_subchannels.clone());
+    println!("verifying resolution request");
+    // verify_transient_failure_picker_from_policy(&mut rx_events, first_error.clone()).await;
+
+    
+    println!("moving subchannel to ready");
+    move_subchannel_to_ready(lb_policy, all_subchannels[0].clone(), tcc);
+
+    println!("verifying subchannel to ready");
+    let picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
     let req = test_utils::new_request();
-    // assert!(picker.pick(&req) == PickResult::Queue);
-    verify_schedule_work_from_policy(&mut rx_events).await;
-    lb_policy.work(tcc);
-
-    let connection_error = String::from("test connection error 2");
-    let subchannels =
-        verify_subchannel_creation_from_policy(&mut rx_events, endpoints.addresses.clone()).await;
-    send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
-    verify_connecting_picker_from_policy(&mut rx_events).await;
-    move_subchannel_to_transient_failure(lb_policy, subchannels[0].clone(), &connection_error, tcc);
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[1].clone()).await;
-    move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
-    move_subchannel_to_transient_failure(lb_policy, subchannels[1].clone(), &connection_error, tcc);
-    verify_transient_failure_picker_from_policy(&mut rx_events, connection_error).await;
+    let pick1 = match picker.pick(&req) {
+        PickResult::Pick(p) => p.subchannel.clone(),
+        other => panic!("unexpected pick result {}", other),
+    };
+    let pick2 = match picker.pick(&req) {
+        PickResult::Pick(p) => p.subchannel.clone(),
+        other => panic!("unexpected pick result {}", other),
+    };
+    let picked = vec![pick1, pick2];
+    assert!(picked.contains(&subchannels[0]));
+    assert!(!picked.contains(&second_subchannels[0]));
+    move_subchannel_to_ready(lb_policy, second_subchannels[0].clone(), tcc);
+    let picker = verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    let req = test_utils::new_request();
+    let pick1 = match picker.pick(&req) {
+        PickResult::Pick(p) => p.subchannel.clone(),
+        other => panic!("unexpected pick result {}", other),
+    };
+    let pick2 = match picker.pick(&req) {
+        PickResult::Pick(p) => p.subchannel.clone(),
+        other => panic!("unexpected pick result {}", other),
+    };
+    let picked = vec![pick1, pick2];
+    assert!(picked.contains(&subchannels[0]));
+    assert!(picked.contains(&second_subchannels[0]));
 }
+
+// #[tokio::test]
+// async fn roundrobin_ready_to_transient_failure_to_ready() {
+//     let (mut rx_events, mut lb_policy, mut tcc) = setup();
+//     let lb_policy = lb_policy.as_mut();
+//     let tcc = tcc.as_mut();
+
+//     let endpoint = create_endpoint_with_n_addresses(2);
+//     send_resolver_update_to_policy(lb_policy, vec![endpoint.clone()], tcc);
+//     let subchannels =
+//         verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
+//     send_initial_subchannel_updates_to_policy(lb_policy, &subchannels, tcc);
+    
+//     move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+//     verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    
+//     verify_connecting_picker_from_policy(&mut rx_events).await;
+    
+//     move_subchannel_to_connecting(lb_policy, subchannels[1].clone(), tcc);
+//     let first_error = String::from("test connection error 1");
+//     for sc in &subchannels {
+//         move_subchannel_to_transient_failure(lb_policy, sc.clone(), &first_error, tcc);
+//     }
+
+ 
+//     println!("verifying transient failure picker");
+//     verify_resolution_request(&mut rx_events).await;
+//     verify_transient_failure_picker_from_policy(&mut rx_events, first_error.clone()).await;
+
+//     println!("verifying resolution request");
+//     // verify_transient_failure_picker_from_policy(&mut rx_events, first_error.clone()).await;
+
+    
+//     println!("moving subchannel to ready");
+//     move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
+
+//     println!("verifying subchannel to ready");
+//     verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+// }

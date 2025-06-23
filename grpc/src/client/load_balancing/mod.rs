@@ -19,16 +19,10 @@
 use core::panic;
 use serde::de;
 use std::{
-    any::Any,
-    collections::HashMap,
-    error::Error,
-    fmt::{Debug, Display},
-    hash::{Hash, Hasher},
-    ops::{Add, Sub},
-    sync::{
+    any::Any, collections::HashMap, error::Error, fmt::{Debug, Display}, hash::{Hash, Hasher}, ops::{Add, Sub}, ptr, sync::{
         atomic::{AtomicI64, Ordering::Relaxed},
         Arc, Mutex, Weak,
-    },
+    }
 };
 use tokio::sync::{mpsc::Sender, Notify};
 use tonic::{metadata::MetadataMap, Status};
@@ -48,6 +42,7 @@ use crate::client::{
 pub mod child_manager;
 pub mod pick_first;
 pub mod round_robin;
+pub mod graceful_switch;
 
 
 #[cfg(test)]
@@ -183,6 +178,16 @@ impl Default for SubchannelState {
     fn default() -> Self {
         Self {
             connectivity_state: ConnectivityState::Idle,
+            last_connection_error: None,
+        }
+    }
+    
+}
+
+impl SubchannelState{
+    fn ready() -> Self {
+        Self {
+            connectivity_state: ConnectivityState::Ready,
             last_connection_error: None,
         }
     }
@@ -427,6 +432,17 @@ impl Hash for WeakSubchannel {
     }
 }
 
+// impl PartialEq for WeakSubchannel {
+//     fn eq(&self, other: &Self) -> bool {
+//         if let Some(strong_self) = self.upgrade() {
+//             if let Some(strong_other) = other.upgrade() {
+//                 return strong_self.dyn_eq(&Box::new(&strong_other as &dyn Any));
+//             }
+//         }
+//         false
+//     }
+// }
+
 impl PartialEq for WeakSubchannel {
     fn eq(&self, other: &Self) -> bool {
         if let Some(strong_self) = self.upgrade() {
@@ -460,15 +476,21 @@ impl ExternalSubchannel {
     }
 }
 
+//use pointer value as another way to hash and partialEQ
 impl Hash for ExternalSubchannel {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.address().hash(state);
+        ptr::hash(self,  state); 
+        // (self as *const Self).hash(state);
+        // self.address().hash(state);
     }
 }
 
+//need to compare another field 
+//if can compare pointers then would be useful
 impl PartialEq for ExternalSubchannel {
     fn eq(&self, other: &Self) -> bool {
-        self.address() == other.address()
+        // self.address() == other.address()
+        ptr::eq(self, other)
     }
 }
 

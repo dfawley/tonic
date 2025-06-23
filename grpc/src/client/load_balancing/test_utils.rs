@@ -7,10 +7,7 @@ use crate::client::{
 };
 use crate::service::{Message, Request, Response, Service};
 use std::{
-    fmt::Display,
-    hash::{Hash, Hasher},
-    ops::Add,
-    sync::Arc,
+    fmt::Display, hash::{Hash, Hasher}, ops::Add, ptr, sync::Arc
 };
 use tokio::{
     sync::{mpsc, Notify},
@@ -58,13 +55,13 @@ impl ForwardingSubchannel for TestSubchannel {
 
 impl Hash for TestSubchannel {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.address.hash(state);
+        ptr::hash(self, state); 
     }
 }
 
 impl PartialEq for TestSubchannel {
     fn eq(&self, other: &Self) -> bool {
-        self.address == other.address
+        ptr::eq(self, other)
     }
 }
 impl Eq for TestSubchannel {}
