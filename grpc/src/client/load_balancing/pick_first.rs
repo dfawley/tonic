@@ -260,11 +260,21 @@ impl PickFirstPolicy {
         endpoints: &mut [Endpoint],
     ) -> Option<Box<dyn Error + Send + Sync>> {
         config?;
+        // if config.is_none(){
+        //     println!("is not none");
+        //     return None
+        // }
 
+        println!("why are we here");
         let cfg: Arc<PickFirstConfig> = match config.unwrap().convert_to() {
             Ok(cfg) => cfg,
             Err(e) => return Some(e),
         };
+        println!("received update from resolver with config: {:?}", &cfg);
+        // let cfg: Arc<PickFirstConfig> = match config.unwrap().convert_to() {
+        //     Ok(cfg) => cfg,
+        //     Err(e) => return None,
+        // };
         println!("received update from resolver with config: {:?}", &cfg);
 
         let mut shuffle_addresses = false;

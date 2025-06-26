@@ -1649,17 +1649,17 @@ async fn roundrobin_ready_to_transient_failure_to_ready() {
     send_initial_subchannel_updates_to_policy(lb_policy, &all_subchannels, tcc);
     
 
-    move_subchannel_to_connecting(lb_policy, subchannels[0].clone(), tcc);
+    move_subchannel_to_connecting(lb_policy, all_subchannels[0].clone(), tcc);
 
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    verify_connection_attempt_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, all_subchannels[0].clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, all_subchannels[1].clone()).await;
     verify_connecting_picker_from_policy(&mut rx_events).await;
 
-    move_subchannel_to_connecting(lb_policy, second_subchannels[0].clone(), tcc);
+    move_subchannel_to_ready(lb_policy, all_subchannels[0].clone(), tcc);
 
-    move_subchannel_to_ready(lb_policy, subchannels[0].clone(), tcc);
-    verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    move_subchannel_to_ready(lb_policy, second_subchannels[0].clone(), tcc);
+    verify_ready_picker_from_policy(&mut rx_events, all_subchannels[0].clone()).await;
+    move_subchannel_to_connecting(lb_policy, all_subchannels[1].clone(), tcc);
+    move_subchannel_to_ready(lb_policy, all_subchannels[1].clone(), tcc);
 
     let picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
     let req = test_utils::new_request();
@@ -1676,12 +1676,12 @@ async fn roundrobin_ready_to_transient_failure_to_ready() {
     assert!(picked.contains(&second_subchannels[0]));
 
     let first_error = String::from("test connection error 1");
-    move_subchannel_to_transient_failure(lb_policy, subchannels[0].clone(), &first_error, tcc);
+    move_subchannel_to_transient_failure(lb_policy, all_subchannels[0].clone(), &first_error, tcc);
     verify_resolution_request(&mut rx_events).await;
     let subchannels =
         verify_subchannel_creation_from_policy(&mut rx_events, endpoints[0].addresses.clone()).await;
-    verify_connection_attempt_from_policy(&mut rx_events, subchannels[0].clone()).await;
-    verify_ready_picker_from_policy(&mut rx_events, second_subchannels[0].clone()).await;
+    verify_connection_attempt_from_policy(&mut rx_events, all_subchannels[0].clone()).await;
+    verify_ready_picker_from_policy(&mut rx_events, all_subchannels[1].clone()).await;
 
  
     println!("verifying transient failure picker");
@@ -1718,7 +1718,7 @@ async fn roundrobin_ready_to_transient_failure_to_ready() {
     assert!(picked.contains(&subchannels[0]));
     assert!(!picked.contains(&second_subchannels[0]));
     move_subchannel_to_ready(lb_policy, second_subchannels[0].clone(), tcc);
-    let picker = verify_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
+    let picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, subchannels[0].clone()).await;
     let req = test_utils::new_request();
     let pick1 = match picker.pick(&req) {
         PickResult::Pick(p) => p.subchannel.clone(),

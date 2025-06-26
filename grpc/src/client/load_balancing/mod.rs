@@ -19,13 +19,13 @@
 use core::panic;
 use serde::de;
 use std::{
-    any::Any, collections::HashMap, error::Error, fmt::{Debug, Display}, hash::{Hash, Hasher}, ops::{Add, Sub}, ptr, sync::{
+    any::Any, collections::{hash_map::{IntoIter, IterMut, Values}, HashMap}, error::Error, fmt::{Debug, Display}, hash::{Hash, Hasher}, mem, ops::{Add, Sub}, ptr, sync::{
         atomic::{AtomicI64, Ordering::Relaxed},
         Arc, Mutex, Weak,
     }
 };
 use tokio::sync::{mpsc::Sender, Notify};
-use tonic::{metadata::MetadataMap, Status};
+use tonic::{metadata::{MetadataMap}, Status};
 
 use crate::{
     client::channel::WorkQueueTx,
@@ -579,5 +579,95 @@ pub struct Failing {
 impl Picker for Failing {
     fn pick(&self, _: &Request) -> PickResult {
         PickResult::Fail(Status::unavailable(self.error.clone()))
+    }
+}
+
+#[derive(Default)]
+struct WeakSubchannelMap<V> {
+    m: HashMap<*const dyn Subchannel, V>,
+}
+
+// unsafe impl<V: Send> Send for WeakSubchannelMap<V> {}
+
+impl<V> WeakSubchannelMap<V> {
+    pub fn new() -> Self {
+        WeakSubchannelMap {
+            m: Default::default(),
+        }
+    }
+
+    pub fn insert(&mut self, sc: Arc<dyn Subchannel>, v: V) -> Option<V> {
+        let weak = Arc::downgrade(&sc);
+        if self.m.contains_key(&weak.as_ptr()) {
+            // The key is not updated by this operation, so we need weak to be freed.
+            self.m.insert(weak.as_ptr(), v)
+        } else {
+            // The weak reference will not be lost as part of this operation.
+            self.m.insert(weak.into_raw(), v)
+        }
+    }
+
+    pub fn get(&self, sc: &Arc<dyn Subchannel>) -> Option<&V> {
+        self.m.get(&Arc::as_ptr(&sc))
+    }
+
+    pub fn get_mut(&mut self, sc: &Arc<dyn Subchannel>) -> Option<&mut V> {
+        self.m.get_mut(&Arc::as_ptr(&sc))
+    }
+
+    pub fn values(&self) -> Values<'_, *const dyn Subchannel, V> {
+        todo!();
+        //self.m.values()
+    }
+
+    pub fn contains_key(&self, sc: &Arc<dyn Subchannel>) -> bool {
+        self.m.contains_key(&Arc::as_ptr(&sc))
+    }
+
+    pub fn remove(&mut self, sc: Arc<dyn Subchannel>) -> Option<V> {
+        self.m.remove(&Arc::into_raw(sc))
+    }
+
+    pub fn prune_unreferenced(&mut self) {
+        self.m.retain(|k, _| {
+            // Convert the pointer into a Weak<>, and if it upgrades, then keep it.
+            let weak = unsafe { Weak::from_raw(k) };
+            if weak.upgrade().is_some() {
+                _ = weak.into_raw();
+                // No drop weak.. it's stolen by into_raw.
+                return true;
+            }
+            // drop(weak);
+            return false;
+        })
+    }
+}
+
+impl<V> IntoIterator for WeakSubchannelMap<V> {
+    type IntoIter = IntoIter<*const dyn Subchannel, V>;
+    type Item = (*const dyn Subchannel, V);
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        let m = mem::take(&mut self.m);
+        m.into_iter()
+    }
+}
+
+impl<'a, V> IntoIterator for &'a mut WeakSubchannelMap<V> {
+    type IntoIter = IterMut<'a, *const dyn Subchannel, V>;
+    type Item = (&'a *const dyn Subchannel, &'a mut V);
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.m.iter_mut()
+    }
+}
+
+impl<V> Drop for WeakSubchannelMap<V> {
+    fn drop(&mut self) {
+        for (k, _) in &self.m {
+            unsafe {
+                Weak::from_raw(k);
+            }
+        }
     }
 }

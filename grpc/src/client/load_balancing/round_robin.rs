@@ -132,7 +132,7 @@ impl RoundRobinPolicy {
 
 }
 
-struct RoundRobinPicker {
+pub struct RoundRobinPicker {
     pickers: Vec<Arc<dyn Picker>>,
     next: AtomicUsize,
 }
@@ -194,7 +194,7 @@ impl LbPolicy for WrapperPickFirstPolicy {
         println!("calling resolver update on wrapped pick first policy");
         let mut wrapped_channel_controller = WrappedController::new(channel_controller);
         
-        let result = self.pick_first.resolver_update(update, config, &mut wrapped_channel_controller);
+        let result = self.pick_first.resolver_update(update, None, &mut wrapped_channel_controller);
         
         if let Some(state) = wrapped_channel_controller.picker_update.clone() {
             println!("state connectivity state is {}", state.connectivity_state);
