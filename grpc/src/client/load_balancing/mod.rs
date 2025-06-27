@@ -360,7 +360,7 @@ struct WeakSubchannelMap<V> {
     m: HashMap<*const dyn Subchannel, V>,
 }
 
-// unsafe impl<V: Send> Send for WeakSubchannelMap<V> {}
+unsafe impl<V: Send> Send for WeakSubchannelMap<V> {}
 
 impl<V> WeakSubchannelMap<V> {
     pub fn new() -> Self {
