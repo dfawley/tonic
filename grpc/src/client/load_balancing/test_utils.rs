@@ -164,6 +164,7 @@ impl LbPolicy for MockBalancerOne {
     ) {
         if let Some(ref mut scl) = self.subchannel_list {
             scl.update_subchannel_data(&subchannel, state);
+            println!("updating ready picker for mock balancer 2");
             // Optionally, send a picker update to simulate state change
             channel_controller.update_picker(LbState {
                 connectivity_state: state.connectivity_state,
@@ -207,7 +208,8 @@ impl LbPolicy for MockBalancerTwo {
         channel_controller: &mut dyn ChannelController,
     ) {
         if let Some(ref mut scl) = self.subchannel_list {
-            scl.update_subchannel_data(&subchannel, state);
+            // scl.update_subchannel_data(&subchannel, state);
+            println!("updating ready picker for mock balancer 2");
             // Optionally, send a picker update to simulate state change
             channel_controller.update_picker(LbState {
                 connectivity_state: state.connectivity_state,

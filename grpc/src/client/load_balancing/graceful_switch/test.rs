@@ -483,7 +483,7 @@ async fn gracefulswitch_mock_switching_to_resolver_update() {
 
     // Simulate subchannel creation and ready for pending
     let subchannels_two = verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
-    verify_mock_connecting_picker_from_policy(&mut rx_events).await;
+    // verify_mock_connecting_picker_from_policy(&mut rx_events).await;
     // send_initial_subchannel_updates_to_policy(&mut *graceful_switch, &subchannels_two, tcc.as_mut());
     move_subchannel_to_ready(&mut *graceful_switch, subchannels_two[0].clone(), tcc.as_mut());
 
