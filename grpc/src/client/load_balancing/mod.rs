@@ -357,7 +357,30 @@ impl Display for dyn Subchannel {
 
 #[derive(Default)]
 struct WeakSubchannelMap<V> {
-    m: HashMap<*const dyn Subchannel, V>,
+    m: HashMap<SubchannelPtr, V>,
+}
+
+#[derive(Debug)]
+struct SubchannelPtr(*const dyn Subchannel);
+
+impl PartialEq for SubchannelPtr {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 as *const () == other.0 as *const ()
+    }
+}
+
+impl Eq for SubchannelPtr {}
+
+impl Hash for SubchannelPtr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.0 as *const () as usize).hash(state);
+    }
+}
+
+impl From<*const dyn Subchannel> for SubchannelPtr {
+    fn from(value: *const dyn Subchannel) -> Self {
+        SubchannelPtr(value)
+    }
 }
 
 unsafe impl<V: Send> Send for WeakSubchannelMap<V> {}
@@ -370,67 +393,74 @@ impl<V> WeakSubchannelMap<V> {
     }
 
     pub fn insert(&mut self, sc: Arc<dyn Subchannel>, v: V) -> Option<V> {
-        let weak = Arc::downgrade(&sc);
-        if self.m.contains_key(&weak.as_ptr()) {
-            // The key is not updated by this operation, so we need weak to be freed.
-            self.m.insert(weak.as_ptr(), v)
-        } else {
-            // The weak reference will not be lost as part of this operation.
-            self.m.insert(weak.into_raw(), v)
+        dbg!("INSERT", &sc);
+        let result = self.m.insert(Arc::as_ptr(&sc).into(), v);
+        if result.is_none() {
+            // The key did not previously exist, so we need to retain a weak
+            // reference to it.
+            let _ = Arc::downgrade(&sc).into_raw();
         }
+        result
     }
 
     pub fn get(&self, sc: &Arc<dyn Subchannel>) -> Option<&V> {
-        self.m.get(&Arc::as_ptr(&sc))
+        dbg!("GET", sc);
+        self.m.get(&Arc::as_ptr(&sc).into())
     }
 
     pub fn get_mut(&mut self, sc: &Arc<dyn Subchannel>) -> Option<&mut V> {
-        self.m.get_mut(&Arc::as_ptr(&sc))
+        dbg!("GET_MUT", sc);
+        self.m.get_mut(&Arc::as_ptr(&sc).into())
     }
 
-    pub fn values(&self) -> Values<'_, *const dyn Subchannel, V> {
-        todo!();
-        //self.m.values()
+    pub fn values(&self) -> Values<'_, SubchannelPtr, V> {
+        dbg!("VALUES");
+        self.m.values()
     }
 
     pub fn contains_key(&self, sc: &Arc<dyn Subchannel>) -> bool {
-        self.m.contains_key(&Arc::as_ptr(&sc))
+        dbg!("CONTAINS_KEY", sc);
+        self.m.contains_key(&Arc::as_ptr(sc).into())
     }
+    /*
+        pub fn remove(&mut self, sc: Arc<dyn Subchannel>) -> Option<V> {
+            self.m.remove(&Arc::as_ptr(&sc).into())
+            // TODO: free a weak reference if found in map.
+        }
 
-    pub fn remove(&mut self, sc: Arc<dyn Subchannel>) -> Option<V> {
-        self.m.remove(&Arc::into_raw(sc))
-    }
-
-    pub fn prune_unreferenced(&mut self) {
-        self.m.retain(|k, _| {
-            // Convert the pointer into a Weak<>, and if it upgrades, then keep it.
-            let weak = unsafe { Weak::from_raw(k) };
-            if weak.upgrade().is_some() {
-                _ = weak.into_raw();
-                // No drop weak.. it's stolen by into_raw.
-                return true;
-            }
-            // drop(weak);
-            return false;
-        })
-    }
+        pub fn prune_unreferenced(&mut self) {
+            self.m.retain(|k, _| {
+                // Convert the pointer into a Weak<>, and if it upgrades, then keep it.
+                let weak = unsafe { Weak::from_raw(k) };
+                if weak.upgrade().is_some() {
+                    _ = weak.into_raw();
+                    // No drop weak.. it's stolen by into_raw.
+                    return true;
+                }
+                // drop(weak);
+                return false;
+            })
+        }
+    */
 }
 
 impl<V> IntoIterator for WeakSubchannelMap<V> {
-    type IntoIter = IntoIter<*const dyn Subchannel, V>;
-    type Item = (*const dyn Subchannel, V);
+    type IntoIter = IntoIter<SubchannelPtr, V>;
+    type Item = (SubchannelPtr, V);
 
     fn into_iter(mut self) -> Self::IntoIter {
+        dbg!("INTO_ITER(mut self)");
         let m = mem::take(&mut self.m);
         m.into_iter()
     }
 }
 
 impl<'a, V> IntoIterator for &'a mut WeakSubchannelMap<V> {
-    type IntoIter = IterMut<'a, *const dyn Subchannel, V>;
-    type Item = (&'a *const dyn Subchannel, &'a mut V);
+    type IntoIter = IterMut<'a, SubchannelPtr, V>;
+    type Item = (&'a SubchannelPtr, &'a mut V);
 
     fn into_iter(self) -> Self::IntoIter {
+        dbg!("INTO_ITER(&mut self)");
         self.m.iter_mut()
     }
 }
@@ -438,8 +468,9 @@ impl<'a, V> IntoIterator for &'a mut WeakSubchannelMap<V> {
 impl<V> Drop for WeakSubchannelMap<V> {
     fn drop(&mut self) {
         for (k, _) in &self.m {
+            dbg!("DROP", &k);
             unsafe {
-                Weak::from_raw(k);
+                Weak::from_raw(k.0);
             }
         }
     }

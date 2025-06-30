@@ -153,7 +153,7 @@ impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
             HashMap::new();
 
         for (subchannel, child_idx) in old_subchannel_child_map {
-            let weak = unsafe { Weak::from_raw(subchannel) };
+            let weak = unsafe { Weak::from_raw(subchannel.0) };
             if let Some(strong) = weak.upgrade() {
                 old_child_subchannels_map
                     .entry(child_idx)
