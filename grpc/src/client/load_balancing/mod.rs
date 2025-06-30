@@ -403,9 +403,15 @@ impl Display for dyn Subchannel {
 
 struct WeakSubchannel(Weak<dyn Subchannel>);
 
-impl WeakSubchannel {
-    pub fn new(subchannel: Arc<dyn Subchannel>) -> Self {
+impl From<Arc<dyn Subchannel>> for WeakSubchannel {
+    fn from(subchannel: Arc<dyn Subchannel>) -> Self {
         WeakSubchannel(Arc::downgrade(&subchannel))
+    }
+}
+
+impl WeakSubchannel {
+    pub fn new(subchannel: &Arc<dyn Subchannel>) -> Self {
+        WeakSubchannel(Arc::downgrade(subchannel))
     }
 
     pub fn upgrade(&self) -> Option<Arc<dyn Subchannel>> {
