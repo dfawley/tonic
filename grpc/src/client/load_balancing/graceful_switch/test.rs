@@ -10,18 +10,22 @@ use crate::client::{load_balancing::
 impl GracefulSwitchPolicy {
     /// Returns the name of the current policy, if any.
     pub fn current_policy_name(&self) -> Option<String> {
-        self.current_policy_builder
+        self.managing_policy
             .lock()
             .unwrap()
+            .current_child
+            .policy_builder
             .as_ref()
             .map(|b| b.name().to_string())
     }
 
     /// Returns the name of the pending policy, if any.
     pub fn pending_policy_name(&self) -> Option<String> {
-        self.pending_policy_builder
+        self.managing_policy
             .lock()
             .unwrap()
+            .pending_child
+            .policy_builder
             .as_ref()
             .map(|b| b.name().to_string())
     }
