@@ -258,6 +258,17 @@ impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
             self.resolve_child_controller(channel_controller, child_idx);
         }
     }
+
+    fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController) {
+        let child_idxes = mem::take(&mut *self.pending_work.lock().unwrap());
+        for child_idx in child_idxes {
+            let mut channel_controller = WrappedController::new(channel_controller);
+            self.children[child_idx]
+                .policy
+                .exit_idle(&mut channel_controller);
+            self.resolve_child_controller(channel_controller, child_idx);
+        }
+    }
 }
 
 struct WrappedController<'a> {
