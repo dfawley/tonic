@@ -20,19 +20,18 @@ use core::panic;
 use serde::de;
 use std::{
     any::Any,
-    collections::{
-        hash_map::{IntoIter, Iter, IterMut, Values},
-        HashMap,
-    },
+    collections::{hash_map::Values, HashMap},
     error::Error,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
+    iter::FilterMap,
     mem,
     ops::{Add, Sub},
     sync::{
         atomic::{AtomicI64, Ordering::Relaxed},
         Arc, Mutex, Weak,
     },
+    vec::IntoIter,
 };
 use tokio::sync::{mpsc::Sender, Notify};
 use tonic::{metadata::MetadataMap, Status};
@@ -393,82 +392,91 @@ impl<V> WeakSubchannelMap<V> {
     }
 
     pub fn insert(&mut self, sc: Arc<dyn Subchannel>, v: V) -> Option<V> {
-        dbg!("INSERT", &sc);
         let result = self.m.insert(Arc::as_ptr(&sc).into(), v);
         if result.is_none() {
-            // The key did not previously exist, so we need to retain a weak
-            // reference to it.
-            let _ = Arc::downgrade(&sc).into_raw();
+            // The key is new, so we retain a weak reference to it.
+            _ = Arc::downgrade(&sc).into_raw();
         }
         result
     }
 
     pub fn get(&self, sc: &Arc<dyn Subchannel>) -> Option<&V> {
-        dbg!("GET", sc);
         self.m.get(&Arc::as_ptr(&sc).into())
     }
 
     pub fn get_mut(&mut self, sc: &Arc<dyn Subchannel>) -> Option<&mut V> {
-        dbg!("GET_MUT", sc);
         self.m.get_mut(&Arc::as_ptr(&sc).into())
     }
 
     pub fn values(&self) -> Values<'_, SubchannelPtr, V> {
-        dbg!("VALUES");
         self.m.values()
     }
 
     pub fn contains_key(&self, sc: &Arc<dyn Subchannel>) -> bool {
-        dbg!("CONTAINS_KEY", sc);
         self.m.contains_key(&Arc::as_ptr(sc).into())
     }
-    /*
-        pub fn remove(&mut self, sc: Arc<dyn Subchannel>) -> Option<V> {
-            self.m.remove(&Arc::as_ptr(&sc).into())
-            // TODO: free a weak reference if found in map.
-        }
 
-        pub fn prune_unreferenced(&mut self) {
-            self.m.retain(|k, _| {
-                // Convert the pointer into a Weak<>, and if it upgrades, then keep it.
-                let weak = unsafe { Weak::from_raw(k) };
-                if weak.upgrade().is_some() {
-                    _ = weak.into_raw();
-                    // No drop weak.. it's stolen by into_raw.
-                    return true;
-                }
-                // drop(weak);
-                return false;
-            })
-        }
-    */
+    pub fn remove(&mut self, sc: Arc<dyn Subchannel>) -> Option<V> {
+        todo!("free a weak reference to sc if not None")
+        // self.m.remove(&Arc::as_ptr(&sc).into())
+    }
+
+    pub fn prune_unreferenced(&mut self) {
+        self.m.retain(|k, _| {
+            // Convert the pointer into a Weak<>, and if it upgrades, then keep it.
+            let weak = unsafe { Weak::from_raw(k.0) };
+            if weak.upgrade().is_some() {
+                _ = weak.into_raw();
+                // No drop weak.. it's stolen by into_raw.
+                return true;
+            }
+            // Implicit drop(weak) decrements the weak ref count.
+            return false;
+        })
+    }
 }
 
 impl<V> IntoIterator for WeakSubchannelMap<V> {
-    type IntoIter = IntoIter<SubchannelPtr, V>;
-    type Item = (SubchannelPtr, V);
+    type IntoIter = IntoIter<(Arc<dyn Subchannel>, V)>;
+    type Item = (Arc<dyn Subchannel>, V);
 
     fn into_iter(mut self) -> Self::IntoIter {
-        dbg!("INTO_ITER(mut self)");
         let m = mem::take(&mut self.m);
         m.into_iter()
+            .filter_map(|(k, v)| {
+                let weak = unsafe { Weak::from_raw(k.0) };
+                if let Some(arc) = weak.upgrade() {
+                    return Some((arc, v));
+                }
+                None
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 
 impl<'a, V> IntoIterator for &'a mut WeakSubchannelMap<V> {
-    type IntoIter = IterMut<'a, SubchannelPtr, V>;
-    type Item = (&'a SubchannelPtr, &'a mut V);
+    type IntoIter = IntoIter<(Arc<dyn Subchannel>, &'a mut V)>;
+    type Item = (Arc<dyn Subchannel>, &'a mut V);
 
     fn into_iter(self) -> Self::IntoIter {
-        dbg!("INTO_ITER(&mut self)");
-        self.m.iter_mut()
+        self.m
+            .iter_mut()
+            .filter_map(|(k, v)| {
+                let weak = unsafe { Weak::from_raw(k.0) };
+                if let Some(arc) = weak.upgrade() {
+                    return Some((arc, v));
+                }
+                None
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 
 impl<V> Drop for WeakSubchannelMap<V> {
     fn drop(&mut self) {
         for (k, _) in &self.m {
-            dbg!("DROP", &k);
             unsafe {
                 Weak::from_raw(k.0);
             }
@@ -529,7 +537,7 @@ impl Drop for ExternalSubchannel {
         let watcher = self.watcher.lock().unwrap().take();
         let address = self.address().address.clone();
         let isc = self.isc.take();
-        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+        _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
             move |c: &mut InternalChannelController| {
                 println!("unregistering connectivity state watcher for {}", address);
                 isc.as_ref()

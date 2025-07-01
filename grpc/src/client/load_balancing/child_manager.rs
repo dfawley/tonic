@@ -45,8 +45,6 @@ pub struct ChildManager<T> {
     updated: bool, // true iff a child has updated its state since the last call to has_updated
 }
 
-pub trait ChildIdentifier: PartialEq + Hash + Eq + Send + Sync + 'static {}
-
 struct Child<T> {
     identifier: T,
     policy: Box<dyn LbPolicy>,
@@ -65,7 +63,7 @@ pub struct ChildUpdate<T> {
     pub child_update: ResolverUpdate,
 }
 
-pub trait ResolverUpdateSharder<T: ChildIdentifier>: Send {
+pub trait ResolverUpdateSharder<T>: Send {
     /// Performs the operation of sharding an aggregate ResolverUpdate into one
     /// or more ChildUpdates.  Called automatically by the ChildManager when its
     /// resolver_update method is called.  The key in the returned map is the
@@ -76,7 +74,7 @@ pub trait ResolverUpdateSharder<T: ChildIdentifier>: Send {
     ) -> Result<Box<dyn Iterator<Item = ChildUpdate<T>>>, Box<dyn Error + Send + Sync>>;
 }
 
-impl<T: ChildIdentifier> ChildManager<T> {
+impl<T> ChildManager<T> {
     /// Creates a new ChildManager LB policy.  shard_update is called whenever a
     /// resolver_update operation occurs.
     pub fn new(update_sharder: Box<dyn ResolverUpdateSharder<T>>) -> Self {
@@ -124,7 +122,7 @@ impl<T: ChildIdentifier> ChildManager<T> {
     }
 }
 
-impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
+impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> LbPolicy for ChildManager<T> {
     fn resolver_update(
         &mut self,
         resolver_update: ResolverUpdate,
@@ -153,13 +151,10 @@ impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
             HashMap::new();
 
         for (subchannel, child_idx) in old_subchannel_child_map {
-            let weak = unsafe { Weak::from_raw(subchannel.0) };
-            if let Some(strong) = weak.upgrade() {
-                old_child_subchannels_map
-                    .entry(child_idx)
-                    .or_default()
-                    .push(strong);
-            }
+            old_child_subchannels_map
+                .entry(child_idx)
+                .or_default()
+                .push(subchannel);
         }
 
         // Build a map of the old children from their IDs for efficient lookups.

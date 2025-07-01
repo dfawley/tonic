@@ -207,13 +207,6 @@ impl LbPolicy for PickFirstPolicy {
                 self.move_to_idle(channel_controller);
                 return;
             }
-            dbg!(
-                "addrs didn't match",
-                selected_sc.address(),
-                subchannel.address()
-            );
-        } else {
-            dbg!(&self.selected_subchannel);
         }
 
         debug_assert!(
@@ -596,11 +589,7 @@ impl SubchannelList {
     fn connect_to_all_subchannels(&mut self, channel_controller: &mut dyn ChannelController) {
         for (sc, data) in &mut self.subchannels {
             if data.state.as_ref().unwrap().connectivity_state == ConnectivityState::Idle {
-                let weak = unsafe { Weak::from_raw(sc.0) };
-                if let Some(sc) = weak.upgrade() {
-                    sc.connect();
-                }
-                let _ = Weak::into_raw(weak);
+                sc.connect();
             }
         }
     }
