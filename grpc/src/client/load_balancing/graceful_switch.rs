@@ -9,7 +9,6 @@ use crate::client::{
     
 };
 
-
 use std::{collections::{HashMap, HashSet}, error::Error, hash::Hash, mem, sync::{atomic::{AtomicUsize, Ordering}, Arc}};
 
 use crate::service::{Message, Request, Response, Service};
@@ -36,13 +35,8 @@ use crate::client::load_balancing::child_manager::ChildUpdate;
 use crate::client::load_balancing::child_manager::ResolverUpdateSharder;
 use crate::client::load_balancing::Pick;
 
-
-pub static POLICY_NAME: &str = "round_robin";
-
 #[cfg(test)]
 mod test;
-
-
 
 #[derive(Deserialize)]
 pub(super) struct GracefulSwitchConfig {
@@ -62,15 +56,11 @@ impl GracefulSwitchLbConfig{
         }
     }
 }
+
 /** 
 struct for round_robin
 */
-//wrap pick first in a LB policy that calls ExitIdle whenever a subchannel disconnects
 struct GracefulSwitchPolicy {
-    // mutex: Mutex<Arc<dyn LbPolicy>>,
-    // current_mutex: Mutex<Arc<dyn LbPolicy>>,
-    // current_policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
-    // pending_policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
     subchannel_to_policy: HashMap<WeakSubchannel, ChildKind>,
     managing_policy: Mutex<LatestPolicy>,
     closed: bool,
@@ -119,9 +109,9 @@ impl LbPolicy for GracefulSwitchPolicy{
                         println!("sending picker of current child");
                         wrapped_channel_controller.channel_controller.update_picker(picker);
                     }
-                   
                 }
             }
+
             ChildKind::Pending => {
                 println!("Sending resolver_update to Pending Child Policy.");
                 if let Some(ref mut pending_policy_instance) = managing_policy_guard.pending_child.policy {
@@ -133,10 +123,8 @@ impl LbPolicy for GracefulSwitchPolicy{
                 }
             }
         }
-
         drop(managing_policy_guard);
         self.resolve_child_controller(&mut wrapped_channel_controller, target_child_kind);
-
         Ok(())
     }
 
@@ -151,11 +139,9 @@ impl LbPolicy for GracefulSwitchPolicy{
             .subchannel_to_policy
             .get(&WeakSubchannel::new(&subchannel.clone()))
             .unwrap_or_else(|| {
-                panic!("Subchannel not found in child manager: {}", subchannel);
-            }).clone(); // Clone the ChildKind
-        // let current_policy_state = 
+                panic!("Subchannel not found in graceful switch: {}", subchannel);
+            }).clone(); 
         
-
         let mut managing_policy = self.managing_policy.lock().unwrap();
 
         match which_child {
@@ -168,13 +154,13 @@ impl LbPolicy for GracefulSwitchPolicy{
                     }
                 }
             }
+
             ChildKind::Current => {
                 if let Some(ref mut current_policy_instance) = managing_policy.current_child.policy {
                     current_policy_instance.subchannel_update(subchannel, state, &mut wrapped_channel_controller);
                     if let Some(picker) = wrapped_channel_controller.picker_update.take() {
                         managing_policy.current_child.policy_state = Some(picker.connectivity_state);
                         wrapped_channel_controller.channel_controller.update_picker(picker);
-                        
                     }
                 }
             }
@@ -235,7 +221,6 @@ impl GracefulSwitchPolicy {
         work_scheduler: Arc<dyn WorkScheduler>,
     ) -> Self {
         GracefulSwitchPolicy { 
-            
             subchannel_to_policy: HashMap::default(),
             managing_policy: Mutex::new(LatestPolicy::new()),
             closed: false,
@@ -288,9 +273,7 @@ impl GracefulSwitchPolicy {
         if let Some(picker) = managing_policy.pending_child.policy_picker_update.clone(){
             channel_controller.channel_controller.update_picker(picker);
         }
-        
         managing_policy.pending_child.policy_picker_update = None;
-     
     }
 
     fn parse_config(
@@ -363,8 +346,6 @@ impl GracefulSwitchPolicy {
             return ChildKind::Pending
         }
     }
-
-
 }
 
 // Struct to wrap a channel controller around. The purpose is to
@@ -399,7 +380,6 @@ impl ChannelController for WrappedController<'_> {
 
     fn update_picker(&mut self, update: LbState) {
         let update_clone = update.clone();
-        // self.channel_controller.update_picker(update);
         self.picker_update = Some(update_clone);
     }
 
@@ -411,7 +391,6 @@ impl ChannelController for WrappedController<'_> {
 
 struct ChildPolicy {
     policy_builder: Option<Arc<dyn LbPolicyBuilder>>,
-    // subchannel_to_policy: HashMap<WeakSubchannel, ChildKind>,
     policy: Option<Box<dyn LbPolicy>>,
     policy_state: Option<ConnectivityState>,
     policy_picker_update: Option<LbState>,
@@ -426,7 +405,6 @@ impl ChildPolicy {
             policy_picker_update: None
         }
     }
-
 }
 
 struct LatestPolicy {
@@ -469,8 +447,6 @@ impl LatestPolicy {
         }
         return false
     }
-
-  
 }
 
 impl ChildPolicy {

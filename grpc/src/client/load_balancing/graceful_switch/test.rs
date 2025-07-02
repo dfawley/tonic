@@ -6,7 +6,6 @@ use crate::client::{load_balancing::
     {graceful_switch::{self, GracefulSwitchPolicy}, pick_first, round_robin::{self, RoundRobinPicker,}, test_utils::{self, FakeChannel, MockBalancerOne, MockBalancerTwo, MockPickerOne, MockPickerTwo, TestEvent, TestWorkScheduler}, ChannelController, LbPolicy, LbPolicyBuilder, LbPolicyOptions, ParsedJsonLbConfig, PickResult, Picker, Subchannel, SubchannelState, GLOBAL_LB_REGISTRY}, 
     name_resolution::{Address, Endpoint, ResolverUpdate}, service_config::ServiceConfig, ConnectivityState};
 
-
 impl GracefulSwitchPolicy {
     /// Returns the name of the current policy, if any.
     pub fn current_policy_name(&self) -> Option<String> {
@@ -34,8 +33,6 @@ impl GracefulSwitchPolicy {
 fn setup() -> (
     mpsc::UnboundedReceiver<TestEvent>,
     Box< GracefulSwitchPolicy>,
-    // Box<dyn LbPolicy>,
-    // Box<dyn LbPolicy>,
     Box<dyn ChannelController>,
 ) {
     pick_first::reg();
@@ -48,14 +45,11 @@ fn setup() -> (
     let work_scheduler = Arc::new(TestWorkScheduler {
         tx_events: tx_events.clone(),
     });
-    // let tcc = Box::new(FakeChannel::new(tx_events.clone()));
+
     let tcc = Box::new(FakeChannel {
         tx_events: tx_events.clone(),
     });
-    // let builder: Arc<dyn LbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy("round_robin").unwrap();
-    // let lb_policy = builder.build(LbPolicyOptions { work_scheduler: work_scheduler.clone() });
-    // let second_builder: Arc<dyn LbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy("pick_first").unwrap();
-    // let second_lb_policy = builder.build(LbPolicyOptions { work_scheduler: work_scheduler.clone() });
+   
     let graceful_switch = GracefulSwitchPolicy::new(work_scheduler.clone());
     (rx_events, Box::new(graceful_switch), tcc)
 }
@@ -70,7 +64,7 @@ fn create_endpoint_with_one_address(addr: String) -> Endpoint {
     }
 }
 
-async fn verify_roundrobin_ready_picker_from_policy(
+async fn verify_gracefulswitch_ready_picker(
     rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
     subchannel: Arc<dyn Subchannel>,
 ) -> Arc<dyn Picker> {
@@ -79,12 +73,9 @@ async fn verify_roundrobin_ready_picker_from_policy(
         TestEvent::UpdatePicker(update) => {
             println!("connectivity state for ready picker is {}", update.connectivity_state);
             assert!(update.connectivity_state == ConnectivityState::Ready);
-            // assert!(update.picker == ReadyPickers);
             let req = test_utils::new_request();
             match update.picker.pick(&req) {
                 PickResult::Pick(pick) => {
-                    // println!("selected subchannel is {}", pick.subchannel);
-                    // println!("should've been selected subchannel is {}", subchannel);
                     assert!(pick.subchannel == subchannel.clone());
                     update.picker.clone()
                 }
@@ -103,12 +94,9 @@ async fn verify_subchannel_creation_from_policy(
 ) -> Vec<Arc<dyn Subchannel>> {
     println!("verifying subchannel creation");
     let mut subchannels = Vec::new();
-    // let mut seen: HashSet<Address> = HashSet::new();
     for address in addresses {
-        
         match rx_events.recv().await.unwrap() {
             TestEvent::NewSubchannel(addr, sc) => {
-                // assert!(addr == address.clone());
                 subchannels.push(sc);
             }
             other => panic!("unexpected event {}", other),
@@ -149,8 +137,6 @@ async fn verify_mock_policy_one_ready_picker_from_policy(
 // given subchannel.
 //
 // Returns the picker for tests to make more picks, if required.
-
-//need to update this? only takes care of one subchannel
 async fn verify_mock_policy_two_ready_picker_from_policy(
     rx_events: &mut mpsc::UnboundedReceiver<TestEvent>,
     subchannel: Arc<dyn Subchannel>,
@@ -190,6 +176,7 @@ async fn verify_connection_attempt_from_policy(
     };
    
 }
+
 // Verifies that the channel moves to CONNECTING state with a queuing picker.
 //
 // Returns the picker for tests to make more picks, if required.
@@ -308,7 +295,6 @@ async fn gracefulswitch_successful_first_update() {
             { "pick_first": serde_json::json!({ "shuffleAddressList": false }) }
         ]
     });
-    
 
     let parsed_config = GracefulSwitchPolicy::parse_config(&ParsedJsonLbConfig(service_config)).unwrap().unwrap();
 
@@ -348,8 +334,6 @@ async fn gracefulswitch_successful_first_update() {
     );
 }
 
-
-
 //Testing that a pending policy is created
 #[tokio::test]
 async fn gracefulswitch_switching_to_resolver_update() {
@@ -360,7 +344,6 @@ async fn gracefulswitch_switching_to_resolver_update() {
             { "pick_first": serde_json::json!({ "shuffleAddressList": false }) }
         ]
     });
-    // let service_config = ServiceConfig::from_json(&serde_json::to_value(&service_config).unwrap()).unwrap();
 
     let parsed_config = GracefulSwitchPolicy::parse_config(&ParsedJsonLbConfig(service_config)).unwrap().unwrap();
 
@@ -446,7 +429,7 @@ async fn gracefulswitch_mock_switching_to_resolver_update() {
     // Subchannel creation and ready
     let subchannels = verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
     verify_mock_connecting_picker_from_policy(&mut rx_events).await;
-    // send_initial_subchannel_updates_to_policy(&mut *graceful_switch, &subchannels, tcc.as_mut());
+
     move_subchannel_to_ready(&mut *graceful_switch, subchannels[0].clone(), tcc.as_mut());
 
     // Assert picker is MockPickerOne by checking subchannel address
@@ -483,8 +466,7 @@ async fn gracefulswitch_mock_switching_to_resolver_update() {
 
     // Simulate subchannel creation and ready for pending
     let subchannels_two = verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
-    // verify_mock_connecting_picker_from_policy(&mut rx_events).await;
-    // send_initial_subchannel_updates_to_policy(&mut *graceful_switch, &subchannels_two, tcc.as_mut());
+   
     move_subchannel_to_ready(&mut *graceful_switch, subchannels_two[0].clone(), tcc.as_mut());
 
     // Assert picker is MockPickerTwo by checking subchannel address
@@ -537,7 +519,7 @@ async fn gracefulswitch_two_balancers_same_type() {
 
     move_subchannel_to_ready(&mut *graceful_switch, roundrobin_subchannels[0].clone(), tcc.as_mut());
 
-    let picker = verify_roundrobin_ready_picker_from_policy(&mut rx_events, roundrobin_subchannels[0].clone()).await;
+    let picker = verify_gracefulswitch_ready_picker(&mut rx_events, roundrobin_subchannels[0].clone()).await;
 
     let service_config2 = serde_json::json!({
         "children_policies": [
@@ -604,7 +586,6 @@ async fn gracefulswitch_current_not_ready_pending_update() {
     let new_service_config = serde_json::json!({
         "children_policies": [
             { "pick_first": serde_json::json!({ "shuffleAddressList": false }) },
-           
         ]
     });
     let pickfirst_update = ResolverUpdate {
@@ -626,14 +607,11 @@ async fn gracefulswitch_current_not_ready_pending_update() {
         None,
         "Pending policy should be None after first update"
     );
-    
- 
 }
 
 #[tokio::test]
 async fn gracefulswitch_subchannel_tracking() {
     let (mut rx_events, mut graceful_switch, mut tcc) = setup();
-
     // 1. Initial switch to round_robin (acts as mockBalancerBuilder1)
     let service_config = serde_json::json!({
         "children_policies": [
@@ -664,11 +642,10 @@ async fn gracefulswitch_subchannel_tracking() {
         None,
         "Pending policy should be None after first update"
     );
-
     
     let current_subchannels = verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
     move_subchannel_to_ready(&mut *graceful_switch, current_subchannels[0].clone(), tcc.as_mut());
-    verify_roundrobin_ready_picker_from_policy(&mut rx_events, current_subchannels[0].clone()).await;
+    verify_gracefulswitch_ready_picker(&mut rx_events, current_subchannels[0].clone()).await;
 
     // 2. Switch to another round_robin (pending)
     let new_service_config = serde_json::json!({
@@ -739,7 +716,7 @@ async fn gracefulswitch_current_leaving_ready() {
     
     let current_subchannels = verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
     move_subchannel_to_ready(&mut *graceful_switch, current_subchannels[0].clone(), tcc.as_mut());
-    verify_roundrobin_ready_picker_from_policy(&mut rx_events, current_subchannels[0].clone()).await;
+    verify_gracefulswitch_ready_picker(&mut rx_events, current_subchannels[0].clone()).await;
 
     // 2. Switch to another round_robin (pending)
     let new_service_config = serde_json::json!({
@@ -784,9 +761,7 @@ async fn gracefulswitch_current_leaving_ready() {
         None,
         "Pending policy should be None after first update"
     );
-    move_subchannel_to_ready(&mut *graceful_switch, pending_subchannels[0].clone(), tcc.as_mut());
-    // let picker = verify_
-    
+    move_subchannel_to_ready(&mut *graceful_switch, pending_subchannels[0].clone(), tcc.as_mut());    
 }
 
 #[tokio::test]
@@ -825,7 +800,7 @@ async fn gracefulswitch_pending_replaced_by_another_pending() {
     
     let current_subchannels = verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
     move_subchannel_to_ready(&mut *graceful_switch, current_subchannels[0].clone(), tcc.as_mut());
-    verify_roundrobin_ready_picker_from_policy(&mut rx_events, current_subchannels[0].clone()).await;
+    verify_gracefulswitch_ready_picker(&mut rx_events, current_subchannels[0].clone()).await;
 
     // 2. Switch to another round_robin (pending)
     let new_service_config = serde_json::json!({
@@ -912,7 +887,7 @@ async fn gracefulswitch_updating_subchannel_removed_child() {
     
     let current_subchannels = verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.clone()).await;
     move_subchannel_to_ready(&mut *graceful_switch, current_subchannels[0].clone(), tcc.as_mut());
-    verify_roundrobin_ready_picker_from_policy(&mut rx_events, current_subchannels[0].clone()).await;
+    verify_gracefulswitch_ready_picker(&mut rx_events, current_subchannels[0].clone()).await;
 
     // 2. Switch to another round_robin (pending)
     let new_service_config = serde_json::json!({
@@ -941,7 +916,6 @@ async fn gracefulswitch_updating_subchannel_removed_child() {
         "Pending policy should be None after first update"
     );
     let pick_first_subchannels = verify_subchannel_creation_from_policy(&mut rx_events, pickfirst_endpoint.addresses).await;
-    // send_initial_subchannel_updates_to_policy(&mut *graceful_switch, pick_first_subchannels[0].clone(), tcc.as_mut());
 
     let new_service_config = serde_json::json!({
         "children_policies": [
@@ -964,9 +938,4 @@ async fn gracefulswitch_updating_subchannel_removed_child() {
         "Pending policy should be None after first update"
     );
     move_subchannel_to_ready(&mut *graceful_switch, pick_first_subchannels[0].clone(), tcc.as_mut());
-    // let result = panic::catch_unwind(|| {
-    //     move_subchannel_to_ready(&mut *graceful_switch, subchannel.clone(), tcc.as_mut());
-    // });
-
-    // assert!(result.is_err(), "Expected panic when moving subchannel to ready, but it did not panic");
 }
