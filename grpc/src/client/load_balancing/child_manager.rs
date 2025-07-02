@@ -58,7 +58,7 @@ pub struct ChildUpdate<T> {
     pub child_identifier: T,
     /// The builder the ChildManager should use to create this child if it does
     /// not exist.
-    pub child_policy_builder: Box<dyn LbPolicyBuilder>,
+    pub child_policy_builder: Arc<dyn LbPolicyBuilder>,
     /// The relevant ResolverUpdate to send to this child.
     pub child_update: ResolverUpdate,
 }
