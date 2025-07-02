@@ -230,7 +230,6 @@ impl ResolverUpdateSharder<Endpoint> for ResolverUpdateSharderStruct {
         resolver_update: ResolverUpdate,
     ) -> Result<Box<dyn Iterator<Item = ChildUpdate<Endpoint>>>, Box<dyn Error + Send + Sync>> {
         let mut hashmap = HashMap::new();
-        let builder = self.builder.clone();
         for endpoint in resolver_update.endpoints.clone().unwrap().iter() {
             println!("endpoint assigned to a child is {}", endpoint);
             let endpoint_owned = endpoint.clone();
