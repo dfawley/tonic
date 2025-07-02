@@ -44,6 +44,7 @@ pub struct ChildManager<T> {
 }
 
 pub trait ChildIdentifier: PartialEq + Hash + Eq + Send + Sync + 'static {}
+impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> ChildIdentifier for T {}
 
 struct Child<T> {
     identifier: T,
