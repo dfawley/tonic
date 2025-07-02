@@ -136,7 +136,6 @@ impl LbPolicyBuilder for WrappedPickFirstBuilder{
     }
 }
  
-
 impl LbPolicy for WrapperPickFirstPolicy {
 
     fn resolver_update(
@@ -159,8 +158,6 @@ impl LbPolicy for WrapperPickFirstPolicy {
         result
     }
         
-
-    
     fn subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
@@ -291,6 +288,7 @@ impl LbPolicy for RoundRobinPolicy {
         }
         Ok(())
     }
+
     fn subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
