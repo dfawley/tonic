@@ -1,14 +1,25 @@
 use crate::client::{
     load_balancing::{
-        ChannelController, ExternalSubchannel, ForwardingSubchannel, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState, ParsedJsonLbConfig, Pick, PickResult, Picker, Subchannel, SubchannelState, WorkScheduler
-    }, name_resolution::Address, service_config::LbConfig, ConnectivityState
+        ChannelController, ExternalSubchannel, ForwardingSubchannel, LbPolicy, LbPolicyBuilder,
+        LbPolicyOptions, LbState, ParsedJsonLbConfig, Pick, PickResult, Picker, Subchannel,
+        SubchannelState, WorkScheduler,
+    },
+    name_resolution::Address,
+    service_config::LbConfig,
+    ConnectivityState,
 };
 use crate::service::{Message, Request, Response, Service};
-use std::{
-    collections::HashMap, error::Error, fmt::Display, hash::{Hash, Hasher}, ops::Add, ptr, sync::Arc
-};
 use futures_util::future::ok;
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fmt::Display,
+    hash::{Hash, Hasher},
+    ops::Add,
+    ptr,
+    sync::Arc,
+};
 use tokio::{
     sync::{mpsc, Notify},
     task::AbortHandle,
@@ -144,7 +155,10 @@ impl LbPolicy for MockBalancerOne {
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Ok(ref endpoints) = update.endpoints {
-            let addresses: Vec<_> = endpoints.iter().flat_map(|ep| ep.addresses.clone()).collect();
+            let addresses: Vec<_> = endpoints
+                .iter()
+                .flat_map(|ep| ep.addresses.clone())
+                .collect();
             let scl = SubchannelList::new(&addresses, channel_controller);
             self.subchannel_list = Some(scl);
         }
@@ -163,11 +177,9 @@ impl LbPolicy for MockBalancerOne {
     ) {
         if let Some(ref mut scl) = self.subchannel_list {
             scl.update_subchannel_data(&subchannel, state);
-            println!("updating ready picker for mock balancer 2");
-            // Optionally, send a picker update to simulate state change
             channel_controller.update_picker(LbState {
                 connectivity_state: state.connectivity_state,
-                picker: Arc::new(MockPickerOne), // or MockPickerTwo
+                picker: Arc::new(MockPickerOne),
             });
         }
     }
@@ -181,6 +193,7 @@ impl LbPolicy for MockBalancerOne {
     }
 }
 
+
 impl LbPolicy for MockBalancerTwo {
     fn resolver_update(
         &mut self,
@@ -189,7 +202,10 @@ impl LbPolicy for MockBalancerTwo {
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Ok(ref endpoints) = update.endpoints {
-            let addresses: Vec<_> = endpoints.iter().flat_map(|ep| ep.addresses.clone()).collect();
+            let addresses: Vec<_> = endpoints
+                .iter()
+                .flat_map(|ep| ep.addresses.clone())
+                .collect();
             let scl = SubchannelList::new(&addresses, channel_controller);
             self.subchannel_list = Some(scl);
         }
@@ -207,12 +223,9 @@ impl LbPolicy for MockBalancerTwo {
         channel_controller: &mut dyn ChannelController,
     ) {
         if let Some(ref mut scl) = self.subchannel_list {
-            // scl.update_subchannel_data(&subchannel, state);
-            println!("updating ready picker for mock balancer 2");
-            // Optionally, send a picker update to simulate state change
             channel_controller.update_picker(LbState {
                 connectivity_state: state.connectivity_state,
-                picker: Arc::new(MockPickerTwo), // or MockPickerTwo
+                picker: Arc::new(MockPickerTwo),
             });
         }
     }
@@ -231,19 +244,11 @@ pub static MOCK_POLICY_TWO: &str = "mock_policy_two";
 struct MockPolicyOneBuilder {}
 struct MockPolicyTwoBuilder {}
 
-
 impl LbPolicyBuilder for MockPolicyOneBuilder {
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy> {
         Box::new(MockBalancerOne {
-            // work_scheduler: options.work_scheduler,
             subchannel_list: None,
-            // selected_subchannel: None,
-            // addresses: vec![],
-            // last_resolver_error: None,
-            // last_connection_error: None,
             connectivity_state: ConnectivityState::Connecting,
-            // sent_connecting_state: false,
-            // num_transient_failures: 0,
         })
     }
 
@@ -274,15 +279,8 @@ pub(super) struct MockConfig {
 impl LbPolicyBuilder for MockPolicyTwoBuilder {
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy> {
         Box::new(MockBalancerTwo {
-            // work_scheduler: options.work_scheduler,
             subchannel_list: None,
-            // selected_subchannel: None,
-            // addresses: vec![],
-            // last_resolver_error: None,
-            // last_connection_error: None,
             connectivity_state: ConnectivityState::Connecting,
-            // sent_connecting_state: false,
-            // num_transient_failures: 0,
         })
     }
 
@@ -302,8 +300,6 @@ impl LbPolicyBuilder for MockPolicyTwoBuilder {
         };
         Ok(Some(LbConfig::new(cfg)))
     }
-
-   
 }
 
 #[derive(Clone)]
@@ -341,13 +337,7 @@ impl SubchannelList {
             scl.ordered_subchannels.push(sc.clone());
             scl.subchannels.insert(sc, SubchannelData::new());
         }
-
-        println!("created new subchannel list with {} subchannels", scl.len());
         scl
-    }
-
-    fn len(&self) -> usize {
-        self.ordered_subchannels.len()
     }
 
     fn subchannel_data(&self, sc: &Arc<dyn Subchannel>) -> Option<SubchannelData> {
@@ -384,49 +374,6 @@ impl SubchannelList {
 
         old_state
     }
-
-
-    // Initiates a connection attempt to the next subchannel in the list that is
-    // IDLE. Returns false if there are no more subchannels in the list.
-    fn connect_to_next_subchannel(
-        &mut self,
-        channel_controller: &mut dyn ChannelController,
-    ) -> bool {
-        // Special case for the first connection attempt, as current_idx is set
-        // to 0 when the subchannel list is created.
-        if self.current_idx != 0 {
-            self.current_idx += 1;
-        }
-
-        for idx in self.current_idx..self.ordered_subchannels.len() {
-            // Grab the next subchannel and its data.
-            let sc = &self.ordered_subchannels[idx];
-            let sc_data = self.subchannels.get(sc).unwrap();
-
-            match &sc_data.state {
-                Some(state) => {
-                    if state.connectivity_state == ConnectivityState::Connecting
-                        || state.connectivity_state == ConnectivityState::TransientFailure
-                    {
-                        self.current_idx += 1;
-                        continue;
-                    } else if state.connectivity_state == ConnectivityState::Idle {
-                        sc.connect();
-                        return true;
-                    }
-                }
-                None => {
-                    debug_assert!(
-                        false,
-                        "No state available when asked to connect to subchannel: {}",
-                        sc,
-                    );
-                }
-            }
-        }
-        false
-    }
-
 }
 
 pub struct MockPickerOne;
@@ -435,7 +382,13 @@ pub struct MockPickerTwo;
 impl Picker for MockPickerOne {
     fn pick(&self, _req: &Request) -> PickResult {
         PickResult::Pick(Pick {
-            subchannel: Arc::new(TestSubchannel::new(Address { address: "one".to_string(), ..Default::default() }, mpsc::unbounded_channel().0)),
+            subchannel: Arc::new(TestSubchannel::new(
+                Address {
+                    address: "one".to_string(),
+                    ..Default::default()
+                },
+                mpsc::unbounded_channel().0,
+            )),
             on_complete: None,
             metadata: MetadataMap::new(),
         })
@@ -445,7 +398,13 @@ impl Picker for MockPickerOne {
 impl Picker for MockPickerTwo {
     fn pick(&self, _req: &Request) -> PickResult {
         PickResult::Pick(Pick {
-            subchannel: Arc::new(TestSubchannel::new(Address { address: "two".to_string(), ..Default::default() }, mpsc::unbounded_channel().0)),
+            subchannel: Arc::new(TestSubchannel::new(
+                Address {
+                    address: "two".to_string(),
+                    ..Default::default()
+                },
+                mpsc::unbounded_channel().0,
+            )),
             on_complete: None,
             metadata: MetadataMap::new(),
         })
