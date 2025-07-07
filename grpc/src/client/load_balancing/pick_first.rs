@@ -10,9 +10,9 @@ use std::{
 use crate::{
     client::{
         load_balancing::{
-            ChannelController, Failing, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState,
-            ParsedJsonLbConfig, Pick, PickResult, Picker, QueuingPicker, Subchannel,
-            ExternalSubchannel, SubchannelState, WorkScheduler,
+            ChannelController, ExternalSubchannel, Failing, LbPolicy, LbPolicyBuilder,
+            LbPolicyOptions, LbState, ParsedJsonLbConfig, Pick, PickResult, Picker, QueuingPicker,
+            Subchannel, SubchannelState, WorkScheduler,
         },
         name_resolution::{Address, Endpoint, ResolverUpdate},
         service_config::LbConfig,
@@ -223,22 +223,13 @@ impl LbPolicy for PickFirstPolicy {
         self.subchannel_list = Some(SubchannelList::new(&self.addresses, channel_controller));
     }
 
-    fn exit_idle(& mut self, channel_controller: &mut dyn ChannelController) {
-        println!("child calls exit_idle");
+    fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController) {
         if self.connectivity_state == ConnectivityState::Idle {
-            let prev_list = &self.subchannel_list;
             self.subchannel_list = Some(SubchannelList::new(&self.addresses, channel_controller));
             self.move_to_connecting(channel_controller);
-            // if let Some(subchannel_list) = self.subchannel_list.as_mut() {
-            // Initiate connection attempt to the first subchannel in the list
             if let Some(subchannel_list) = self.subchannel_list.as_mut() {
                 subchannel_list.connect_after_idle();
             }
-            // self.subcconnect_to_all_subchannels(channel_controller);
-            // if let Some(subchannel_list) = self.subchannel_list.as_mut() {
-            //     println!("connecting to all subchannels");
-            //     let _ = subchannel_list.connect_to_next_subchannel(channel_controller);
-            // }
         }
     }
 }
