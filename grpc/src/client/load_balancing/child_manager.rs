@@ -226,7 +226,7 @@ impl<T: ChildIdentifier> ChildManager<T> {
                 if current_connectivity_state != ConnectivityState::TransientFailure {
                     self.prev_state = ConnectivityState::TransientFailure;
                     let picker = Arc::new(Failing {
-                        error: "No children available".to_string(),
+                        error: "no children policies available".to_string(),
                     });
                     return Some(LbState {
                         connectivity_state: ConnectivityState::TransientFailure,
