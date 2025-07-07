@@ -247,6 +247,7 @@ enum ChildKind {
 }
 
 impl GracefulSwitchPolicy {
+    /// Create a new Graceful Switch policy
     pub fn new(work_scheduler: Arc<dyn WorkScheduler>) -> Self {
         GracefulSwitchPolicy {
             subchannel_to_policy: HashMap::default(),
@@ -294,16 +295,20 @@ impl GracefulSwitchPolicy {
 
     fn swap(&mut self, channel_controller: &mut WrappedController) {
         let mut managing_policy = self.managing_policy.lock().unwrap();
+
         managing_policy.current_child.policy = managing_policy.pending_child.policy.take();
         managing_policy.current_child.policy_builder =
             managing_policy.pending_child.policy_builder.take();
         managing_policy.current_child.policy_state =
             managing_policy.pending_child.policy_state.take();
+
         self.subchannel_to_policy
             .retain(|_, v| *v != ChildKind::Current);
+
         managing_policy.pending_child.policy = None;
         managing_policy.pending_child.policy_builder = None;
         managing_policy.pending_child.policy_state = None;
+
         if let Some(picker) = managing_policy.pending_child.policy_picker_update.clone() {
             channel_controller.channel_controller.update_picker(picker);
         }
@@ -347,7 +352,6 @@ impl GracefulSwitchPolicy {
                             );
                         }
                     };
-                    println!("child name in parse_config is {}", child.name());
                     let graceful_switch_lb_config =
                         GracefulSwitchLbConfig::new(child, Some(config));
                     return Ok(Some(LbConfig::new(Arc::new(graceful_switch_lb_config))));
