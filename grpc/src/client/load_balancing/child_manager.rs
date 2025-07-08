@@ -43,9 +43,6 @@ pub struct ChildManager<T> {
     pending_work: Arc<Mutex<HashSet<usize>>>,
 }
 
-pub trait ChildIdentifier: PartialEq + Hash + Eq + Send + Sync + 'static {}
-impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> ChildIdentifier for T {}
-
 struct Child<T> {
     identifier: T,
     policy: Box<dyn LbPolicy>,
@@ -64,7 +61,7 @@ pub struct ChildUpdate<T> {
     pub child_update: ResolverUpdate,
 }
 
-pub trait ResolverUpdateSharder<T: ChildIdentifier>: Send {
+pub trait ResolverUpdateSharder<T>: Send {
     /// Performs the operation of sharding an aggregate ResolverUpdate into one
     /// or more ChildUpdates.  Called automatically by the ChildManager when its
     /// resolver_update method is called.  The key in the returned map is the
@@ -75,7 +72,7 @@ pub trait ResolverUpdateSharder<T: ChildIdentifier>: Send {
     ) -> Result<Box<dyn Iterator<Item = ChildUpdate<T>>>, Box<dyn Error + Send + Sync>>;
 }
 
-impl<T: ChildIdentifier> ChildManager<T> {
+impl<T> ChildManager<T> {
     /// Creates a new ChildManager LB policy.  shard_update is called whenever a
     /// resolver_update operation occurs.
     pub fn new(update_sharder: Box<dyn ResolverUpdateSharder<T>>) -> Self {
@@ -117,7 +114,7 @@ impl<T: ChildIdentifier> ChildManager<T> {
     }
 }
 
-impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
+impl<T: PartialEq + Hash + Eq + Send + Sync + 'static> LbPolicy for ChildManager<T> {
     fn resolver_update(
         &mut self,
         resolver_update: ResolverUpdate,
