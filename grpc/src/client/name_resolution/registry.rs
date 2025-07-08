@@ -43,10 +43,7 @@ impl ResolverRegistry {
     /// The provided scheme is case-insensitive; any uppercase characters
     /// will be converted to lowercase before lookup.
     pub fn get(&self, scheme: &str) -> Option<Arc<dyn ResolverBuilder>> {
-        self.m
-            .lock()
-            .unwrap()
-            .get(&scheme.to_lowercase()).cloned()
+        self.m.lock().unwrap().get(&scheme.to_lowercase()).cloned()
     }
 }
 
