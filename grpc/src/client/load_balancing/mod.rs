@@ -2,17 +2,23 @@
  *
  * Copyright 2025 gRPC authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  *
  */
 
@@ -51,9 +57,9 @@ pub mod pick_first;
 #[cfg(test)]
 pub mod test_utils;
 
-mod registry;
+pub(crate) mod registry;
 use super::{service_config::LbConfig, subchannel::SubchannelStateWatcher};
-pub use registry::{LbPolicyRegistry, GLOBAL_LB_REGISTRY};
+pub(crate) use registry::{LbPolicyRegistry, GLOBAL_LB_REGISTRY};
 
 /// A collection of data configured on the channel that is constructing this
 /// LbPolicy.
@@ -73,17 +79,36 @@ pub trait WorkScheduler: Send + Sync {
     fn schedule_work(&self);
 }
 
-// Abstract representation of the configuration for any LB policy, stored as
-// JSON.  Hides internal storage details and includes a method to deserialize
-// the JSON into a concrete policy struct.
+/// Abstract representation of the configuration for any LB policy, stored as
+/// JSON.  Hides internal storage details and includes a method to deserialize
+/// the JSON into a concrete policy struct.
 #[derive(Debug)]
-pub struct ParsedJsonLbConfig(pub serde_json::Value);
+pub struct ParsedJsonLbConfig {
+    value: serde_json::Value,
+}
 
 impl ParsedJsonLbConfig {
+    /// Creates a new ParsedJsonLbConfig from the provided JSON string.
+    pub fn new(json: &str) -> Result<Self, String> {
+        match serde_json::from_str(json) {
+            Ok(value) => Ok(ParsedJsonLbConfig { value }),
+            Err(e) => Err(format!("failed to parse LB config JSON: {}", e)),
+        }
+    }
+
+    pub(crate) fn from_value(value: serde_json::Value) -> Self {
+        Self { value }
+    }
+
+    /// Converts the JSON configuration into a concrete type that represents the
+    /// configuration of an LB policy.
+    ///
+    /// This will typically be used by the LB policy builder to parse the
+    /// configuration into a type that can be used by the LB policy.
     pub fn convert_to<T: serde::de::DeserializeOwned>(
         &self,
     ) -> Result<T, Box<dyn Error + Send + Sync>> {
-        let res: T = match serde_json::from_value(self.0.clone()) {
+        let res: T = match serde_json::from_value(self.value.clone()) {
             Ok(v) => v,
             Err(e) => {
                 return Err(format!("{}", e).into());
@@ -95,7 +120,7 @@ impl ParsedJsonLbConfig {
 
 /// An LB policy factory that produces LbPolicy instances used by the channel
 /// to manage connections and pick connections for RPCs.
-pub trait LbPolicyBuilder: Send + Sync {
+pub(crate) trait LbPolicyBuilder: Send + Sync {
     /// Builds and returns a new LB policy instance.
     ///
     /// Note that build must not fail.  Any optional configuration is delivered
@@ -114,7 +139,7 @@ pub trait LbPolicyBuilder: Send + Sync {
     /// default implementation returns Ok(None).
     fn parse_config(
         &self,
-        config: &ParsedJsonLbConfig,
+        _config: &ParsedJsonLbConfig,
     ) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
         Ok(None)
     }
@@ -494,7 +519,7 @@ impl Drop for ExternalSubchannel {
         let isc = self.isc.take();
         let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
             move |c: &mut InternalChannelController| {
-                println!("unregistering connectivity state watcher for {}", address);
+                println!("unregistering connectivity state watcher for {:?}", address);
                 isc.as_ref()
                     .unwrap()
                     .unregister_connectivity_state_watcher(watcher.unwrap());

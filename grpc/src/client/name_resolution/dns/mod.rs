@@ -1,27 +1,52 @@
+/*
+ *
+ * Copyright 2025 gRPC authors.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ *
+ */
+
 //! This module implements a DNS resolver to be installed as the default resolver
 //! in grpc.
 
 use std::{
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 
-use once_cell::sync::Lazy;
-use tokio::sync::mpsc::UnboundedSender;
+use parking_lot::Mutex;
+use tokio::sync::Notify;
 use url::Host;
 
 use crate::{
-    client::name_resolution::{
-        passthrough::{self, NopResolver},
-        Address, ResolverUpdate, TCP_IP_NETWORK_TYPE,
-    },
-    rt,
+    byte_str::ByteStr,
+    client::name_resolution::{global_registry, ChannelController, ResolverBuilder, Target},
+    rt::{self, TaskHandle},
 };
 
 use super::{
-    backoff::{self, BackoffConfig, ExponentialBackoff, DEFAULT_EXPONENTIAL_CONFIG},
-    Endpoint, Resolver, ResolverBuilder, GLOBAL_RESOLVER_REGISTRY,
+    backoff::{BackoffConfig, ExponentialBackoff, DEFAULT_EXPONENTIAL_CONFIG},
+    Address, Endpoint, NopResolver, Resolver, ResolverOptions, ResolverUpdate, TCP_IP_NETWORK_TYPE,
 };
 
 #[cfg(test)]
@@ -36,31 +61,47 @@ const DEFAULT_DNS_PORT: u16 = 53;
 ///
 /// It is recommended to set this value at application startup. Avoid modifying
 /// this variable after initialization.
-static RESOLVING_TIMEOUT: Lazy<Mutex<Duration>> = Lazy::new(|| Mutex::new(Duration::from_secs(30)));
+static RESOLVING_TIMEOUT_MS: AtomicU64 = AtomicU64::new(30_000); // 30 seconds
 
 /// This is the minimum interval at which re-resolutions are allowed. This helps
 /// to prevent excessive re-resolution.
-static MIN_RESOLUTION_INTERVAL: Lazy<Mutex<Duration>> =
-    Lazy::new(|| Mutex::new(Duration::from_secs(30)));
+static MIN_RESOLUTION_INTERVAL_MS: AtomicU64 = AtomicU64::new(30_000); // 30 seconds
 
-pub fn get_resolving_timeout() -> Duration {
-    *RESOLVING_TIMEOUT.lock().unwrap()
+fn get_resolving_timeout() -> Duration {
+    Duration::from_millis(RESOLVING_TIMEOUT_MS.load(Ordering::Relaxed))
 }
 
+/// Sets the maximum duration for DNS resolution requests.
+///
+/// This function affects the global timeout used by all channels using the DNS
+/// name resolver scheme.
+///
+/// It must be called only at application startup, before any gRPC calls are
+/// made.
+///
+/// The default value is 30 seconds. Setting the timeout too low may result in
+/// premature timeouts during resolution, while setting it too high may lead to
+/// unnecessary delays in service discovery. Choose a value appropriate for your
+/// specific needs and network environment.
 pub fn set_resolving_timeout(duration: Duration) {
-    *RESOLVING_TIMEOUT.lock().unwrap() = duration;
+    RESOLVING_TIMEOUT_MS.store(duration.as_millis() as u64, Ordering::Relaxed);
 }
 
-pub fn get_min_resolution_interval() -> Duration {
-    *MIN_RESOLUTION_INTERVAL.lock().unwrap()
+fn get_min_resolution_interval() -> Duration {
+    Duration::from_millis(MIN_RESOLUTION_INTERVAL_MS.load(Ordering::Relaxed))
 }
 
+/// Sets the default minimum interval at which DNS re-resolutions are allowed.
+/// This helps to prevent excessive re-resolution.
+///
+/// It must be called only at application startup, before any gRPC calls are
+/// made.
 pub fn set_min_resolution_interval(duration: Duration) {
-    *MIN_RESOLUTION_INTERVAL.lock().unwrap() = duration;
+    MIN_RESOLUTION_INTERVAL_MS.store(duration.as_millis() as u64, Ordering::Relaxed);
 }
 
 pub fn reg() {
-    GLOBAL_RESOLVER_REGISTRY.add_builder(Box::new(Builder {}));
+    global_registry().add_builder(Box::new(Builder {}));
 }
 
 struct Builder {}
@@ -69,14 +110,92 @@ struct DnsOptions {
     min_resolution_interval: Duration,
     resolving_timeout: Duration,
     backoff_config: BackoffConfig,
+    host: String,
+    port: u16,
 }
 
 impl DnsResolver {
     fn new(
-        target: &super::Target,
-        options: super::ResolverOptions,
+        dns_client: Box<dyn rt::DnsResolver>,
+        options: ResolverOptions,
         dns_opts: DnsOptions,
-    ) -> Box<dyn Resolver + 'static> {
+    ) -> Self {
+        let state = Arc::new(Mutex::new(InternalState {
+            addrs: Ok(Vec::new()),
+            channel_response: None,
+        }));
+        let state_copy = state.clone();
+        let resolve_now_notify = Arc::new(Notify::new());
+        let channel_updated_notify = Arc::new(Notify::new());
+        let channel_updated_rx = channel_updated_notify.clone();
+        let resolve_now_rx = resolve_now_notify.clone();
+
+        let runtime = options.runtime.clone();
+        let work_scheduler = options.work_scheduler.clone();
+        let handle = options.runtime.spawn(Box::pin(async move {
+            let mut backoff = ExponentialBackoff::new(dns_opts.backoff_config.clone())
+                .expect("default exponential config must be valid");
+            let state = state_copy;
+            loop {
+                let mut lookup_fut = dns_client.lookup_host_name(&dns_opts.host);
+                let mut timeout_fut = runtime.sleep(dns_opts.resolving_timeout);
+                let addrs = tokio::select! {
+                    result = &mut lookup_fut => {
+                        match result {
+                            Ok(ips) => {
+                                let addrs = ips
+                                    .into_iter()
+                                    .map(|ip| SocketAddr::new(ip, dns_opts.port))
+                                    .collect();
+                                Ok(addrs)
+                            }
+                            Err(err) => Err(err),
+                        }
+                    }
+                    _ = &mut timeout_fut => {
+                        Err("Timed out waiting for DNS resolution".to_string())
+                    }
+                };
+                {
+                    state.lock().addrs = addrs;
+                }
+                work_scheduler.schedule_work();
+                channel_updated_rx.notified().await;
+                let channel_response = { state.lock().channel_response.take() };
+                let next_resoltion_time = if let Some(_) = channel_response {
+                    SystemTime::now()
+                        .checked_add(backoff.backoff_duration())
+                        .unwrap()
+                } else {
+                    // Success resolving, wait for the next resolve_now. However,
+                    // also wait MIN_RESOLUTION_INTERVAL at the very least to prevent
+                    // constantly re-resolving.
+                    backoff.reset();
+                    let res_time = SystemTime::now()
+                        .checked_add(dns_opts.min_resolution_interval)
+                        .unwrap();
+                    _ = resolve_now_rx.notified().await;
+                    res_time
+                };
+                // Wait till next resolution time.
+                let Ok(duration) = next_resoltion_time.duration_since(SystemTime::now()) else {
+                    continue; // Time has already passed.
+                };
+                runtime.sleep(duration).await;
+            }
+        }));
+
+        Self {
+            state,
+            task_handle: handle,
+            resolve_now_notifier: resolve_now_notify,
+            channel_update_notifier: channel_updated_notify,
+        }
+    }
+}
+
+impl ResolverBuilder for Builder {
+    fn build(&self, target: &Target, options: ResolverOptions) -> Box<dyn Resolver> {
         let parsed = match parse_endpoint_and_authority(target) {
             Ok(res) => res,
             Err(err) => return nop_resolver_for_err(err.to_string(), options),
@@ -92,108 +211,27 @@ impl DnsResolver {
             }
         };
         let authority = parsed.authority;
-        let dns = match options.runtime.get_dns_resolver(rt::ResolverOptions {
+        let dns_client = match options.runtime.get_dns_resolver(rt::ResolverOptions {
             server_addr: authority,
         }) {
             Ok(dns) => dns,
             Err(err) => return nop_resolver_for_err(err.to_string(), options),
         };
-        let state = Arc::new(Mutex::new(InternalState {
-            addrs: Ok(Vec::new()),
-        }));
-        let state_copy = state.clone();
-        let (resolve_now_tx, mut resolve_now_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let (update_error_tx, update_error_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
-
-        let handle = options.runtime.clone().spawn(Box::pin(async move {
-            let backoff = ExponentialBackoff::new(dns_opts.backoff_config.clone());
-            let state = state_copy;
-            let work_scheduler = options.work_scheduler;
-            let mut update_error_rx = update_error_rx;
-            loop {
-                let mut lookup_fut = dns.lookup_host_name(&host);
-                let mut timeout_fut = options.runtime.sleep(dns_opts.resolving_timeout);
-                let addrs = tokio::select! {
-                    result = &mut lookup_fut => {
-                        match result {
-                            Ok(ips) => {
-                                let addrs = ips
-                                    .into_iter()
-                                    .map(|ip| SocketAddr::new(ip, endpoint.port))
-                                    .collect();
-                                Ok(addrs)
-                            }
-                            Err(err) => Err(err),
-                        }
-                    }
-                    _ = &mut timeout_fut => {
-                        Err("Timed out waiting for DNS resolution".to_string())
-                    }
-                };
-                {
-                    let mut internal_state = match state.lock() {
-                        Ok(state) => state,
-                        Err(_) => return,
-                    };
-                    internal_state.addrs = addrs;
-                }
-                work_scheduler.schedule_work();
-                let update_result = match update_error_rx.recv().await {
-                    Some(res) => res,
-                    None => return,
-                };
-                let next_resoltion_time: SystemTime;
-                if update_result.is_err() {
-                    next_resoltion_time = SystemTime::now()
-                        .checked_add(backoff.backoff_duration())
-                        .unwrap();
-                } else {
-                    // Success resolving, wait for the next resolve_now. However,
-                    // also wait MIN_RESOLUTION_INTERVAL at the very least to prevent
-                    // constantly re-resolving.
-                    backoff.reset();
-                    next_resoltion_time = SystemTime::now()
-                        .checked_add(dns_opts.min_resolution_interval)
-                        .unwrap();
-                    _ = resolve_now_rx.recv().await;
-                }
-                // Wait till next resolution time.
-                match next_resoltion_time.duration_since(SystemTime::now()) {
-                    Ok(d) => options.runtime.sleep(d).await,
-                    Err(_) => continue, // Time has already passed.
-                };
-            }
-        }));
-
-        Box::new(DnsResolver {
-            state,
-            task_handle: handle,
-            resolve_now_requester: resolve_now_tx,
-            update_error_sender: update_error_tx,
-        })
-    }
-}
-
-impl ResolverBuilder for Builder {
-    fn build(
-        &self,
-        target: &super::Target,
-        options: super::ResolverOptions,
-    ) -> Box<dyn super::Resolver> {
         let dns_opts = DnsOptions {
             min_resolution_interval: get_min_resolution_interval(),
             resolving_timeout: get_resolving_timeout(),
             backoff_config: DEFAULT_EXPONENTIAL_CONFIG,
+            host,
+            port: endpoint.port,
         };
-        DnsResolver::new(target, options, dns_opts)
+        Box::new(DnsResolver::new(dns_client, options, dns_opts))
     }
 
-    fn scheme(&self) -> &str {
+    fn scheme(&self) -> &'static str {
         "dns"
     }
 
-    fn is_valid_uri(&self, target: &super::Target) -> bool {
+    fn is_valid_uri(&self, target: &Target) -> bool {
         if let Err(err) = parse_endpoint_and_authority(target) {
             eprintln!("{}", err);
             false
@@ -205,28 +243,24 @@ impl ResolverBuilder for Builder {
 
 struct DnsResolver {
     state: Arc<Mutex<InternalState>>,
-    task_handle: Box<dyn rt::TaskHandle>,
-    resolve_now_requester: UnboundedSender<()>,
-    update_error_sender: UnboundedSender<Result<(), String>>,
+    task_handle: Box<dyn TaskHandle>,
+    resolve_now_notifier: Arc<Notify>,
+    channel_update_notifier: Arc<Notify>,
 }
 
 struct InternalState {
     addrs: Result<Vec<SocketAddr>, String>,
+    // Error from the latest call to channel_controller.update().
+    channel_response: Option<String>,
 }
 
 impl Resolver for DnsResolver {
     fn resolve_now(&mut self) {
-        _ = self.resolve_now_requester.send(());
+        self.resolve_now_notifier.notify_one();
     }
 
-    fn work(&mut self, channel_controller: &mut dyn super::ChannelController) {
-        let state = match self.state.lock() {
-            Err(_) => {
-                eprintln!("DNS resolver mutex poisoned, can't update channel");
-                return;
-            }
-            Ok(s) => s,
-        };
+    fn work(&mut self, channel_controller: &mut dyn ChannelController) {
+        let mut state = self.state.lock();
         let endpoint_result = match &state.addrs {
             Ok(addrs) => {
                 let endpoints: Vec<_> = addrs
@@ -234,7 +268,7 @@ impl Resolver for DnsResolver {
                     .map(|a| Endpoint {
                         addresses: vec![Address {
                             network_type: TCP_IP_NETWORK_TYPE,
-                            address: a.to_string(),
+                            address: ByteStr::from(a.to_string()),
                             ..Default::default()
                         }],
                         ..Default::default()
@@ -249,7 +283,8 @@ impl Resolver for DnsResolver {
             ..Default::default()
         };
         let status = channel_controller.update(update);
-        _ = self.update_error_sender.send(status);
+        state.channel_response = status.err();
+        self.channel_update_notifier.notify_one();
     }
 }
 
@@ -271,7 +306,7 @@ struct ParseResult {
     authority: Option<SocketAddr>,
 }
 
-fn parse_endpoint_and_authority(target: &super::Target) -> Result<ParseResult, String> {
+fn parse_endpoint_and_authority(target: &Target) -> Result<ParseResult, String> {
     // Parse the endpoint.
     let endpoint = target.path();
     let endpoint = endpoint.strip_prefix("/").unwrap_or(endpoint);
@@ -311,7 +346,7 @@ fn parse_endpoint_and_authority(target: &super::Target) -> Result<ParseResult, S
 /// Takes the user input string of the format "host:port" and default port,
 /// returns the parsed host and port. If string doesn't specify a port, the
 /// default_port is returned. If the string doesn't specify the host,
-/// Result<None> is returned.
+/// Ok(None) is returned.
 fn parse_host_port(host_and_port: &str, default_port: u16) -> Result<Option<HostPort>, String> {
     // We need to use the https scheme otherwise url::Url::parse doesn't convert
     // IP addresses to Host::Ipv4 or Host::Ipv6 if they could represent valid
@@ -332,18 +367,14 @@ fn parse_host_port(host_and_port: &str, default_port: u16) -> Result<Option<Host
     Ok(Some(HostPort { host, port }))
 }
 
-fn nop_resolver_for_ip(
-    ip: IpAddr,
-    port: u16,
-    options: super::ResolverOptions,
-) -> Box<dyn super::Resolver> {
+fn nop_resolver_for_ip(ip: IpAddr, port: u16, options: ResolverOptions) -> Box<dyn Resolver> {
     options.work_scheduler.schedule_work();
     Box::new(NopResolver {
         update: ResolverUpdate {
             endpoints: Ok(vec![Endpoint {
                 addresses: vec![Address {
                     network_type: TCP_IP_NETWORK_TYPE,
-                    address: SocketAddr::new(ip, port).to_string(),
+                    address: ByteStr::from(SocketAddr::new(ip, port).to_string()),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -353,7 +384,7 @@ fn nop_resolver_for_ip(
     })
 }
 
-fn nop_resolver_for_err(err: String, options: super::ResolverOptions) -> Box<dyn super::Resolver> {
+fn nop_resolver_for_err(err: String, options: ResolverOptions) -> Box<dyn Resolver> {
     options.work_scheduler.schedule_work();
     Box::new(NopResolver {
         update: ResolverUpdate {

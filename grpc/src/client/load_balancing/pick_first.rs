@@ -10,9 +10,9 @@ use std::{
 use crate::{
     client::{
         load_balancing::{
-            ChannelController, Failing, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState,
-            ParsedJsonLbConfig, Pick, PickResult, Picker, QueuingPicker, Subchannel,
-            ExternalSubchannel, SubchannelState, WorkScheduler,
+            ChannelController, ExternalSubchannel, Failing, LbPolicy, LbPolicyBuilder,
+            LbPolicyOptions, LbState, ParsedJsonLbConfig, Pick, PickResult, Picker, QueuingPicker,
+            Subchannel, SubchannelState, WorkScheduler,
         },
         name_resolution::{Address, Endpoint, ResolverUpdate},
         service_config::LbConfig,
@@ -22,7 +22,7 @@ use crate::{
 };
 
 use once_cell::sync::Lazy;
-use rand::{self, rngs::StdRng, seq::SliceRandom, thread_rng, Rng, RngCore, SeedableRng};
+use rand::{self, rng, rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::time::sleep;
@@ -32,14 +32,14 @@ type EndpointShuffler = dyn Fn(&mut [Endpoint]) + Send + Sync + 'static;
 pub static SHUFFLE_ENDPOINTS_FN: LazyLock<Mutex<Box<EndpointShuffler>>> =
     std::sync::LazyLock::new(|| {
         let shuffle_endpoints: Box<EndpointShuffler> = Box::new(|endpoints: &mut [Endpoint]| {
-            let mut rng = thread_rng();
+            let mut rng = rng();
             endpoints.shuffle(&mut rng);
         });
         Mutex::new(shuffle_endpoints)
     });
 pub(crate) fn thread_rng_shuffler() -> Box<EndpointShuffler> {
     Box::new(|endpoints: &mut [Endpoint]| {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         endpoints.shuffle(&mut rng);
     })
 }
@@ -225,7 +225,7 @@ impl LbPolicy for PickFirstPolicy {
 }
 
 fn shuffle_endpoints(endpoints: &mut [Endpoint]) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     endpoints.shuffle(&mut rng);
 }
 

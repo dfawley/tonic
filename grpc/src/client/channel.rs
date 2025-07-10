@@ -1,3 +1,27 @@
+/*
+ *
+ * Copyright 2025 gRPC authors.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ *
+ */
+
 use core::panic;
 use std::{
     any::Any,
@@ -40,8 +64,7 @@ use super::{
 };
 use super::{
     name_resolution::{
-        self, Address, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
-        GLOBAL_RESOLVER_REGISTRY,
+        self, global_registry, Address, ResolverBuilder, ResolverOptions, ResolverUpdate,
     },
     subchannel,
 };
@@ -59,7 +82,7 @@ pub struct ChannelOptions {
     pub idle_timeout: Duration,
     pub transport_registry: Option<TransportRegistry>,
     pub name_resolver_registry: Option<LbPolicyRegistry>,
-    pub lb_policy_registry: Option<ResolverRegistry>,
+    // TODO: pub lb_policy_registry: Option<ResolverRegistry>,
 
     // Typically we allow settings at the channel level that impact all RPCs,
     // but can also be set per-RPC.  E.g.s:
@@ -93,7 +116,6 @@ impl Default for ChannelOptions {
             max_retry_memory: 8 * 1024 * 1024, // 8MB -- ???
             idle_timeout: Duration::from_secs(30 * 60),
             name_resolver_registry: None,
-            lb_policy_registry: None,
             default_request_extensions: vec![],
             transport_registry: None,
         }
@@ -127,21 +149,27 @@ pub struct Channel {
 }
 
 impl Channel {
+    /// Constructs a new gRPC channel.  A gRPC channel is a virtual, persistent
+    /// connection to a service.  Channel creation cannot fail, but if the
+    /// target string is invalid, the returned channel will never connect, and
+    /// will fail all RPCs.
+    // TODO: should this return a Result instead?
     pub fn new(
         target: &str,
         credentials: Option<Box<dyn Credentials>>,
-        runtime: Option<Box<dyn rt::Runtime>>,
         options: ChannelOptions,
     ) -> Self {
+        pick_first::reg();
         Self {
             inner: Arc::new(PersistentChannel::new(
                 target,
                 credentials,
-                Arc::from(runtime.unwrap_or(Box::new(rt::tokio::TokioRuntime {}))),
+                Arc::new(rt::tokio::TokioRuntime {}),
                 options,
             )),
         }
     }
+
     // Waits until all outstanding RPCs are completed, then stops the client
     // (via "drop"? no, that makes no sense).  Note that there probably needs to
     // be a way to add a timeout here or for the application to do a hard
@@ -205,6 +233,10 @@ impl Channel {
     }
 }
 
+// A PersistentChannel represents the static configuration of a channel and an
+// optional Arc of an ActiveChannel.  An ActiveChannel exists whenever the
+// PersistentChannel is not IDLE.  Every channel is IDLE at creation, or after
+// some configurable timeout elapses without any any RPC activity.
 struct PersistentChannel {
     target: Url,
     options: ChannelOptions,
@@ -217,7 +249,7 @@ impl PersistentChannel {
     // are not in ChannelOptions.
     fn new(
         target: &str,
-        credentials: Option<Box<dyn Credentials>>,
+        _credentials: Option<Box<dyn Credentials>>,
         runtime: Arc<dyn rt::Runtime>,
         options: ChannelOptions,
     ) -> Self {
@@ -260,7 +292,7 @@ impl ActiveChannel {
         let resolver_helper = Box::new(tx.clone());
 
         // TODO(arjan-bal): Return error here instead of panicking.
-        let rb = GLOBAL_RESOLVER_REGISTRY.get(target.scheme()).unwrap();
+        let rb = global_registry().get(target.scheme()).unwrap();
         let target = name_resolution::Target::from(target);
         let authority = target.authority_host_port();
         let authority = if authority.is_empty() {
@@ -507,9 +539,12 @@ impl GracefulSwitchBalancer {
 
         // TODO: config should come from ServiceConfig.
         let builder = self.policy_builder.lock().unwrap();
-        let config = match builder.as_ref().unwrap().parse_config(&ParsedJsonLbConfig(
-            json!({"shuffleAddressList": true, "unknown_field": false}),
-        )) {
+        let config = match builder
+            .as_ref()
+            .unwrap()
+            .parse_config(&ParsedJsonLbConfig::from_value(
+                json!({"shuffleAddressList": true, "unknown_field": false}),
+            )) {
             Ok(cfg) => cfg,
             Err(e) => {
                 return Err(e);

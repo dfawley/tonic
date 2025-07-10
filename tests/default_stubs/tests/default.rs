@@ -1,21 +1,15 @@
-#![allow(unused_imports)]
-
-use crate::test_client::TestClient;
-use crate::*;
-use rand::Rng as _;
-use std::env;
-use std::fs;
+use default_stubs::test_client::TestClient;
+use default_stubs::*;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use tokio_stream::{Stream, StreamExt};
 use tonic::transport::Channel;
 use tonic::transport::Server;
 
-#[cfg(test)]
 fn echo_requests_iter() -> impl Stream<Item = ()> {
     tokio_stream::iter(1..usize::MAX).map(|_| ())
 }
 
-#[cfg(test)]
 async fn test_default_stubs(
     mut client: TestClient<Channel>,
     mut client_default_stubs: TestClient<Channel>,
@@ -100,7 +94,6 @@ async fn test_default_stubs_uds() {
     test_default_stubs(client, client_default_stubs).await;
 }
 
-#[cfg(test)]
 async fn run_services_in_background() -> (SocketAddr, SocketAddr) {
     let svc = test_server::TestServer::new(Svc {});
     let svc_default_stubs = test_default_server::TestDefaultServer::new(Svc {});
@@ -132,29 +125,26 @@ async fn run_services_in_background() -> (SocketAddr, SocketAddr) {
     (addr, addr_default_stubs)
 }
 
-#[cfg(all(test, not(target_os = "windows")))]
+#[cfg(not(target_os = "windows"))]
 async fn run_services_in_background_uds() -> (String, String) {
     use tokio::net::UnixListener;
 
     let svc = test_server::TestServer::new(Svc {});
     let svc_default_stubs = test_default_server::TestDefaultServer::new(Svc {});
 
-    let mut rng = rand::rng();
-    let suffix: String = (0..8)
-        .map(|_| rng.sample(rand::distr::Alphanumeric) as char)
-        .collect();
-    let tmpdir = fs::canonicalize(env::temp_dir())
+    let tmpdir = tempfile::Builder::new()
+        .prefix("tonic-test-")
+        .tempdir()
         .unwrap()
-        .join(format!("tonic_test_{}", suffix));
-    fs::create_dir(&tmpdir).unwrap();
+        .keep();
 
     let uds_filepath = tmpdir.join("impl.sock").to_str().unwrap().to_string();
     let listener = UnixListener::bind(uds_filepath.as_str()).unwrap();
-    let uds_addr = format!("unix://{}", uds_filepath);
+    let uds_addr = format!("unix://{uds_filepath}");
 
     let uds_default_stubs_filepath = tmpdir.join("stub.sock").to_str().unwrap().to_string();
     let listener_default_stubs = UnixListener::bind(uds_default_stubs_filepath.as_str()).unwrap();
-    let uds_default_stubs_addr = format!("unix://{}", uds_default_stubs_filepath);
+    let uds_default_stubs_addr = format!("unix://{uds_default_stubs_filepath}");
 
     tokio::spawn(async move {
         Server::builder()

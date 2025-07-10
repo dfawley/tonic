@@ -22,22 +22,36 @@
  *
  */
 
-//! The official Rust implementation of [gRPC], a high performance, open source,
-//! universal RPC framework
-//!
-//! This version is in progress and not recommended for any production use.  All
-//! APIs are unstable.  Proceed at your own risk.
-//!
-//! [gRPC]: https://grpc.io
-#![allow(dead_code, unused_variables, unused_imports)]
+use core::str;
+use std::ops::Deref;
 
-pub mod client;
-pub mod codec;
-pub mod credentials;
-pub mod inmemory;
-pub mod rt;
-pub mod server;
-pub mod service;
+use bytes::Bytes;
 
-pub(crate) mod attributes;
-pub(crate) mod byte_str;
+/// A cheaply cloneable and sliceable chunk of contiguous memory.
+#[derive(Debug, Default, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ByteStr {
+    // Invariant: bytes contains valid UTF-8
+    bytes: Bytes,
+}
+
+impl Deref for ByteStr {
+    type Target = str;
+
+    #[inline]
+    fn deref(&self) -> &str {
+        let b: &[u8] = self.bytes.as_ref();
+        // The invariant of `bytes` is that it contains valid UTF-8 allows us
+        // to unwrap.
+        str::from_utf8(b).unwrap()
+    }
+}
+
+impl From<String> for ByteStr {
+    #[inline]
+    fn from(src: String) -> ByteStr {
+        ByteStr {
+            // Invariant: src is a String so contains valid UTF-8.
+            bytes: Bytes::from(src),
+        }
+    }
+}

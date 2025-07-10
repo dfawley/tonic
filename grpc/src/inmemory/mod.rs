@@ -10,8 +10,8 @@ use std::{
 use crate::{
     client::{
         name_resolution::{
-            self, Address, ChannelController, Endpoint, Resolver, ResolverBuilder, ResolverOptions,
-            ResolverUpdate, GLOBAL_RESOLVER_REGISTRY,
+            self, global_registry, Address, ChannelController, Endpoint, Resolver, ResolverBuilder,
+            ResolverOptions, ResolverUpdate,
         },
         transport::{self, ConnectedTransport, GLOBAL_TRANSPORT_REGISTRY},
     },
@@ -124,7 +124,7 @@ static INMEMORY_NETWORK_TYPE: &str = "inmemory";
 
 pub fn reg() {
     GLOBAL_TRANSPORT_REGISTRY.add_transport(INMEMORY_NETWORK_TYPE, ClientTransport::new());
-    GLOBAL_RESOLVER_REGISTRY.add_builder(Box::new(InMemoryResolverBuilder));
+    global_registry().add_builder(Box::new(InMemoryResolverBuilder));
 }
 
 struct InMemoryResolverBuilder;
@@ -159,7 +159,7 @@ impl Resolver for NopResolver {
         for addr in LISTENERS.lock().unwrap().keys() {
             addresses.push(Address {
                 network_type: INMEMORY_NETWORK_TYPE,
-                address: addr.clone(),
+                address: addr.clone().into(),
                 ..Default::default()
             });
         }

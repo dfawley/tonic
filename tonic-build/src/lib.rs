@@ -1,65 +1,4 @@
-//! `tonic-build` compiles `proto` files via `prost` and generates service stubs
-//! and proto definitions for use with `tonic`.
-//!
-//! # Feature flags
-//!
-//! - `cleanup-markdown`: Enables cleaning up documentation from the generated code. Useful
-//!   when documentation of the generated code fails `cargo test --doc` for example. The
-//!   `prost` feature must be enabled to use this feature.
-//! - `prost`: Enables usage of prost generator (enabled by default).
-//! - `transport`: Enables generation of `connect` method using `tonic::transport::Channel`
-//!   (enabled by default).
-//!
-//! # Required dependencies
-//!
-//! ```toml
-//! [dependencies]
-//! tonic = <tonic-version>
-//! prost = <prost-version>
-//!
-//! [build-dependencies]
-//! tonic-build = <tonic-version>
-//! ```
-//!
-//! # Examples
-//! Simple
-//!
-//! ```rust,no_run
-//! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     tonic_build::compile_protos("proto/service.proto")?;
-//!     Ok(())
-//! }
-//! ```
-//!
-//! Configuration
-//!
-//! ```rust,no_run
-//! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!    tonic_build::configure()
-//!         .build_server(false)
-//!         .compile_protos(
-//!             &["proto/helloworld/helloworld.proto"],
-//!             &["proto/helloworld"],
-//!         )?;
-//!    Ok(())
-//! }
-//!```
-//!
-//! ## NixOS related hints
-//!
-//! On NixOS, it is better to specify the location of `PROTOC` and `PROTOC_INCLUDE` explicitly.
-//!
-//! ```bash
-//! $ export PROTOBUF_LOCATION=$(nix-env -q protobuf --out-path --no-name)
-//! $ export PROTOC=$PROTOBUF_LOCATION/bin/protoc
-//! $ export PROTOC_INCLUDE=$PROTOBUF_LOCATION/include
-//! $ cargo build
-//! ```
-//!
-//! The reason being that if `prost_build::compile_protos` fails to generate the resultant package,
-//! the failure is not obvious until the `include!(concat!(env!("OUT_DIR"), "/resultant.rs"));`
-//! fails with `No such file or directory` error.
-
+#![doc = include_str!("../README.md")]
 #![recursion_limit = "256"]
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/tokio-rs/website/master/public/img/icons/tonic.svg"
@@ -85,9 +24,9 @@ pub use prost::{compile_fds, compile_protos, configure, Builder};
 pub mod manual;
 
 /// Service code generation for client
-pub mod client;
+mod client;
 /// Service code generation for Server
-pub mod server;
+mod server;
 
 mod code_gen;
 pub use code_gen::CodeGenBuilder;
@@ -234,7 +173,7 @@ fn generate_attributes<'a>(
         .filter(|(matcher, _)| match_name(matcher, name))
         .flat_map(|(_, attr)| {
             // attributes cannot be parsed directly, so we pretend they're on a struct
-            syn::parse_str::<syn::DeriveInput>(&format!("{}\nstruct fake;", attr))
+            syn::parse_str::<syn::DeriveInput>(&format!("{attr}\nstruct fake;"))
                 .unwrap()
                 .attrs
         })
@@ -259,7 +198,7 @@ fn generate_doc_comment<S: AsRef<str>>(comment: S) -> TokenStream {
     let comment = comment.as_ref();
 
     let comment = if !comment.starts_with(' ') {
-        format!(" {}", comment)
+        format!(" {comment}")
     } else {
         comment.to_string()
     };

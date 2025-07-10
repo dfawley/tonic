@@ -350,7 +350,7 @@ impl InternalSubchannel {
                 _ = tokio::time::sleep(min_connect_timeout) => {
                     let _ = state_machine_tx.send(SubchannelStateMachineEvent::ConnectionTimedOut);
                 }
-                result = transport.connect(address.clone()) => {
+                result = transport.connect(address.to_string().clone()) => {
                     match result {
                         Ok(s) => {
                             let _ = state_machine_tx.send(SubchannelStateMachineEvent::ConnectionSucceeded(Arc::from(s)));
@@ -457,7 +457,7 @@ impl SubchannelKey {
 
 impl Display for SubchannelKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.address.address)
+        write!(f, "{}", self.address.address.to_string())
     }
 }
 
@@ -466,6 +466,7 @@ impl Debug for SubchannelKey {
         write!(f, "{}", self.address)
     }
 }
+
 pub(super) struct InternalSubchannelPool {
     subchannels: RwLock<BTreeMap<SubchannelKey, Weak<InternalSubchannel>>>,
 }

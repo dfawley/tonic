@@ -2,32 +2,46 @@
  *
  * Copyright 2025 gRPC authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  *
  */
 
-use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
+use std::net::IpAddr;
+
+use hickory_resolver::{
+    config::{LookupIpStrategy, NameServerConfigGroup, ResolverConfig, ResolverOpts},
+    name_server::TokioConnectionProvider,
+    TokioResolver,
+};
+
+use crate::rt::{self, ResolverOptions};
 
 /// A DNS resolver that uses hickory with the tokio runtime. This supports txt
 /// lookups in addition to A and AAAA record lookups. It also supports using
 /// custom DNS servers.
-pub struct DnsResolver {
+pub(super) struct DnsResolver {
     resolver: hickory_resolver::TokioResolver,
 }
 
 #[tonic::async_trait]
-impl super::DnsResolver for DnsResolver {
-    async fn lookup_host_name(&self, name: &str) -> Result<Vec<std::net::IpAddr>, String> {
+impl rt::DnsResolver for DnsResolver {
+    async fn lookup_host_name(&self, name: &str) -> Result<Vec<IpAddr>, String> {
         let response = self
             .resolver
             .lookup_ip(name)
@@ -56,21 +70,21 @@ impl super::DnsResolver for DnsResolver {
 }
 
 impl DnsResolver {
-    pub fn new(opts: super::ResolverOptions) -> Result<Self, String> {
+    pub(super) fn new(opts: ResolverOptions) -> Result<Self, String> {
         let builder = if let Some(server_addr) = opts.server_addr {
-            let provider = hickory_resolver::name_server::TokioConnectionProvider::default();
+            let provider = TokioConnectionProvider::default();
             let name_servers = NameServerConfigGroup::from_ips_clear(
                 &[server_addr.ip()],
                 server_addr.port(),
                 true,
             );
             let config = ResolverConfig::from_parts(None, vec![], name_servers);
-            hickory_resolver::TokioResolver::builder_with_config(config, provider)
+            TokioResolver::builder_with_config(config, provider)
         } else {
-            hickory_resolver::TokioResolver::builder_tokio().map_err(|err| err.to_string())?
+            TokioResolver::builder_tokio().map_err(|err| err.to_string())?
         };
         let mut resolver_opts = ResolverOpts::default();
-        resolver_opts.ip_strategy = hickory_resolver::config::LookupIpStrategy::Ipv4AndIpv6;
+        resolver_opts.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
         Ok(DnsResolver {
             resolver: builder.with_options(resolver_opts).build(),
         })

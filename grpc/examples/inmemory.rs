@@ -1,7 +1,6 @@
 use std::any::Any;
 
 use futures_util::stream::StreamExt;
-use grpc::client::load_balancing::pick_first;
 use grpc::client::transport;
 use grpc::service::{Message, Request, Response, Service};
 use grpc::{client::ChannelOptions, inmemory};
@@ -38,7 +37,6 @@ impl Service for Handler {
 #[tokio::main]
 async fn main() {
     inmemory::reg();
-    pick_first::reg();
 
     // Spawn the server.
     let lis = inmemory::Listener::new();
@@ -53,7 +51,7 @@ async fn main() {
     println!("Creating channel for {}", lis.target());
     let chan_opts =
         ChannelOptions::default().transport_registry(transport::GLOBAL_TRANSPORT_REGISTRY.clone());
-    let chan = grpc::client::Channel::new(lis.target().as_str(), None, None, chan_opts);
+    let chan = grpc::client::Channel::new(lis.target().as_str(), None, chan_opts);
 
     let outbound = async_stream::stream! {
         yield Box::new(MyReqMessage("My Request 1".to_string())) as Box<dyn Message>;
