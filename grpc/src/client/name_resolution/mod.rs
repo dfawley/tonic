@@ -2,17 +2,23 @@
  *
  * Copyright 2025 gRPC authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  *
  */
 
@@ -23,35 +29,56 @@
 //! a service.
 use core::fmt;
 
-use super::service_config::{self, ServiceConfig};
-use crate::{attributes::Attributes, rt};
+use super::service_config::ServiceConfig;
+use crate::{attributes::Attributes, byte_str::ByteStr, rt::Runtime};
 use std::{
-    error::Error,
     fmt::{Display, Formatter},
-    hash::Hash,
+    hash::{Hash, Hasher},
     str::FromStr,
     sync::Arc,
 };
-use tokio::sync::Notify;
 
 mod backoff;
 mod dns;
-mod passthrough;
 mod registry;
-pub use registry::{ResolverRegistry, GLOBAL_RESOLVER_REGISTRY};
+pub use registry::global_registry;
+use url::Url;
 
+/// Target represents a target for gRPC, as specified in:
+/// https://github.com/grpc/grpc/blob/master/doc/naming.md.
+/// It is parsed from the target string that gets passed during channel creation
+/// by the user. gRPC passes it to the resolver and the balancer.
+///
+/// If the target follows the naming spec, and the parsed scheme is registered
+/// with gRPC, we will parse the target string according to the spec. If the
+/// target does not contain a scheme or if the parsed scheme is not registered
+/// (i.e. no corresponding resolver available to resolve the endpoint), we will
+/// apply the default scheme, and will attempt to reparse it.
+#[derive(Debug, Clone)]
 pub struct Target {
-    url: url::Url,
+    url: Url,
 }
 
 impl FromStr for Target {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.parse::<url::Url>() {
+        match s.parse::<Url>() {
             Ok(url) => Ok(Target { url }),
             Err(err) => Err(err.to_string()),
         }
+    }
+}
+
+impl Display for Target {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}://{}{}",
+            self.scheme(),
+            self.authority_host_port(),
+            self.path()
+        )
     }
 }
 
@@ -82,7 +109,7 @@ impl Target {
     }
 
     /// The port part of the authority.
-    pub fn aythority_port(&self) -> Option<u16> {
+    pub fn authority_port(&self) -> Option<u16> {
         self.url.port()
     }
 
@@ -90,7 +117,7 @@ impl Target {
     /// in the authority.
     pub fn authority_host_port(&self) -> String {
         let host = self.authority_host();
-        let port = self.aythority_port();
+        let port = self.authority_port();
         if let Some(port) = port {
             format!("{}:{}", host, port)
         } else {
@@ -104,21 +131,9 @@ impl Target {
     }
 }
 
-impl Display for Target {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}//{}/{}",
-            self.scheme(),
-            self.authority_host_port(),
-            self.path()
-        )
-    }
-}
-
 /// A name resolver factory
 pub trait ResolverBuilder: Send + Sync {
-    /// Builds a name resolver instance, or returns an error.
+    /// Builds a name resolver instance.
     ///
     /// Note that build must not fail.  Instead, an erroring Resolver may be
     /// returned that calls ChannelController.update() with an Err value.
@@ -128,11 +143,15 @@ pub trait ResolverBuilder: Send + Sync {
     fn scheme(&self) -> &str;
 
     /// Returns the default authority for a channel using this name resolver
-    /// and target.  This is typically the same as the service's name. By
-    /// default, the default_authority method automatically returns the path
-    /// portion of the target URI, with the leading prefix removed.
-    fn default_authority(&self, uri: &Target) -> String {
-        let path = uri.path();
+    /// and target. This refers to the *dataplane authority* — the value used
+    /// in the `:authority` header of HTTP/2 requests — and not to be confused
+    /// with the authority portion of the target URI, which typically specifies
+    /// the name of an external server used for name resolution.
+    ///
+    /// By default, this method returns the path portion of the target URI,
+    /// with the leading prefix removed.
+    fn default_authority(&self, target: &Target) -> String {
+        let path = target.path();
         path.strip_prefix("/").unwrap_or(path).to_string()
     }
 
@@ -145,12 +164,18 @@ pub trait ResolverBuilder: Send + Sync {
 /// name resolver.
 #[non_exhaustive]
 pub struct ResolverOptions {
-    /// Authority is the effective authority of the channel for which the
-    /// resolver is built.
+    /// The authority that will be used for the channel by default. This refers
+    /// to the `:authority` value sent in HTTP/2 requests — the dataplane
+    /// authority — and not the authority portion of the target URI, which is
+    /// typically used to identify the name resolution server.
+    ///
+    /// This value is either the result of the `default_authority` method of
+    /// this `ResolverBuilder`, or another string if the channel was explicitly
+    /// configured to override the default.
     pub authority: String,
 
     /// The runtime which provides utilities to do async work.
-    pub runtime: Arc<dyn rt::Runtime>,
+    pub runtime: Arc<dyn Runtime>,
 
     /// A hook into the channel's work scheduler that allows the Resolver to
     /// request the ability to perform operations on the ChannelController.
@@ -167,21 +192,23 @@ pub trait WorkScheduler: Send + Sync {
 
 /// Resolver watches for the updates on the specified target.
 /// Updates include address updates and service config updates.
-pub trait Resolver: Send {
-    /// Asks the resolver to obtain an updated resolver result, if
-    /// applicable.
+// This trait may not need the Sync sub-trait if the channel implementation can
+// ensure that the resolver is accessed serially. The sub-trait can be removed
+// in that case.
+pub trait Resolver: Send + Sync {
+    /// Asks the resolver to obtain an updated resolver result, if applicable.
     ///
-    /// This is useful for pull-based implementations to decide when to
-    /// re-resolve.  However, the implementation is not required to
-    /// re-resolve immediately upon receiving this call; it may instead
-    /// elect to delay based on some configured minimum time between
-    /// queries, to avoid hammering the name service with queries.
+    /// This is useful for polling resolvers to decide when to re-resolve.
+    /// However, the implementation is not required to re-resolve immediately
+    /// upon receiving this call; it may instead elect to delay based on some
+    /// configured minimum time between queries, to avoid hammering the name
+    /// service with queries.
     ///
-    /// For push-based implementations, this may be a no-op.
+    /// For watch based resolvers, this may be a no-op.
     fn resolve_now(&mut self);
 
-    /// Called serially by the work scheduler to do work after the helper's
-    /// schedule_work method is called.
+    /// Called serially by the channel to provide access to the
+    /// `ChannelController`.
     fn work(&mut self, channel_controller: &mut dyn ChannelController);
 }
 
@@ -207,13 +234,14 @@ pub trait ChannelController: Send + Sync {
 pub struct ResolverUpdate {
     /// Attributes contains arbitrary data about the resolver intended for
     /// consumption by the load balancing policy.
-    pub attributes: Arc<Attributes>,
+    pub attributes: Attributes,
 
-    /// Endpoints is the latest set of resolved endpoints for the target.
+    /// A list of endpoints which each identify a logical host serving the
+    /// service indicated by the target URI.
     pub endpoints: Result<Vec<Endpoint>, String>,
 
-    /// service_config contains the result from parsing the latest service
-    /// config.  If it is None, it indicates no service config is present or
+    /// The service config which the client should use for communicating with
+    /// the service. If it is None, it indicates no service config is present or
     /// the resolver does not provide service configs.
     pub service_config: Result<Option<ServiceConfig>, String>,
 
@@ -229,10 +257,10 @@ pub struct ResolverUpdate {
 impl Default for ResolverUpdate {
     fn default() -> Self {
         ResolverUpdate {
-            service_config: Ok(None),
-            attributes: Arc::default(),
-            endpoints: Ok(Vec::default()),
-            resolution_note: None,
+            service_config: Ok(Default::default()),
+            attributes: Default::default(),
+            endpoints: Ok(Default::default()),
+            resolution_note: Default::default(),
         }
     }
 }
@@ -251,9 +279,15 @@ pub struct Endpoint {
     pub attributes: Attributes,
 }
 
-#[non_exhaustive]
-#[derive(Debug, Clone, Default, PartialOrd, Ord)]
+impl Hash for Endpoint {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.addresses.hash(state);
+    }
+}
+
 /// An Address is an identifier that indicates how to connect to a server.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, Ord, PartialOrd)]
 pub struct Address {
     /// The network type is used to identify what kind of transport to create
     /// when connecting to this address.  Typically TCP_IP_ADDRESS_TYPE.
@@ -261,7 +295,7 @@ pub struct Address {
 
     /// The address itself is passed to the transport in order to create a
     /// connection to it.
-    pub address: String,
+    pub address: ByteStr,
 
     /// Attributes contains arbitrary data about this address intended for
     /// consumption by the subchannel.
@@ -276,20 +310,6 @@ impl PartialEq for Address {
     }
 }
 
-impl Eq for Endpoint {}
-
-impl PartialEq for Endpoint {
-    fn eq(&self, other: &Self) -> bool {
-        self.addresses == other.addresses
-    }
-}
-
-impl Hash for Endpoint {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.addresses.hash(state);
-    }
-}
-
 impl Hash for Address {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.network_type.hash(state);
@@ -299,13 +319,28 @@ impl Hash for Address {
 
 impl Display for Address {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.network_type, self.address)
+        write!(f, "{}:{}", self.network_type, self.address.to_string())
     }
 }
 
 /// Indicates the address is an IPv4 or IPv6 address that should be connected to
 /// via TCP/IP.
 pub static TCP_IP_NETWORK_TYPE: &str = "tcp";
+
+// A resolver that returns the same result every time its work method is called.
+// It can be used to return an error to the channel when a resolver fails to
+// build.
+struct NopResolver {
+    pub update: ResolverUpdate,
+}
+
+impl Resolver for NopResolver {
+    fn resolve_now(&mut self) {}
+
+    fn work(&mut self, channel_controller: &mut dyn ChannelController) {
+        let _ = channel_controller.update(self.update.clone());
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -321,6 +356,7 @@ mod test {
             want_port: Option<u16>,
             want_host_port: &'static str,
             want_path: &'static str,
+            want_str: &'static str,
         }
         let test_cases = vec![
             TestCase {
@@ -330,6 +366,7 @@ mod test {
                 want_host: "",
                 want_port: None,
                 want_path: "/grpc.io",
+                want_str: "dns:///grpc.io",
             },
             TestCase {
                 input: "dns://8.8.8.8:53/grpc.io/docs",
@@ -338,6 +375,7 @@ mod test {
                 want_host: "8.8.8.8",
                 want_port: Some(53),
                 want_path: "/grpc.io/docs",
+                want_str: "dns://8.8.8.8:53/grpc.io/docs",
             },
             TestCase {
                 input: "unix:path/to/file",
@@ -346,6 +384,7 @@ mod test {
                 want_host: "",
                 want_port: None,
                 want_path: "path/to/file",
+                want_str: "unix://path/to/file",
             },
             TestCase {
                 input: "unix:///run/containerd/containerd.sock",
@@ -354,6 +393,7 @@ mod test {
                 want_host: "",
                 want_port: None,
                 want_path: "/run/containerd/containerd.sock",
+                want_str: "unix:///run/containerd/containerd.sock",
             },
         ];
 
@@ -361,9 +401,10 @@ mod test {
             let target: Target = tc.input.parse().unwrap();
             assert_eq!(target.scheme(), tc.want_scheme);
             assert_eq!(target.authority_host(), tc.want_host);
-            assert_eq!(target.aythority_port(), tc.want_port);
+            assert_eq!(target.authority_port(), tc.want_port);
             assert_eq!(target.authority_host_port(), tc.want_host_port);
             assert_eq!(target.path(), tc.want_path);
+            assert_eq!(&target.to_string(), tc.want_str);
         }
     }
 }

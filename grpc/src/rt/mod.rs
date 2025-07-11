@@ -2,23 +2,29 @@
  *
  * Copyright 2025 gRPC authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  *
  */
 
-use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
-
 use ::tokio::io::{AsyncRead, AsyncWrite};
+
+use std::{future::Future, net::SocketAddr, pin::Pin, time::Duration};
 
 pub(crate) mod hyper_wrapper;
 pub mod tokio;
@@ -30,7 +36,7 @@ pub mod tokio;
 /// time-based operations such as sleeping. It provides a uniform interface
 /// that can be implemented for various async runtimes, enabling pluggable
 /// and testable infrastructure.
-pub trait Runtime: Send + Sync {
+pub(super) trait Runtime: Send + Sync {
     /// Spawns the given asynchronous task to run in the background.
     fn spawn(
         &self,
@@ -52,15 +58,17 @@ pub trait Runtime: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<Box<dyn TcpStream>, String>> + Send>>;
 }
 
-pub trait Sleep: Send + Sync + Future<Output = ()> {}
+/// A future that resolves after a specified duration.
+pub(super) trait Sleep: Send + Sync + Future<Output = ()> {}
 
-pub trait TaskHandle: Send + Sync {
+pub(super) trait TaskHandle: Send + Sync {
     /// Abort the associated task.
     fn abort(&self);
 }
 
+/// A trait for asynchronous DNS resolution.
 #[tonic::async_trait]
-pub trait DnsResolver: Send + Sync {
+pub(super) trait DnsResolver: Send + Sync {
     /// Resolve an address
     async fn lookup_host_name(&self, name: &str) -> Result<Vec<std::net::IpAddr>, String>;
     /// Perform a TXT record lookup. If a txt record contains multiple strings,
@@ -69,10 +77,10 @@ pub trait DnsResolver: Send + Sync {
 }
 
 #[derive(Default)]
-pub struct ResolverOptions {
+pub(super) struct ResolverOptions {
     /// The address of the DNS server in "IP:port" format. If None, the
     /// system's default DNS server will be used.
-    pub server_addr: Option<std::net::SocketAddr>,
+    pub(super) server_addr: Option<std::net::SocketAddr>,
 }
 
 #[derive(Default)]

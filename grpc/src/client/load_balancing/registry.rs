@@ -19,14 +19,14 @@ impl LbPolicyRegistry {
         Self { m: Arc::default() }
     }
     /// Add a LB policy into the registry.
-    pub fn add_builder(&self, builder: impl LbPolicyBuilder + 'static) {
+    pub(crate) fn add_builder(&self, builder: impl LbPolicyBuilder + 'static) {
         self.m
             .lock()
             .unwrap()
             .insert(builder.name().to_string(), Arc::new(builder));
     }
     /// Retrieve a LB policy from the registry, or None if not found.
-    pub fn get_policy(&self, name: &str) -> Option<Arc<dyn LbPolicyBuilder>> {
+    pub(crate) fn get_policy(&self, name: &str) -> Option<Arc<dyn LbPolicyBuilder>> {
         self.m.lock().unwrap().get(name).cloned()
     }
 }

@@ -58,19 +58,21 @@ fn pickfirst_builder_parse_config_failure() -> Result<(), String> {
     }
     let test_cases = vec![
         TestCase {
-            config: ParsedJsonLbConfig(json!({})),
+            config: ParsedJsonLbConfig::from_value(json!({})),
             want_shuffle_addresses: None,
         },
         TestCase {
-            config: ParsedJsonLbConfig(json!({"shuffleAddressList": false})),
+            config: ParsedJsonLbConfig::from_value(json!({"shuffleAddressList": false})),
             want_shuffle_addresses: Some(false),
         },
         TestCase {
-            config: ParsedJsonLbConfig(json!({"shuffleAddressList": true})),
+            config: ParsedJsonLbConfig::from_value(json!({"shuffleAddressList": true})),
             want_shuffle_addresses: Some(true),
         },
         TestCase {
-            config: ParsedJsonLbConfig(json!({"shuffleAddressList": true, "unknownField": "foo"})),
+            config: ParsedJsonLbConfig::from_value(
+                json!({"shuffleAddressList": true, "unknownField": "foo"}),
+            ),
             want_shuffle_addresses: Some(true),
         },
     ];
@@ -137,7 +139,7 @@ fn setup() -> (
 fn create_endpoint_with_one_address(addr: String) -> Endpoint {
     Endpoint {
         addresses: vec![Address {
-            address: addr,
+            address: addr.into(),
             ..Default::default()
         }],
         ..Default::default()
@@ -149,7 +151,7 @@ fn create_endpoint_with_n_addresses(n: usize) -> Endpoint {
     let mut addresses = Vec::new();
     for i in 0..n {
         addresses.push(Address {
-            address: format!("{}.{}.{}.{}:{}", i, i, i, i, i),
+            address: format!("{}.{}.{}.{}:{}", i, i, i, i, i).into(),
             ..Default::default()
         });
     }
@@ -184,7 +186,7 @@ fn send_resolver_update_with_lb_config_to_policy(
         ..Default::default()
     };
 
-    let json_config = ParsedJsonLbConfig(json!({"shuffleAddressList": true}));
+    let json_config = ParsedJsonLbConfig::from_value(json!({"shuffleAddressList": true}));
     let builder = GLOBAL_LB_REGISTRY.get_policy("pick_first").unwrap();
     let config = builder.parse_config(&json_config).unwrap();
 
@@ -738,15 +740,15 @@ async fn pickfirst_with_multiple_backends_duplicate_addresses() {
     let endpoint = Endpoint {
         addresses: vec![
             Address {
-                address: format!("{}.{}.{}.{}:{}", 0, 0, 0, 0, 0),
+                address: format!("{}.{}.{}.{}:{}", 0, 0, 0, 0, 0).into(),
                 ..Default::default()
             },
             Address {
-                address: format!("{}.{}.{}.{}:{}", 0, 0, 0, 0, 0),
+                address: format!("{}.{}.{}.{}:{}", 0, 0, 0, 0, 0).into(),
                 ..Default::default()
             },
             Address {
-                address: format!("{}.{}.{}.{}:{}", 1, 1, 1, 1, 1),
+                address: format!("{}.{}.{}.{}:{}", 1, 1, 1, 1, 1).into(),
                 ..Default::default()
             },
         ],
@@ -755,11 +757,11 @@ async fn pickfirst_with_multiple_backends_duplicate_addresses() {
     let endpoint_with_duplicates_removed = Endpoint {
         addresses: vec![
             Address {
-                address: format!("{}.{}.{}.{}:{}", 0, 0, 0, 0, 0),
+                address: format!("{}.{}.{}.{}:{}", 0, 0, 0, 0, 0).into(),
                 ..Default::default()
             },
             Address {
-                address: format!("{}.{}.{}.{}:{}", 1, 1, 1, 1, 1),
+                address: format!("{}.{}.{}.{}:{}", 1, 1, 1, 1, 1).into(),
                 ..Default::default()
             },
         ],

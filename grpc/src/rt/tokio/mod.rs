@@ -2,41 +2,52 @@
  *
  * Copyright 2025 gRPC authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  *
  */
 
-use std::{future::Future, net::SocketAddr, pin::Pin};
+use std::{
+    future::Future,
+    net::{IpAddr, SocketAddr},
+    pin::Pin,
+    time::Duration,
+};
 
-use futures_util::TryFutureExt;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::{TcpSocket, TcpStream},
+    net::TcpStream,
+    task::JoinHandle,
 };
 
 use super::{DnsResolver, ResolverOptions, Runtime, Sleep, TaskHandle};
 
-#[cfg(feature = "hickory_dns")]
+#[cfg(feature = "dns")]
 mod hickory_resolver;
 
 /// A DNS resolver that uses tokio::net::lookup_host for resolution. It only
 /// supports host lookups.
-pub struct TokioDefaultDnsResolver {}
+struct TokioDefaultDnsResolver {}
 
 #[tonic::async_trait]
 impl DnsResolver for TokioDefaultDnsResolver {
-    async fn lookup_host_name(&self, name: &str) -> Result<Vec<std::net::IpAddr>, String> {
-        let name_with_port = match name.parse::<std::net::IpAddr>() {
+    async fn lookup_host_name(&self, name: &str) -> Result<Vec<IpAddr>, String> {
+        let name_with_port = match name.parse::<IpAddr>() {
             Ok(ip) => SocketAddr::new(ip, 0).to_string(),
             Err(_) => format!("{}:0", name),
         };
@@ -49,13 +60,13 @@ impl DnsResolver for TokioDefaultDnsResolver {
     }
 
     async fn lookup_txt(&self, _name: &str) -> Result<Vec<String>, String> {
-        Err("TXT record lookup unavailable. Enable the optional 'hickory_dns' feature to enable service config lookups.".to_string())
+        Err("TXT record lookup unavailable. Enable the optional 'dns' feature to enable service config lookups.".to_string())
     }
 }
 
-pub struct TokioRuntime {}
+pub(crate) struct TokioRuntime {}
 
-impl TaskHandle for tokio::task::JoinHandle<()> {
+impl TaskHandle for JoinHandle<()> {
     fn abort(&self) {
         self.abort()
     }
@@ -72,17 +83,17 @@ impl Runtime for TokioRuntime {
     }
 
     fn get_dns_resolver(&self, opts: ResolverOptions) -> Result<Box<dyn DnsResolver>, String> {
-        #[cfg(feature = "hickory_dns")]
+        #[cfg(feature = "dns")]
         {
             Ok(Box::new(hickory_resolver::DnsResolver::new(opts)?))
         }
-        #[cfg(not(feature = "hickory_dns"))]
+        #[cfg(not(feature = "dns"))]
         {
             Ok(Box::new(TokioDefaultDnsResolver::new(opts)?))
         }
     }
 
-    fn sleep(&self, duration: std::time::Duration) -> Pin<Box<dyn Sleep>> {
+    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Sleep>> {
         Box::pin(tokio::time::sleep(duration))
     }
 
@@ -112,7 +123,7 @@ impl Runtime for TokioRuntime {
 impl TokioDefaultDnsResolver {
     pub fn new(opts: ResolverOptions) -> Result<Self, String> {
         if opts.server_addr.is_some() {
-            return Err("Custom DNS server are not supported, enable optional feature 'hickory_dns' to enable support.".to_string());
+            return Err("Custom DNS server are not supported, enable optional feature 'dns' to enable support.".to_string());
         }
         Ok(TokioDefaultDnsResolver {})
     }

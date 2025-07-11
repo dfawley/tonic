@@ -408,7 +408,7 @@ fn duration_to_grpc_timeout(duration: Duration) -> String {
         if value > max_size {
             None
         } else {
-            Some(format!("{}{}", value, unit))
+            Some(format!("{value}{unit}"))
         }
     }
 
@@ -460,6 +460,25 @@ mod tests {
             SanitizeHeaders::Yes,
         );
         assert!(http_request.headers().is_empty());
+    }
+
+    #[test]
+    fn preserves_user_agent() {
+        let mut r = Request::new(1);
+
+        r.metadata_mut().insert(
+            MetadataKey::from_static("user-agent"),
+            MetadataValue::from_static("Custom/1.2.3"),
+        );
+
+        let http_request = r.into_http(
+            Uri::default(),
+            http::Method::POST,
+            http::Version::HTTP_2,
+            SanitizeHeaders::Yes,
+        );
+        let user_agent = http_request.headers().get("user-agent").unwrap();
+        assert_eq!(user_agent, "Custom/1.2.3");
     }
 
     #[test]

@@ -83,7 +83,7 @@ impl Display for TestEvent {
             Self::NewSubchannel(addr, _) => write!(f, "NewSubchannel({})", addr),
             Self::UpdatePicker(state) => write!(f, "UpdatePicker({})", state.connectivity_state),
             Self::RequestResolution => write!(f, "RequestResolution"),
-            Self::Connect(addr) => write!(f, "Connect({})", addr.address),
+            Self::Connect(addr) => write!(f, "Connect({})", addr.address.to_string()),
             Self::ScheduleWork => write!(f, "ScheduleWork"),
         }
     }

@@ -7,8 +7,11 @@ name = "skip_debug"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-prost = "0.13"
+prost = "0.14"
 tonic = { path = "../../tonic" }
+
+[dev-dependencies]
+static_assertions = "1"
 
 [build-dependencies]
 tonic-build = { path = "../../tonic-build" }
