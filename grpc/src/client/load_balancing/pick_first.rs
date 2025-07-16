@@ -222,6 +222,16 @@ impl LbPolicy for PickFirstPolicy {
         // address in the list.
         self.subchannel_list = Some(SubchannelList::new(&self.addresses, channel_controller));
     }
+
+    fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController) {
+        if self.connectivity_state == ConnectivityState::Idle {
+            self.subchannel_list = Some(SubchannelList::new(&self.addresses, channel_controller));
+            self.move_to_connecting(channel_controller);
+            if let Some(subchannel_list) = self.subchannel_list.as_mut() {
+                subchannel_list.connect_after_idle();
+            }
+        }
+    }
 }
 
 fn shuffle_endpoints(endpoints: &mut [Endpoint]) {
@@ -591,6 +601,12 @@ impl SubchannelList {
             if data.state.as_ref().unwrap().connectivity_state == ConnectivityState::Idle {
                 sc.connect();
             }
+        }
+    }
+
+    fn connect_after_idle(&mut self) {
+        for sc in &self.ordered_subchannels {
+            sc.connect();
         }
     }
 }

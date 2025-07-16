@@ -172,6 +172,8 @@ pub trait LbPolicy: Send {
     /// Called by the channel in response to a call from the LB policy to the
     /// WorkScheduler's request_work method.
     fn work(&mut self, channel_controller: &mut dyn ChannelController);
+
+    fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController);
 }
 
 /// Controls channel behaviors.
