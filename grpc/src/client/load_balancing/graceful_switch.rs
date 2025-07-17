@@ -87,12 +87,9 @@ impl LbPolicy for GracefulSwitchPolicy {
                 Err(e) => panic!("convert_to failed: {e}"),
             };
         let new_builder_name = cfg.child_builder.name();
-
         let mut managing_policy_guard = self.managing_policy.lock().unwrap();
-
         // Determine which child policy is currently "active" and its name
         let last_policy = managing_policy_guard.latest_balancer_name();
-
         let mut wrapped_channel_controller = WrappedController::new(channel_controller);
         let update_clone = update.clone();
         let mut target_child_kind = ChildKind::Pending;
@@ -100,7 +97,6 @@ impl LbPolicy for GracefulSwitchPolicy {
         if managing_policy_guard.no_policy() || last_policy != new_builder_name {
             drop(managing_policy_guard);
             target_child_kind = self.switch_to(config);
-
             managing_policy_guard = self.managing_policy.lock().unwrap();
         }
         match target_child_kind {
@@ -159,9 +155,7 @@ impl LbPolicy for GracefulSwitchPolicy {
                 panic!("Subchannel not found in graceful switch: {}", subchannel);
             })
             .clone();
-
         let mut managing_policy = self.managing_policy.lock().unwrap();
-
         match which_child {
             ChildKind::Pending => {
                 if let Some(ref mut pending_policy_instance) = managing_policy.pending_child.policy
@@ -197,7 +191,6 @@ impl LbPolicy for GracefulSwitchPolicy {
                 }
             }
         }
-
         // Drop the lock on managing_policy before calling resolve_child_controller
         // as resolve_child_controller also tries to acquire this lock.
         drop(managing_policy);
@@ -295,7 +288,6 @@ impl GracefulSwitchPolicy {
 
     fn swap(&mut self, channel_controller: &mut WrappedController) {
         let mut managing_policy = self.managing_policy.lock().unwrap();
-
         managing_policy.current_child.policy = managing_policy.pending_child.policy.take();
         managing_policy.current_child.policy_builder =
             managing_policy.pending_child.policy_builder.take();
