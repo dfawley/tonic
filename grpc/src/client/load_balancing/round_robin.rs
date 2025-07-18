@@ -98,7 +98,7 @@ impl RoundRobinPolicy {
         channel_controller.request_resolution();
     }
 
-    fn update_state(&self, channel_controller: &mut dyn ChannelController) {
+    fn update_channel(&self, channel_controller: &mut dyn ChannelController) {
         if self.child_manager.has_updated() {
             if let Some(pick_update) = self.child_manager.aggregate_states() {
                 channel_controller.update_picker(pick_update);
@@ -136,7 +136,7 @@ impl LbPolicy for RoundRobinPolicy {
                 let result =
                     self.child_manager
                         .resolver_update(cloned_update, config, channel_controller);
-                self.update_state(channel_controller);
+                self.update_channel(channel_controller);
                 self.addresses = new_addresses;
             }
             Err(error) => {
@@ -145,7 +145,7 @@ impl LbPolicy for RoundRobinPolicy {
                 {
                     self.move_to_transient_failure(channel_controller);
                 } else {
-                    self.update_state(channel_controller);
+                    self.update_channel(channel_controller);
                 }
             }
         }
@@ -160,17 +160,17 @@ impl LbPolicy for RoundRobinPolicy {
     ) {
         self.child_manager
             .subchannel_update(subchannel, state, channel_controller);
-        self.update_state(channel_controller);
+        self.update_channel(channel_controller);
     }
 
     fn work(&mut self, channel_controller: &mut dyn ChannelController) {
         self.child_manager.work(channel_controller);
-        self.update_state(channel_controller);
+        self.update_channel(channel_controller);
     }
 
     fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController) {
         self.child_manager.exit_idle(channel_controller);
-        self.update_state(channel_controller);
+        self.update_channel(channel_controller);
     }
 }
 
