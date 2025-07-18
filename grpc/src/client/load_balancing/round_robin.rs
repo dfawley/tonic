@@ -79,7 +79,7 @@ impl RoundRobinPolicy {
     fn address_list_from_endpoints(&self, endpoints: &[Endpoint]) -> Vec<Address> {
         // Flatten the endpoints list by concatenating the ordered list of
         // addresses for each of the endpoints.
-        let mut addresses: Vec<Address> = endpoints
+        let addresses: Vec<Address> = endpoints
             .iter()
             .flat_map(|ep| ep.addresses.clone())
             .collect();
