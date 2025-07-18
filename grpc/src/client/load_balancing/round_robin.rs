@@ -56,7 +56,7 @@ impl LbPolicyBuilder for RoundRobinBuilder {
         Box::new(RoundRobinPolicy {
             child_manager: lb_policy,
             work_scheduler: options.work_scheduler,
-            addresses: vec![],
+            addresses_available: false,
             last_resolver_error: None,
             last_connection_error: None,
         })
@@ -70,20 +70,23 @@ impl LbPolicyBuilder for RoundRobinBuilder {
 struct RoundRobinPolicy {
     child_manager: Box<ChildManager<Endpoint>>,
     work_scheduler: Arc<dyn WorkScheduler>,
-    addresses: Vec<Address>, // Most recent addresses from the name resolver.
+    addresses_available: bool, // Most recent addresses from the name resolver.
     last_resolver_error: Option<String>, // Most recent error from the name resolver.
     last_connection_error: Option<Arc<dyn Error + Send + Sync>>, // Most recent error from any subchannel.
 }
 
 impl RoundRobinPolicy {
-    fn address_list_from_endpoints(&self, endpoints: &[Endpoint]) -> Vec<Address> {
+    fn check_endpoints_for_addresses(&self, endpoints: &[Endpoint]) -> bool {
         // Flatten the endpoints list by concatenating the ordered list of
         // addresses for each of the endpoints.
         let addresses: Vec<Address> = endpoints
             .iter()
             .flat_map(|ep| ep.addresses.clone())
             .collect();
-        addresses
+        if addresses.is_empty() {
+            return false;
+        }
+        return true;
     }
 
     fn move_to_transient_failure(&self, channel_controller: &mut dyn ChannelController) {
@@ -115,6 +118,7 @@ impl LbPolicy for RoundRobinPolicy {
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let cloned_update = update.clone();
+
         match update.endpoints {
             Ok(endpoints) => {
                 if endpoints.is_empty() {
@@ -125,8 +129,9 @@ impl LbPolicy for RoundRobinPolicy {
                     return Err("received no endpoints from the name resolver".into());
                 }
 
-                let new_addresses: Vec<Address> = self.address_list_from_endpoints(&endpoints);
-                if new_addresses.is_empty() {
+                self.addresses_available = self.check_endpoints_for_addresses(&endpoints);
+
+                if !self.addresses_available {
                     self.last_resolver_error =
                         Some("received empty address list from the name resolver".to_string());
                     self.move_to_transient_failure(channel_controller);
@@ -137,11 +142,10 @@ impl LbPolicy for RoundRobinPolicy {
                     self.child_manager
                         .resolver_update(cloned_update, config, channel_controller);
                 self.update_channel(channel_controller);
-                self.addresses = new_addresses;
             }
             Err(error) => {
-                if self.addresses.is_empty()
-                    || self.child_manager.prev_state != ConnectivityState::Ready
+                if !self.addresses_available
+                    || self.child_manager.prev_state == ConnectivityState::TransientFailure
                 {
                     self.move_to_transient_failure(channel_controller);
                 } else {
