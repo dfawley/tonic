@@ -10,7 +10,13 @@ use crate::client::{
     transport::{Transport, GLOBAL_TRANSPORT_REGISTRY},
     ConnectivityState,
 };
-
+use crate::service::{Message, Request, Response, Service};
+use core::panic;
+use once_cell::sync::Lazy;
+use rand::{self, rngs::StdRng, seq::SliceRandom, thread_rng, Rng, RngCore, SeedableRng};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::sync::Once;
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -21,21 +27,12 @@ use std::{
         Arc,
     },
 };
-
-use crate::service::{Message, Request, Response, Service};
-use core::panic;
-use serde_json::json;
 use std::{ops::Add, sync::Mutex};
+use tokio::time::sleep;
 use tokio::{
     sync::{mpsc, Notify},
     task::AbortHandle,
 };
-
-use once_cell::sync::Lazy;
-use rand::{self, rngs::StdRng, seq::SliceRandom, thread_rng, Rng, RngCore, SeedableRng};
-use serde::{Deserialize, Serialize};
-use std::sync::Once;
-use tokio::time::sleep;
 use tonic::{async_trait, metadata::MetadataMap};
 
 #[cfg(test)]
@@ -76,9 +73,7 @@ struct RoundRobinPolicy {
 }
 
 impl RoundRobinPolicy {
-    fn check_endpoints_for_addresses(&self, endpoints: &[Endpoint]) -> bool {
-        // Flatten the endpoints list by concatenating the ordered list of
-        // addresses for each of the endpoints.
+    fn endpoints_contain_addresses(&self, endpoints: &[Endpoint]) -> bool {
         let addresses: Vec<Address> = endpoints
             .iter()
             .flat_map(|ep| ep.addresses.clone())
@@ -101,7 +96,7 @@ impl RoundRobinPolicy {
         channel_controller.request_resolution();
     }
 
-    fn update_channel(&self, channel_controller: &mut dyn ChannelController) {
+    fn update_channel(&mut self, channel_controller: &mut dyn ChannelController) {
         if self.child_manager.has_updated() {
             if let Some(pick_update) = self.child_manager.aggregate_states() {
                 channel_controller.update_picker(pick_update);
@@ -129,7 +124,7 @@ impl LbPolicy for RoundRobinPolicy {
                     return Err("received no endpoints from the name resolver".into());
                 }
 
-                self.addresses_available = self.check_endpoints_for_addresses(&endpoints);
+                self.addresses_available = self.endpoints_contain_addresses(&endpoints);
 
                 if !self.addresses_available {
                     self.last_resolver_error =
@@ -185,25 +180,7 @@ pub fn reg() {
     });
 }
 
-struct WrappedPickFirstPolicy {
-    pick_first: Box<dyn LbPolicy>,
-}
-
 struct WrappedPickFirstBuilder {}
-
-impl WrappedPickFirstPolicy {
-    fn new(options: LbPolicyOptions) -> Box<dyn LbPolicy> {
-        pick_first::reg();
-        Box::new(WrappedPickFirstPolicy {
-            pick_first: GLOBAL_LB_REGISTRY
-                .get_policy(pick_first::POLICY_NAME)
-                .unwrap()
-                .build(LbPolicyOptions {
-                    work_scheduler: options.work_scheduler,
-                }),
-        })
-    }
-}
 
 impl LbPolicyBuilder for WrappedPickFirstBuilder {
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy> {
@@ -227,6 +204,10 @@ impl WrappedPickFirstBuilder {
     fn new() -> Arc<dyn LbPolicyBuilder> {
         Arc::new(WrappedPickFirstBuilder {})
     }
+}
+
+struct WrappedPickFirstPolicy {
+    pick_first: Box<dyn LbPolicy>,
 }
 
 /*
@@ -324,7 +305,7 @@ impl ResolverUpdateSharder<Endpoint> for EndpointSharder {
         &self,
         resolver_update: ResolverUpdate,
     ) -> Result<Box<dyn Iterator<Item = ChildUpdate<Endpoint>>>, Box<dyn Error + Send + Sync>> {
-        let mut endpoint_to_child = HashMap::new();
+        let mut endpoint_to_child_map = HashMap::new();
         for endpoint in resolver_update.endpoints.clone().unwrap().iter() {
             let child_update = ChildUpdate {
                 child_identifier: endpoint.clone(),
@@ -337,8 +318,8 @@ impl ResolverUpdateSharder<Endpoint> for EndpointSharder {
                     resolution_note: resolver_update.resolution_note.clone(),
                 },
             };
-            endpoint_to_child.insert(endpoint.clone(), child_update);
+            endpoint_to_child_map.insert(endpoint.clone(), child_update);
         }
-        Ok(Box::new(endpoint_to_child.into_values()))
+        Ok(Box::new(endpoint_to_child_map.into_values()))
     }
 }
