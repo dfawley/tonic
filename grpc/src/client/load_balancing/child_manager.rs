@@ -30,6 +30,7 @@ use std::{
     fmt::Debug,
     sync::atomic::{AtomicUsize, Ordering},
 };
+use rand::Rng;
 
 use crate::client::load_balancing::{
     ChannelController, ConnectivityState, ExternalSubchannel, Failing, LbConfig, LbPolicy,
@@ -142,7 +143,7 @@ impl<T: ChildIdentifier> ChildManager<T> {
         let child_states_vec = self.child_states();
 
         // Construct pickers to return.
-        let mut ready_pickers = RoundRobinPicker::new();
+        let mut ready_pickers = Vec::new();
 
         let mut has_connecting = false;
         let mut has_ready = false;
@@ -159,7 +160,7 @@ impl<T: ChildIdentifier> ChildManager<T> {
                     is_transient_failure = false;
                 }
                 ConnectivityState::Ready => {
-                    ready_pickers.add_picker(state.picker.clone());
+                    ready_pickers.push(state.picker.clone());
                     is_transient_failure = false;
                     has_ready = true;
                 }
@@ -181,14 +182,12 @@ impl<T: ChildIdentifier> ChildManager<T> {
         // Now update state and send picker as appropriate.
         match new_state {
             ConnectivityState::Ready => {
-                let pickers_vec = ready_pickers.pickers.clone();
-                let picker: Arc<dyn Picker> = Arc::new(ready_pickers);
                 let should_update =
-                    !self.compare_prev_to_new_pickers(&self.last_ready_pickers, &pickers_vec);
-
+                    !self.compare_prev_to_new_pickers(&self.last_ready_pickers, &ready_pickers);
+                self.last_ready_pickers = ready_pickers.clone();
+                let picker = Arc::new(RoundRobinPicker::new(ready_pickers));
                 if should_update || self.prev_state != ConnectivityState::Ready {
                     self.prev_state = ConnectivityState::Ready;
-                    self.last_ready_pickers = pickers_vec;
                     return Some(LbState {
                         connectivity_state: ConnectivityState::Ready,
                         picker,
@@ -404,8 +403,7 @@ impl<T: ChildIdentifier> LbPolicy for ChildManager<T> {
     }
 
     fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController) {
-        let child_idxes = mem::take(&mut *self.pending_work.lock().unwrap());
-        for child_idx in child_idxes {
+        for child_idx in 0..self.children.len() {
             let mut channel_controller = WrappedController::new(channel_controller);
             self.children[child_idx]
                 .policy
@@ -439,7 +437,7 @@ impl ChannelController for WrappedController<'_> {
     }
 
     fn update_picker(&mut self, update: LbState) {
-        self.picker_update = Some(update.clone());
+        self.picker_update = Some(update);
     }
 
     fn request_resolution(&mut self) {
@@ -467,24 +465,19 @@ struct RoundRobinPicker {
 }
 
 impl RoundRobinPicker {
-    fn new() -> Self {
+    fn new(pickers: Vec<Arc<dyn Picker>>) -> Self {
+        let mut rng = rand::thread_rng(); 
+        let random_index: usize = rng.gen_range(0..pickers.len()); 
         Self {
-            pickers: vec![],
-            next: AtomicUsize::new(0),
+            pickers: pickers,
+            next: AtomicUsize::new(random_index),
         }
-    }
-
-    fn add_picker(&mut self, picker: Arc<dyn Picker>) {
-        self.pickers.push(picker);
     }
 }
 
 impl Picker for RoundRobinPicker {
     fn pick(&self, request: &Request) -> PickResult {
         let len = self.pickers.len();
-        if len == 0 {
-            return PickResult::Queue;
-        }
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % len;
         self.pickers[idx].pick(request)
     }
