@@ -7,13 +7,14 @@ use tokio::time;
 use tonic::transport::Channel;
 use tonic::Request;
 
+mod routeguide;
 use routeguide::route_guide_client::RouteGuideClient;
 use routeguide::{Point, Rectangle, RouteNote};
 
-pub mod routeguide {
-    tonic::include_proto!("routeguide");
-}
-
+//pub mod routeguide {
+//    tonic::include_proto!("routeguide");
+//}
+/*
 async fn print_features(client: &mut RouteGuideClient<Channel>) -> Result<(), Box<dyn Error>> {
     let rectangle = Rectangle {
         lo: Some(Point {
@@ -57,7 +58,7 @@ async fn run_record_route(client: &mut RouteGuideClient<Channel>) -> Result<(), 
 
     Ok(())
 }
-
+*/
 async fn run_route_chat(client: &mut RouteGuideClient<Channel>) -> Result<(), Box<dyn Error>> {
     let start = time::Instant::now();
 
@@ -79,7 +80,7 @@ async fn run_route_chat(client: &mut RouteGuideClient<Channel>) -> Result<(), Bo
         }
     };
 
-    let response = client.route_chat(Request::new(outbound)).await?;
+    let response = client.route_chat().call(outbound).await?;
     let mut inbound = response.into_inner();
 
     while let Some(note) = inbound.message().await? {
@@ -95,19 +96,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("*** SIMPLE RPC ***");
     let response = client
-        .get_feature(Request::new(Point {
+        .get_feature(Point {
             latitude: 409_146_138,
             longitude: -746_188_906,
-        }))
+        })
+        .call()
         .await?;
     println!("RESPONSE = {response:?}");
 
-    println!("\n*** SERVER STREAMING ***");
-    print_features(&mut client).await?;
+    let response = client
+        .get_feature(Point {
+            latitude: 419999544,
+            longitude: -740371136,
+        })
+        .use_response(response)
+        .call()
+        .await?;
+    println!("RESPONSE = {response:?}");
 
-    println!("\n*** CLIENT STREAMING ***");
-    run_record_route(&mut client).await?;
+    /*
+        println!("\n*** SERVER STREAMING ***");
+        print_features(&mut client).await?;
 
+        println!("\n*** CLIENT STREAMING ***");
+        run_record_route(&mut client).await?;
+    */
     println!("\n*** BIDIRECTIONAL STREAMING ***");
     run_route_chat(&mut client).await?;
 
