@@ -35,7 +35,7 @@ pub trait SendMessage: Send + Sync {
     fn encode(&self) -> Vec<Vec<u8>>;
 
     #[doc(hidden)]
-    fn _ptr_for(&self, id: TypeId) -> Option<*const ()> {
+    unsafe fn _ptr_for(&self, id: TypeId) -> Option<*const ()> {
         None
     }
 }
@@ -45,7 +45,7 @@ pub trait RecvMessage: Send + Sync {
     fn decode(&mut self, data: Vec<Vec<u8>>);
 
     #[doc(hidden)]
-    fn _ptr_for(&mut self, id: TypeId) -> Option<*mut ()> {
+    unsafe fn _ptr_for(&mut self, id: TypeId) -> Option<*mut ()> {
         None
     }
 }
@@ -63,7 +63,7 @@ pub trait MessageType {
 impl dyn SendMessage + '_ {
     /// Downcasts the SendMessage to T::Target if the SendMessage contains a T.
     pub fn downcast_ref<T: MessageType>(&self) -> Option<&T::Target<'_>> {
-        if let Some(ptr) = self._ptr_for(T::type_id()) {
+        if let Some(ptr) = unsafe { self._ptr_for(T::type_id()) } {
             unsafe { Some(&*(ptr as *mut T::Target<'_>)) }
         } else {
             None
@@ -75,7 +75,7 @@ impl dyn SendMessage + '_ {
 impl dyn RecvMessage + '_ {
     /// Downcasts the RecvMessage to T::Target if the RecvMessage contains a T.
     pub fn downcast_mut<T: MessageType>(&mut self) -> Option<&mut T::Target<'_>> {
-        if let Some(ptr) = self._ptr_for(T::type_id()) {
+        if let Some(ptr) = unsafe { self._ptr_for(T::type_id()) } {
             unsafe { Some(&mut *(ptr as *mut T::Target<'_>)) }
         } else {
             None
