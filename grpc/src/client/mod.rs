@@ -90,7 +90,6 @@ pub struct CallOptions {
 ///
 /// Most applications will not use this type directly, and will instead use the
 /// generated APIs (e.g.  protobuf) to perform RPCs instead.
-#[trait_variant::make(Send)]
 pub trait Invoke: Send + Sync {
     /// Starts an RPC, returning the send and receive streams to interact with
     /// it.
@@ -102,35 +101,10 @@ pub trait Invoke: Send + Sync {
     /// RecvStream are asynchronous, and may block their first operations until
     /// quota is available, a connection is ready, etc.
     fn invoke(
-        &self,
-        method: impl Into<String>,
-        options: CallOptions,
-    ) -> (impl SendStream, impl RecvStream);
-}
-
-/// The `InvokeOnce` trait is implemented by types that can perform a single
-/// RPC.  It is automatically implemented on references of types that implement
-/// `Invoke`.
-///
-/// Most applications will not use this type directly, and will instead use the
-/// generated APIs (e.g.  protobuf) to perform RPCs instead.
-pub trait InvokeOnce: Send + Sync {
-    /// Provides the same semantics as `Invoke.invoke`.
-    fn invoke_once(
         self,
         method: impl Into<String>,
         options: CallOptions,
     ) -> (impl SendStream, impl RecvStream);
-}
-
-impl<C: Invoke> InvokeOnce for &C {
-    fn invoke_once(
-        self,
-        method: impl Into<String>,
-        options: CallOptions,
-    ) -> (impl SendStream, impl RecvStream) {
-        <C as Invoke>::invoke(self, method, options)
-    }
 }
 
 /// Represents the sending side of a client stream.  When a `SendStream` is

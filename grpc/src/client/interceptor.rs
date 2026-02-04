@@ -24,78 +24,65 @@
 
 use crate::client::CallOptions;
 use crate::client::Invoke;
-use crate::client::InvokeOnce;
 use crate::client::RecvStream;
 use crate::client::SendStream;
 
-/// A trait which allows intercepting an RPC invoke operation.
-pub trait Intercept: Send + Sync {
+/// A trait which allows intercepting an RPC invoke operation.  The trait is
+/// generic on I: Invoke as an implementer may require I to implement Clone in
+/// order to use it multiple times during the handling of a single intercept
+/// operation.
+pub trait Intercept<I: Invoke>: Send + Sync {
     /// Intercepts the start of a call.  Implementations should generally use
     /// next to create and start a call whose streams are optionally wrapped
     /// before being returned.
     fn intercept(
-        &self,
-        method: impl Into<String>,
-        args: CallOptions,
-        next: &impl Invoke,
-    ) -> (impl SendStream, impl RecvStream);
-}
-
-/// A trait which allows intercepting a call one time only.
-pub trait InterceptOnce: Send + Sync {
-    /// Starts a call.  Implementations should generally use next to create and
-    /// start a call whose streams are optionally wrapped before being returned.
-    fn intercept_once(
         self,
         method: impl Into<String>,
-        args: CallOptions,
-        next: impl InvokeOnce,
+        options: CallOptions,
+        next: I,
     ) -> (impl SendStream, impl RecvStream);
 }
 
 /// Wraps `Invoke` and an `Intercept` impls and implements `Invoke` for the
 /// combination.
-#[derive(Clone)]
-pub struct Interceptor<Inv, Int> {
+#[derive(Clone, Copy)]
+pub struct Intercepted<Inv, Int> {
     invoke: Inv,
     intercept: Int,
 }
 
-impl<Inv, Int> Interceptor<Inv, Int> {
+impl<Inv, Int> Intercepted<Inv, Int> {
     pub fn new(invoke: Inv, intercept: Int) -> Self {
         Self { invoke, intercept }
     }
 }
 
-impl<Inv: Invoke, Int: Intercept> Invoke for Interceptor<Inv, Int> {
+impl<Inv, Int> Invoke for Intercepted<Inv, Int>
+where
+    Inv: Invoke,
+    Int: Intercept<Inv>,
+{
     fn invoke(
-        &self,
-        method: impl Into<String>,
-        options: CallOptions,
-    ) -> (impl SendStream, impl RecvStream) {
-        self.intercept.intercept(method, options, &self.invoke)
-    }
-}
-
-/// Wraps `InvokeOnce` and `InterceptorOnce` impls and implements `InvokeOnce`
-/// for the combination.
-pub struct InterceptorOnce<Inv, Int> {
-    invoke: Inv,
-    intercept: Int,
-}
-
-impl<Inv, Int> InterceptorOnce<Inv, Int> {
-    pub fn new(invoke: Inv, intercept: Int) -> Self {
-        Self { invoke, intercept }
-    }
-}
-
-impl<Inv: InvokeOnce, Int: InterceptOnce> InvokeOnce for InterceptorOnce<Inv, Int> {
-    fn invoke_once(
         self,
         method: impl Into<String>,
         options: CallOptions,
     ) -> (impl SendStream, impl RecvStream) {
-        self.intercept.intercept_once(method, options, self.invoke)
+        self.intercept.intercept(method, options, self.invoke)
+    }
+}
+
+impl<'a, Inv, Int> Invoke for &'a Intercepted<Inv, Int>
+where
+    Inv: Send + Sync,
+    Int: Send + Sync,
+    &'a Inv: Invoke + Send + Sync,
+    &'a Int: Intercept<&'a Inv>,
+{
+    fn invoke(
+        self,
+        method: impl Into<String>,
+        options: CallOptions,
+    ) -> (impl SendStream, impl RecvStream) {
+        (&self.intercept).intercept(method, options, &self.invoke)
     }
 }
