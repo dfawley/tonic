@@ -1,4 +1,8 @@
+use crate::client::interceptor::Intercept;
+use crate::client::CallOptions;
+use crate::client::InvokeOnce;
 use crate::client::RecvStream;
+use crate::client::SendStream;
 use crate::core::ClientResponseStreamItem;
 use crate::core::RecvMessage;
 use crate::core::ResponseStreamItem;
@@ -6,20 +10,49 @@ use crate::core::Trailers;
 use crate::status::StatusError;
 use crate::StatusCode;
 
-enum RecvStreamState {
-    AwaitingHeaders,
-    AwaitingMessagesOrTrailers,
-    AwaitingTrailers,
-    Done,
+/// An interceptor that enforces proper gRPC semantics on the response stream.
+pub struct ResponseValidator {
+    unary: bool,
+}
+
+impl ResponseValidator {
+    /// Constructs a new instance of the response validator.  If `unary` is set,
+    /// the validator will enforce proper unary protocol for the stream (e.g.
+    /// exactly one message or an error).
+    ///
+    /// Note that wrapping an entire channel with this interceptor is likely
+    /// inappropraite if `unary` is set.
+    pub fn new(unary: bool) -> Self {
+        Self { unary }
+    }
+}
+
+impl<I: InvokeOnce> Intercept<I> for ResponseValidator {
+    fn intercept(
+        &self,
+        method: String,
+        options: CallOptions,
+        next: I,
+    ) -> (impl SendStream + use<I>, impl RecvStream + use<I>) {
+        let (tx, rx) = next.invoke_once(method, options);
+        (tx, RecvStreamValidator::new(rx, self.unary))
+    }
 }
 
 /// RecvStreamValidator wraps a client's RecvStream and enforces proper
 /// RecvStream semantics on it so that protocol validation does not need to be
 /// handled by the consumer.
-pub struct RecvStreamValidator<R> {
+struct RecvStreamValidator<R> {
     recv_stream: R,
     state: RecvStreamState,
     unary_response: bool,
+}
+
+enum RecvStreamState {
+    AwaitingHeaders,
+    AwaitingMessagesOrTrailers,
+    AwaitingTrailers,
+    Done,
 }
 
 impl<R> RecvStreamValidator<R>
@@ -111,10 +144,16 @@ mod test {
     use tokio::sync::mpsc::Sender;
 
     use super::*;
+    use crate::client::interceptor::Intercepted;
+    use crate::client::CallOptions;
+    use crate::client::InvokeOnce;
     use crate::client::RecvStream;
+    use crate::client::SendOptions;
+    use crate::client::SendStream;
     use crate::core::ClientResponseStreamItem;
     use crate::core::RecvMessage;
     use crate::core::ResponseHeaders;
+    use crate::core::SendMessage;
     use crate::core::Trailers;
 
     // Tests that an error occurs if messages are received before headers.
@@ -346,8 +385,11 @@ mod test {
         expect: ResponseStreamItem<()>,
         unary: bool,
     ) {
-        let (mock_stream, tx) = MockRecvStream::new();
-        let mut validator = RecvStreamValidator::new(mock_stream, unary);
+        let (channel, tx) = MockRecvStream::new();
+        let channel = Intercepted::new(channel, ResponseValidator::new(unary));
+        let (_, recv_stream) = channel.invoke_once("method".to_string(), CallOptions::default());
+
+        let mut validator = RecvStreamValidator::new(recv_stream, unary);
         // Send all but the last item, verifying it is returned by the
         // validator.
         for item in &scenario[..scenario.len() - 1] {
@@ -379,14 +421,34 @@ mod test {
         }
     }
 
-    pub struct NopRecvMessage;
+    struct NopSendStream;
+
+    impl SendStream for NopSendStream {
+        async fn send(&mut self, _item: &dyn SendMessage, _options: SendOptions) -> Result<(), ()> {
+            Ok(())
+        }
+    }
+
+    struct NopRecvMessage;
 
     impl RecvMessage for NopRecvMessage {
         fn decode(&mut self, data: Vec<Vec<u8>>) {}
     }
 
-    pub struct MockRecvStream {
+    /// Implements a RecvStream and an InvokeOnce that can be directed what to
+    /// return manually by writing to the channel returned by `new`.
+    struct MockRecvStream {
         rx: Receiver<ClientResponseStreamItem>,
+    }
+
+    impl InvokeOnce for MockRecvStream {
+        fn invoke_once(
+            self,
+            method: String,
+            options: CallOptions,
+        ) -> (impl SendStream, impl RecvStream) {
+            (NopSendStream, self)
+        }
     }
 
     impl RecvStream for MockRecvStream {

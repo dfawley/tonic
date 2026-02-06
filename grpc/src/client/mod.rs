@@ -76,7 +76,7 @@ impl Display for ConnectivityState {
 ///
 /// Most applications will not need this type, and will set options via the
 /// generated (e.g. protobuf) APIs instead.
-#[derive(Default)]
+#[derive(Default, Clone)]
 #[non_exhaustive]
 pub struct CallOptions {
     /// The deadline for the call.  If unset, the call may run indefinitely.
@@ -90,7 +90,6 @@ pub struct CallOptions {
 ///
 /// Most applications will not use this type directly, and will instead use the
 /// generated APIs (e.g.  protobuf) to perform RPCs instead.
-#[trait_variant::make(Send)]
 pub trait Invoke: Send + Sync {
     /// Starts an RPC, returning the send and receive streams to interact with
     /// it.
@@ -101,11 +100,7 @@ pub trait Invoke: Send + Sync {
     /// locally-erroring stream immediately instead.  However, SendStream and
     /// RecvStream are asynchronous, and may block their first operations until
     /// quota is available, a connection is ready, etc.
-    fn invoke(
-        &self,
-        method: impl Into<String>,
-        options: CallOptions,
-    ) -> (impl SendStream, impl RecvStream);
+    fn invoke(&self, method: String, options: CallOptions) -> (impl SendStream, impl RecvStream);
 }
 
 /// The `InvokeOnce` trait is implemented by types that can perform a single
@@ -118,7 +113,7 @@ pub trait InvokeOnce: Send + Sync {
     /// Provides the same semantics as `Invoke.invoke`.
     fn invoke_once(
         self,
-        method: impl Into<String>,
+        method: String,
         options: CallOptions,
     ) -> (impl SendStream, impl RecvStream);
 }
@@ -126,10 +121,10 @@ pub trait InvokeOnce: Send + Sync {
 impl<C: Invoke> InvokeOnce for &C {
     fn invoke_once(
         self,
-        method: impl Into<String>,
+        method: String,
         options: CallOptions,
     ) -> (impl SendStream, impl RecvStream) {
-        <C as Invoke>::invoke(self, method, options)
+        self.invoke(method, options)
     }
 }
 
