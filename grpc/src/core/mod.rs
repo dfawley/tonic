@@ -23,16 +23,18 @@
  */
 
 //! Types used to implement core gRPC functionality common to clients and
-//! servers.  Note that must gRPC applications should not need these types
+//! servers.  Note that most gRPC applications should not need these types
 //! unless they are implementing custom interceptors.
 
+use bytes::Bytes;
 use std::any::TypeId;
+use std::collections::VecDeque;
 
 use crate::Status;
 
 #[allow(unused)]
 pub trait SendMessage: Send + Sync {
-    fn encode(&self) -> Vec<Vec<u8>>;
+    fn encode(&self) -> Result<VecDeque<Bytes>, String>;
 
     #[doc(hidden)]
     unsafe fn _ptr_for(&self, id: TypeId) -> Option<*const ()> {
@@ -42,7 +44,7 @@ pub trait SendMessage: Send + Sync {
 
 #[allow(unused)]
 pub trait RecvMessage: Send + Sync {
-    fn decode(&mut self, data: Vec<Vec<u8>>);
+    fn decode(&mut self, data: &mut VecDeque<Bytes>) -> Result<(), String>;
 
     #[doc(hidden)]
     unsafe fn _ptr_for(&mut self, id: TypeId) -> Option<*mut ()> {
@@ -56,17 +58,27 @@ pub trait RecvMessage: Send + Sync {
 pub trait MessageType {
     /// The message view's type, which may have a lifetime.
     type Target<'a>;
-    /// The 'static TypeId of the message view.
-    fn type_id() -> TypeId;
+}
+
+fn msg_type_id<T: MessageType>() -> TypeId
+where
+    T::Target<'static>: 'static,
+{
+    TypeId::of::<T::Target<'static>>()
 }
 
 impl dyn SendMessage + '_ {
     /// Downcasts the SendMessage to T::Target if the SendMessage contains a T.
-    pub fn downcast_ref<T: MessageType>(&self) -> Option<&T::Target<'_>> {
-        if let Some(ptr) = unsafe { self._ptr_for(T::type_id()) } {
-            unsafe { Some(&*(ptr as *mut T::Target<'_>)) }
-        } else {
-            None
+    pub fn downcast_ref<T: MessageType>(&self) -> Option<&T::Target<'_>>
+    where
+        T::Target<'static>: 'static,
+    {
+        unsafe {
+            if let Some(ptr) = self._ptr_for(msg_type_id::<T>()) {
+                Some(&*(ptr as *mut T::Target<'_>))
+            } else {
+                None
+            }
         }
     }
 }
@@ -74,11 +86,16 @@ impl dyn SendMessage + '_ {
 #[allow(unused)]
 impl dyn RecvMessage + '_ {
     /// Downcasts the RecvMessage to T::Target if the RecvMessage contains a T.
-    pub fn downcast_mut<T: MessageType>(&mut self) -> Option<&mut T::Target<'_>> {
-        if let Some(ptr) = unsafe { self._ptr_for(T::type_id()) } {
-            unsafe { Some(&mut *(ptr as *mut T::Target<'_>)) }
-        } else {
-            None
+    pub fn downcast_mut<T: MessageType>(&mut self) -> Option<&mut T::Target<'_>>
+    where
+        T::Target<'static>: 'static,
+    {
+        unsafe {
+            if let Some(ptr) = self._ptr_for(msg_type_id::<T>()) {
+                Some(&mut *(ptr as *mut T::Target<'_>))
+            } else {
+                None
+            }
         }
     }
 }

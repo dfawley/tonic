@@ -76,7 +76,7 @@ impl Display for ConnectivityState {
 ///
 /// Most applications will not need this type, and will set options via the
 /// generated (e.g. protobuf) APIs instead.
-#[derive(Default)]
+#[derive(Default, Clone)]
 #[non_exhaustive]
 pub struct CallOptions {
     /// The deadline for the call.  If unset, the call may run indefinitely.
@@ -91,6 +91,9 @@ pub struct CallOptions {
 /// Most applications will not use this type directly, and will instead use the
 /// generated APIs (e.g.  protobuf) to perform RPCs instead.
 pub trait Invoke: Send + Sync {
+    type SendStream: SendStream + 'static;
+    type RecvStream: RecvStream + 'static;
+
     /// Starts an RPC, returning the send and receive streams to interact with
     /// it.
     ///
@@ -104,7 +107,7 @@ pub trait Invoke: Send + Sync {
         self,
         method: impl Into<String>,
         options: CallOptions,
-    ) -> (impl SendStream, impl RecvStream);
+    ) -> (Self::SendStream, Self::RecvStream);
 }
 
 /// Represents the sending side of a client stream.  When a `SendStream` is
@@ -124,14 +127,14 @@ pub trait SendStream: Send {
     /// This method is not intended to be cancellation safe.  If the returned
     /// future is not polled to completion, the behavior of any subsequent calls
     /// to the SendStream are undefined and data may be lost.
-    async fn send(&mut self, item: &dyn SendMessage, options: SendOptions) -> Result<(), ()>;
+    async fn send(&mut self, msg: &dyn SendMessage, options: SendOptions) -> Result<(), ()>;
 }
 
 /// Contains settings to configure a send operation on a SendStream.
 ///
 /// Most applications will not need this type directly, and will use the
 /// generated (e.g.  protobuf) APIs to configure RPCs instead.
-#[derive(Default)]
+#[derive(Default, Clone)]
 #[non_exhaustive]
 pub struct SendOptions {
     /// Closes the stream immediately after sending this message.

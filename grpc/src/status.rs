@@ -5,7 +5,7 @@ pub use server_status::ServerStatus;
 pub use status_code::StatusCode;
 
 /// Represents a gRPC status.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusError {
     code: StatusCode,
     message: String,
