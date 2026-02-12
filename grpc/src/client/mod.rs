@@ -103,11 +103,7 @@ pub trait Invoke: Send + Sync {
     /// locally-erroring stream immediately instead.  However, SendStream and
     /// RecvStream are asynchronous, and may block their first operations until
     /// quota is available, a connection is ready, etc.
-    fn invoke(
-        self,
-        method: impl Into<String>,
-        options: CallOptions,
-    ) -> (Self::SendStream, Self::RecvStream);
+    fn invoke(self, method: String, options: CallOptions) -> (Self::SendStream, Self::RecvStream);
 }
 
 /// Represents the sending side of a client stream.  When a `SendStream` is

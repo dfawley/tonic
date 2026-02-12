@@ -33,7 +33,7 @@ impl<I: Invoke> Intercept<I> for &ResponseValidator {
 
     fn intercept(
         self,
-        method: impl Into<String>,
+        method: String,
         options: CallOptions,
         next: I,
     ) -> (Self::SendStream, Self::RecvStream) {
@@ -453,7 +453,7 @@ mod test {
 
         fn invoke(
             self,
-            method: impl Into<String>,
+            method: String,
             options: CallOptions,
         ) -> (Self::SendStream, Self::RecvStream) {
             (NopSendStream, self)

@@ -40,7 +40,7 @@ pub trait Intercept<I>: Send + Sync {
     /// before being returned.
     fn intercept(
         self,
-        method: impl Into<String>,
+        method: String,
         options: CallOptions,
         next: I,
     ) -> (Self::SendStream, Self::RecvStream);
@@ -88,7 +88,7 @@ where
 
     fn intercept(
         self,
-        method: impl Into<String>,
+        method: String,
         options: CallOptions,
         next: I,
     ) -> (Self::SendStream, Self::RecvStream) {
@@ -120,11 +120,7 @@ where
     type SendStream = Int::SendStream;
     type RecvStream = Int::RecvStream;
 
-    fn invoke(
-        self,
-        method: impl Into<String>,
-        options: CallOptions,
-    ) -> (Self::SendStream, Self::RecvStream) {
+    fn invoke(self, method: String, options: CallOptions) -> (Self::SendStream, Self::RecvStream) {
         self.intercept.intercept(method, options, self.invoke)
     }
 }
@@ -138,11 +134,7 @@ where
     type SendStream = <&'a Int as Intercept<&'a Inv>>::SendStream;
     type RecvStream = <&'a Int as Intercept<&'a Inv>>::RecvStream;
 
-    fn invoke(
-        self,
-        method: impl Into<String>,
-        options: CallOptions,
-    ) -> (Self::SendStream, Self::RecvStream) {
+    fn invoke(self, method: String, options: CallOptions) -> (Self::SendStream, Self::RecvStream) {
         // Delegate to the reference
         (&self.intercept).intercept(method, options, &self.invoke)
     }
@@ -171,11 +163,7 @@ where
     type SendStream = SS;
     type RecvStream = RS;
 
-    fn invoke(
-        self,
-        method: impl Into<String>,
-        options: CallOptions,
-    ) -> (Self::SendStream, Self::RecvStream) {
+    fn invoke(self, method: String, options: CallOptions) -> (Self::SendStream, Self::RecvStream) {
         self.intercept.intercept(method, options, &self.invoke)
     }
 }
@@ -274,7 +262,7 @@ mod test {
 
         fn intercept(
             self,
-            method: impl Into<String>,
+            method: String,
             args: CallOptions,
             next: I,
         ) -> (Self::SendStream, Self::RecvStream) {
@@ -290,7 +278,7 @@ mod test {
 
         fn intercept(
             self,
-            method: impl Into<String>,
+            method: String,
             args: CallOptions,
             next: &I,
         ) -> (Self::SendStream, Self::RecvStream) {
@@ -304,7 +292,7 @@ mod test {
 
         fn intercept(
             self,
-            method: impl Into<String>,
+            method: String,
             args: CallOptions,
             next: I,
         ) -> (Self::SendStream, Self::RecvStream) {
@@ -320,11 +308,10 @@ mod test {
 
         fn intercept(
             self,
-            method: impl Into<String>,
+            method: String,
             args: CallOptions,
             next: &I,
         ) -> (Self::SendStream, Self::RecvStream) {
-            let method = method.into();
             let (_, _) = next.invoke(method.clone(), args.clone());
             next.invoke(method, args)
         }
@@ -336,23 +323,23 @@ mod test {
         // Reusable Invoke with resuable Intercept.
         {
             let i = NopInvoker.with_interceptor(Reusable);
-            i.invoke("", CallOptions::default());
+            i.invoke("".to_string(), CallOptions::default());
             // Since Invoke is implemented on &Intercepted, it is reusable.
-            i.invoke("", CallOptions::default());
+            i.invoke("".to_string(), CallOptions::default());
         }
 
         // One-shot Invoke with resuable Intercept.
         {
             let i = NopOnceInvoker.with_interceptor(Reusable);
-            i.invoke("", CallOptions::default());
+            i.invoke("".to_string(), CallOptions::default());
         }
 
         // Reusable Invoke with resuable fan-out Intercept.
         {
             let i = NopInvoker.with_interceptor(ReusableFanOut);
-            i.invoke("", CallOptions::default());
+            i.invoke("".to_string(), CallOptions::default());
             // Since Invoke is implemented on &Intercepted, it is reusable.
-            i.invoke("", CallOptions::default());
+            i.invoke("".to_string(), CallOptions::default());
         }
 
         // One-shot Invoke with fan-out Intercept is illegal.
@@ -360,19 +347,19 @@ mod test {
         // Reusable Invoke with one-shot Intercept.
         {
             let i = NopInvoker.with_once_interceptor(Oneshot);
-            i.invoke("", CallOptions::default());
+            i.invoke("".to_string(), CallOptions::default());
         }
 
         // One-shot Invoke with one-shot Intercept.
         {
             let i = NopOnceInvoker.with_once_interceptor(Oneshot);
-            i.invoke("", CallOptions::default());
+            i.invoke("".to_string(), CallOptions::default());
         }
 
         // Reusable Invoke with one-shot fan-out Intercept.
         {
             let i = NopInvoker.with_once_interceptor(OneshotFanOut);
-            i.invoke("", CallOptions::default());
+            i.invoke("".to_string(), CallOptions::default());
         }
 
         // One-shot Invoke with one-shot fan-out Intercept is illegal.
@@ -384,7 +371,7 @@ mod test {
     async fn test_retry_interceptor_succeeds() {
         let (invoker, mut controller) = MockInvoker::new();
         let chan = invoker.with_interceptor(ReusableFanOut);
-        let (mut tx, mut rx) = chan.invoke("", CallOptions::default());
+        let (mut tx, mut rx) = chan.invoke("".to_string(), CallOptions::default());
         let one = VecDeque::from(vec![Bytes::from(vec![1])]);
         let two = VecDeque::from(vec![Bytes::from(vec![2])]);
         tx.send(&ByteSendMsg::new(&one), SendOptions::default())
@@ -427,7 +414,7 @@ mod test {
     async fn test_retry_interceptor_fails() {
         let (invoker, mut controller) = MockInvoker::new();
         let chan = invoker.with_interceptor(ReusableFanOut);
-        let (mut tx, mut rx) = chan.invoke("", CallOptions::default());
+        let (mut tx, mut rx) = chan.invoke("".to_string(), CallOptions::default());
         let one = VecDeque::from(vec![Bytes::from(vec![1])]);
         let two = VecDeque::from(vec![Bytes::from(vec![2])]);
         tx.send(&ByteSendMsg::new(&one), SendOptions::default())
@@ -480,7 +467,7 @@ mod test {
     async fn test_retry_interceptor_commit_on_headers() {
         let (invoker, mut controller) = MockInvoker::new();
         let chan = invoker.with_interceptor(ReusableFanOut);
-        let (mut tx, mut rx) = chan.invoke("", CallOptions::default());
+        let (mut tx, mut rx) = chan.invoke("".to_string(), CallOptions::default());
         let one = VecDeque::from(vec![Bytes::from(vec![1])]);
         tx.send(&ByteSendMsg::new(&one), SendOptions::default())
             .await
@@ -553,7 +540,7 @@ mod test {
 
         fn invoke(
             self,
-            method: impl Into<String>,
+            method: String,
             options: CallOptions,
         ) -> (Self::SendStream, Self::RecvStream) {
             (
@@ -849,7 +836,7 @@ mod test {
 
         fn invoke(
             self,
-            method: impl Into<String>,
+            method: String,
             options: CallOptions,
         ) -> (Self::SendStream, Self::RecvStream) {
             (NopStream, NopStream)
@@ -864,7 +851,7 @@ mod test {
 
         fn invoke(
             self,
-            method: impl Into<String>,
+            method: String,
             options: CallOptions,
         ) -> (Self::SendStream, Self::RecvStream) {
             (NopStream, NopStream)
