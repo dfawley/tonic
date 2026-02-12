@@ -98,8 +98,8 @@ where
 
 /// Wraps `Invoke` and an `Intercept` impls and implements `Invoke` for the
 /// combination, either on its value if the combination may only be used once,
-/// or on its reference if the combination is reusable -- i.e. Inv is an
-/// InvokeFactory and Int is Intercept<InvokeFactory>.
+/// or on its reference if the combination is reusable -- i.e. `Inv` is an
+/// `InvokeFactory` and Int is `Intercept<InvokeFactory>`.
 #[derive(Clone, Copy)]
 pub struct Intercepted<Inv, Int> {
     invoke: Inv,
@@ -148,8 +148,8 @@ where
     }
 }
 
-/// InterceptedOnce is used to combine an InvokeFactory with a single-use
-/// Intercept<InvokeFactory> to implement Invoke.
+/// Combines an `InvokeFactory` with a single-use `Intercept<InvokeFactory>` to
+/// implement `Invoke`.
 pub struct InterceptedOnce<Inv, Int> {
     invoke: Inv,
     intercept: Int,
