@@ -5,24 +5,22 @@ pub use server_status::ServerStatus;
 pub use status_code::StatusCode;
 
 /// Represents a gRPC status.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusError {
+#[derive(Debug, Clone)]
+pub struct Status {
     code: StatusCode,
     message: String,
 }
 
-pub type Status = Result<(), StatusError>;
-
-impl StatusError {
+impl Status {
     /// Create a new `Status` with the given code and message.
     pub fn new(code: StatusCode, message: impl Into<String>) -> Self {
-        StatusError {
+        Status {
             code,
             message: message.into(),
         }
     }
 
-    /// Get the `StatusCode` of this `StatusError`.
+    /// Get the `StatusCode` of this `Status`.
     pub fn code(&self) -> StatusCode {
         self.code
     }
@@ -39,17 +37,17 @@ mod tests {
 
     #[test]
     fn test_status_new() {
-        let status = StatusError::new(StatusCode::Unknown, "not ok");
-        assert_eq!(status.code(), StatusCode::Unknown);
-        assert_eq!(status.message(), "not ok");
+        let status = Status::new(StatusCode::Ok, "ok");
+        assert_eq!(status.code(), StatusCode::Ok);
+        assert_eq!(status.message(), "ok");
     }
 
     #[test]
     fn test_status_debug() {
-        let status = StatusError::new(StatusCode::Internal, "not ok");
+        let status = Status::new(StatusCode::Ok, "ok");
         let debug = format!("{:?}", status);
         assert!(debug.contains("Status"));
-        assert!(debug.contains("Internal"));
-        assert!(debug.contains("not ok"));
+        assert!(debug.contains("Ok"));
+        assert!(debug.contains("ok"));
     }
 }

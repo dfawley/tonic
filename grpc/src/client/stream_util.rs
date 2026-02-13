@@ -6,7 +6,7 @@ use crate::core::ClientResponseStreamItem;
 use crate::core::RecvMessage;
 use crate::core::ResponseStreamItem;
 use crate::core::Trailers;
-use crate::status::StatusError;
+use crate::Status;
 use crate::StatusCode;
 
 /// An interceptor that enforces proper gRPC semantics on the response stream.
@@ -80,7 +80,7 @@ where
     fn error(&mut self, s: impl Into<String>) -> ClientResponseStreamItem {
         self.state = RecvStreamState::Done;
         ResponseStreamItem::Trailers(Trailers {
-            status: Err(StatusError::new(StatusCode::Internal, s)),
+            status: Status::new(StatusCode::Internal, s),
         })
     }
 }
@@ -121,7 +121,7 @@ where
             ResponseStreamItem::Trailers(t) => {
                 if self.unary_response
                     && !matches!(self.state, RecvStreamState::AwaitingTrailers)
-                    && t.status.is_ok()
+                    && t.status.code() == StatusCode::Ok
                 {
                     return self.error("unary stream received zero messages");
                 }
@@ -169,10 +169,7 @@ mod test {
             validate_scenario(
                 &scenario,
                 ResponseStreamItem::Trailers(Trailers {
-                    status: Err(StatusError::new(
-                        StatusCode::Internal,
-                        "received messages without headers",
-                    )),
+                    status: Status::new(StatusCode::Internal, "received messages without headers"),
                 }),
                 false,
             )
@@ -200,10 +197,7 @@ mod test {
             validate_scenario(
                 scenario,
                 ResponseStreamItem::Trailers(Trailers {
-                    status: Err(StatusError::new(
-                        StatusCode::Internal,
-                        "ended without trailers",
-                    )),
+                    status: Status::new(StatusCode::Internal, "ended without trailers"),
                 }),
                 false,
             )
@@ -230,10 +224,7 @@ mod test {
             validate_scenario(
                 scenario,
                 ResponseStreamItem::Trailers(Trailers {
-                    status: Err(StatusError::new(
-                        StatusCode::Internal,
-                        "received multiple headers",
-                    )),
+                    status: Status::new(StatusCode::Internal, "received multiple headers"),
                 }),
                 false,
             )
@@ -244,10 +235,14 @@ mod test {
     #[tokio::test]
     async fn test_validator_unary_ok_without_message() {
         let scenarios = [
-            vec![ResponseStreamItem::Trailers(Trailers { status: Ok(()) })],
+            vec![ResponseStreamItem::Trailers(Trailers {
+                status: Status::new(StatusCode::Ok, ""),
+            })],
             vec![
                 ResponseStreamItem::Headers(ResponseHeaders {}),
-                ResponseStreamItem::Trailers(Trailers { status: Ok(()) }),
+                ResponseStreamItem::Trailers(Trailers {
+                    status: Status::new(StatusCode::Ok, ""),
+                }),
             ],
         ];
 
@@ -255,10 +250,7 @@ mod test {
             validate_scenario(
                 scenario,
                 ResponseStreamItem::Trailers(Trailers {
-                    status: Err(StatusError::new(
-                        StatusCode::Internal,
-                        "received zero messages",
-                    )),
+                    status: Status::new(StatusCode::Internal, "received zero messages"),
                 }),
                 true,
             )
@@ -278,10 +270,7 @@ mod test {
             validate_scenario(
                 scenario,
                 ResponseStreamItem::Trailers(Trailers {
-                    status: Err(StatusError::new(
-                        StatusCode::Internal,
-                        "received multiple messages",
-                    )),
+                    status: Status::new(StatusCode::Internal, "received multiple messages"),
                 }),
                 true,
             )
@@ -296,13 +285,17 @@ mod test {
             ResponseStreamItem::Message(()),
             ResponseStreamItem::Message(()),
             ResponseStreamItem::Message(()),
-            ResponseStreamItem::Trailers(Trailers { status: Ok(()) }),
+            ResponseStreamItem::Trailers(Trailers {
+                status: Status::new(StatusCode::Ok, ""),
+            }),
         ]];
 
         for scenario in &scenarios {
             validate_scenario(
                 scenario,
-                ResponseStreamItem::Trailers(Trailers { status: Ok(()) }),
+                ResponseStreamItem::Trailers(Trailers {
+                    status: Status::new(StatusCode::Ok, ""),
+                }),
                 false,
             )
             .await;
@@ -317,7 +310,7 @@ mod test {
             ResponseStreamItem::Message(()),
             ResponseStreamItem::Message(()),
             ResponseStreamItem::Trailers(Trailers {
-                status: Err(StatusError::new(StatusCode::Aborted, "some err")),
+                status: Status::new(StatusCode::Aborted, "some err"),
             }),
         ]];
 
@@ -325,7 +318,7 @@ mod test {
             validate_scenario(
                 scenario,
                 ResponseStreamItem::Trailers(Trailers {
-                    status: Err(StatusError::new(StatusCode::Aborted, "some err")),
+                    status: Status::new(StatusCode::Aborted, "some err"),
                 }),
                 false,
             )
@@ -338,13 +331,17 @@ mod test {
         let scenarios = [vec![
             ResponseStreamItem::Headers(ResponseHeaders {}),
             ResponseStreamItem::Message(()),
-            ResponseStreamItem::Trailers(Trailers { status: Ok(()) }),
+            ResponseStreamItem::Trailers(Trailers {
+                status: Status::new(StatusCode::Ok, ""),
+            }),
         ]];
 
         for scenario in &scenarios {
             validate_scenario(
                 scenario,
-                ResponseStreamItem::Trailers(Trailers { status: Ok(()) }),
+                ResponseStreamItem::Trailers(Trailers {
+                    status: Status::new(StatusCode::Ok, ""),
+                }),
                 true,
             )
             .await;
@@ -355,19 +352,19 @@ mod test {
     async fn test_validator_erroring_unary() {
         let scenarios = [
             vec![ResponseStreamItem::Trailers(Trailers {
-                status: Err(StatusError::new(StatusCode::Aborted, "some err")),
+                status: Status::new(StatusCode::Aborted, "some err"),
             })],
             vec![
                 ResponseStreamItem::Headers(ResponseHeaders {}),
                 ResponseStreamItem::Trailers(Trailers {
-                    status: Err(StatusError::new(StatusCode::Aborted, "some err")),
+                    status: Status::new(StatusCode::Aborted, "some err"),
                 }),
             ],
             vec![
                 ResponseStreamItem::Headers(ResponseHeaders {}),
                 ResponseStreamItem::Message(()),
                 ResponseStreamItem::Trailers(Trailers {
-                    status: Err(StatusError::new(StatusCode::Aborted, "some err")),
+                    status: Status::new(StatusCode::Aborted, "some err"),
                 }),
             ],
         ];
@@ -376,7 +373,7 @@ mod test {
             validate_scenario(
                 scenario,
                 ResponseStreamItem::Trailers(Trailers {
-                    status: Err(StatusError::new(StatusCode::Aborted, "some err")),
+                    status: Status::new(StatusCode::Aborted, "some err"),
                 }),
                 true,
             )
@@ -412,16 +409,9 @@ mod test {
                 unreachable!(); // per matches check above
             };
             // Assert the codes match.
-            assert_eq!(
-                got_t.status.as_ref().map_err(|e| e.code()),
-                expect_t.status.as_ref().map_err(|e| e.code())
-            );
+            assert_eq!(got_t.status.code(), expect_t.status.code());
             // Assert the status received contains the expected status error message.
-            if let Err(got_t_err) = got_t.status {
-                assert!(got_t_err
-                    .message()
-                    .contains(expect_t.status.unwrap_err().message()));
-            }
+            assert!(got_t.status.message().contains(expect_t.status.message()));
         }
     }
 

@@ -2,6 +2,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum StatusCode {
+    Ok = 0,
     Cancelled = 1,
     Unknown = 2,
     InvalidArgument = 3,
