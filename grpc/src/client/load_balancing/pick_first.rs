@@ -8,8 +8,8 @@ use crate::{
         name_resolution::{Address, ResolverUpdate},
         ConnectivityState,
     },
+    core::RequestHeaders,
     rt::Runtime,
-    service::Request,
 };
 
 use super::{
@@ -112,7 +112,7 @@ struct OneSubchannelPicker {
 }
 
 impl Picker for OneSubchannelPicker {
-    fn pick(&self, request: &Request) -> PickResult {
+    fn pick(&self, request: &RequestHeaders) -> PickResult {
         PickResult::Pick(Pick {
             subchannel: self.sc.clone(),
             // on_complete: None,

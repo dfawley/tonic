@@ -33,11 +33,7 @@ use std::{
 };
 use tonic::{metadata::MetadataMap, Status};
 
-use crate::{
-    client::channel::WorkQueueTx,
-    rt::Runtime,
-    service::{Request, Response},
-};
+use crate::{client::channel::WorkQueueTx, core::RequestHeaders, rt::Runtime};
 
 use crate::client::{
     channel::{InternalChannelController, WorkQueueItem},
@@ -249,7 +245,7 @@ pub(crate) trait Picker: Send + Sync + Debug {
     /// time-consuming work to service this request, it should return Queue, and
     /// the Pick call will be repeated by the channel when a new Picker is
     /// produced by the LbPolicy.
-    fn pick(&self, request: &Request) -> PickResult;
+    fn pick(&self, request: &RequestHeaders) -> PickResult;
 }
 
 #[derive(Debug)]
@@ -347,7 +343,7 @@ impl LbState {
 }
 
 /// Type alias for the completion callback function.
-pub(crate) type CompletionCallback = Box<dyn Fn(&Response) + Send + Sync>;
+pub(crate) type CompletionCallback = Box<dyn Fn() + Send + Sync>;
 
 /// A collection of data used by the channel for routing a request.
 pub(crate) struct Pick {
@@ -601,7 +597,7 @@ impl<T: ForwardingSubchannel> private::Sealed for T {}
 pub(crate) struct QueuingPicker {}
 
 impl Picker for QueuingPicker {
-    fn pick(&self, _request: &Request) -> PickResult {
+    fn pick(&self, _request: &RequestHeaders) -> PickResult {
         PickResult::Queue
     }
 }
@@ -612,7 +608,7 @@ pub(crate) struct FailingPicker {
 }
 
 impl Picker for FailingPicker {
-    fn pick(&self, _: &Request) -> PickResult {
+    fn pick(&self, _: &RequestHeaders) -> PickResult {
         PickResult::Fail(Status::unavailable(self.error.clone()))
     }
 }

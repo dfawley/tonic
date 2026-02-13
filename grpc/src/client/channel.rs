@@ -33,14 +33,17 @@ use std::{
     vec,
 };
 
-use tokio::sync::{mpsc, watch, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use serde_json::json;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
-use crate::attributes::Attributes;
-use crate::rt;
-use crate::service::{Request, Response, Service};
+use crate::{
+    attributes::Attributes,
+    client::{DynRecvStream, DynSendStream, Invoke, RecvStream, SendOptions, SendStream},
+    core::{ClientResponseStreamItem, RecvMessage, RequestHeaders, SendMessage},
+};
+use crate::{client::CallOptions, rt};
 use crate::{client::ConnectivityState, rt::Runtime};
 use crate::{credentials::Credentials, rt::default_runtime};
 
@@ -169,10 +172,19 @@ impl Channel {
     ) -> Result<(), Box<dyn Error>> {
         todo!()
     }
+}
 
-    pub async fn call(&self, method: String, request: Request) -> Response {
+impl Invoke for &Channel {
+    type SendStream = ChannelSendStream;
+    type RecvStream = ChannelRecvStream;
+
+    fn invoke(
+        self,
+        method: RequestHeaders,
+        options: CallOptions,
+    ) -> (Self::SendStream, Self::RecvStream) {
         let ac = self.inner.get_active_channel();
-        ac.call(method, request).await
+        ac.invoke(method, options)
     }
 }
 
@@ -305,19 +317,27 @@ impl ActiveChannel {
         })
     }
 
-    async fn call(&self, method: String, request: Request) -> Response {
+    async fn start_stream(
+        &self,
+        headers: RequestHeaders,
+        options: CallOptions,
+        ss_tx: oneshot::Sender<Box<dyn DynSendStream>>,
+        rs_tx: oneshot::Sender<Box<dyn DynRecvStream>>,
+    ) {
         // TODO: pre-pick tasks (e.g. deadlines, interceptors, retry)
         let mut i = self.picker.iter();
         loop {
             if let Some(p) = i.next().await {
-                let result = &p.pick(&request);
-                // TODO: handle picker errors (queue or fail RPC)
+                let result = &p.pick(&headers);
                 match result {
                     PickResult::Pick(pr) => {
                         if let Some(sc) = (pr.subchannel.as_ref() as &dyn Any)
                             .downcast_ref::<ExternalSubchannel>()
                         {
-                            return sc.isc.as_ref().unwrap().call(method, request).await;
+                            let (ss, rs) = sc.isc.as_ref().unwrap().invoke(headers, options);
+                            ss_tx.send(ss);
+                            rs_tx.send(rs);
+                            return;
                         } else {
                             panic!("picked subchannel is not an implementation provided by the channel");
                         }
@@ -326,14 +346,82 @@ impl ActiveChannel {
                         // Continue and retry the RPC with the next picker.
                     }
                     PickResult::Fail(status) => {
-                        panic!("failed pick: {}", status);
+                        todo!("failed pick: {}", status);
                     }
                     PickResult::Drop(status) => {
-                        panic!("dropped pick: {}", status);
+                        todo!("dropped pick: {}", status);
                     }
                 }
             }
         }
+    }
+}
+
+impl Invoke for &ActiveChannel {
+    type SendStream = ChannelSendStream;
+    type RecvStream = ChannelRecvStream;
+
+    fn invoke(
+        self,
+        headers: RequestHeaders,
+        options: CallOptions,
+    ) -> (Self::SendStream, Self::RecvStream) {
+        let (ss_tx, ss_rx) = oneshot::channel();
+        let (rs_tx, rs_rx) = oneshot::channel();
+        self.runtime
+            .spawn(Box::pin(self.start_stream(headers, options, ss_tx, rs_tx)));
+        (
+            ChannelSendStream {
+                voc: ValOrChannel::Channel(ss_rx),
+            },
+            ChannelRecvStream {
+                voc: ValOrChannel::Channel(rs_rx),
+            },
+        )
+    }
+}
+
+enum ValOrChannel<T> {
+    Channel(oneshot::Receiver<T>),
+    Val(T),
+}
+impl<T> ValOrChannel<T> {
+    async fn val(&mut self) -> Result<&mut T, ()> {
+        match self {
+            ValOrChannel::Val(v) => Ok(v),
+            ValOrChannel::Channel(rx) => {
+                let v = rx.await;
+                let Ok(v) = v else {
+                    return Err(());
+                };
+                *self = ValOrChannel::Val(v);
+                let ValOrChannel::Val(v) = self else {
+                    unreachable!()
+                };
+                Ok(v)
+            }
+        }
+    }
+}
+
+struct ChannelSendStream {
+    voc: ValOrChannel<Box<dyn DynSendStream>>,
+}
+impl SendStream for ChannelSendStream {
+    async fn send(&mut self, msg: &dyn SendMessage, options: SendOptions) -> Result<(), ()> {
+        // Note: unwrap is appropriate as that means something killed our task
+        // running start_stream.
+        self.voc.val().await.unwrap().send(msg, options).await
+    }
+}
+struct ChannelRecvStream {
+    voc: ValOrChannel<Box<dyn DynRecvStream>>,
+}
+impl RecvStream for ChannelRecvStream {
+    async fn next(&mut self, msg: &mut dyn RecvMessage) -> ClientResponseStreamItem {
+        // Note: unwrap is appropriate as that means something killed our task
+        // running start_stream.
+        self.voc.val().await.unwrap().next(msg).await
     }
 }
 

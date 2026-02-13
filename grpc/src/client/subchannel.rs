@@ -6,9 +6,10 @@ use super::{
     ConnectivityState,
 };
 use crate::{
-    client::{channel::WorkQueueItem, transport::TransportOptions},
+    client::{
+        channel::WorkQueueItem, transport::TransportOptions, DynRecvStream, DynSendStream, Invoke,
+    },
     rt::{BoxedTaskHandle, Runtime},
-    service::{Request, Response, Service},
 };
 use core::panic;
 use std::time::{Duration, Instant};
@@ -19,9 +20,9 @@ use std::{
     sync::{Arc, Mutex, RwLock, Weak},
 };
 use tokio::sync::{mpsc, oneshot};
-use tonic::async_trait;
 
-type SharedService = Arc<dyn Service>;
+type SharedService =
+    Arc<dyn Invoke<SendStream = Box<dyn DynSendStream>, RecvStream = Box<dyn DynRecvStream>>>;
 
 pub trait Backoff: Send + Sync {
     fn backoff_until(&self) -> Instant;
@@ -185,9 +186,15 @@ struct InnerSubchannel {
     disconnect_task: Option<BoxedTaskHandle>,
 }
 
-#[async_trait]
-impl Service for InternalSubchannel {
-    async fn call(&self, method: String, request: Request) -> Response {
+impl Invoke for &InternalSubchannel {
+    type SendStream = Box<dyn DynSendStream>;
+    type RecvStream = Box<dyn DynRecvStream>;
+
+    fn invoke(
+        self,
+        headers: crate::core::RequestHeaders,
+        options: super::CallOptions,
+    ) -> (Self::SendStream, Self::RecvStream) {
         let svc = self.inner.lock().unwrap().state.connected_transport();
         if svc.is_none() {
             // TODO(easwars): Change the signature of this method to return a
@@ -196,7 +203,7 @@ impl Service for InternalSubchannel {
         }
 
         let svc = svc.unwrap().clone();
-        return svc.call(method, request).await;
+        svc.invoke(headers, options)
     }
 }
 

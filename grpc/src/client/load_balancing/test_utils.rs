@@ -28,7 +28,7 @@ use crate::client::load_balancing::{
 };
 use crate::client::name_resolution::{Address, ResolverUpdate};
 use crate::client::service_config::LbConfig;
-use crate::service::{Message, Request};
+use crate::core::RequestHeaders;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::error::Error;
@@ -36,12 +36,8 @@ use std::hash::Hash;
 use std::{fmt::Debug, sync::Arc};
 use tokio::sync::{mpsc, Notify};
 
-#[derive(Debug)]
-pub(crate) struct EmptyMessage {}
-pub(crate) fn new_request() -> Request {
-    Request::new(Box::pin(tokio_stream::once(
-        Box::new(EmptyMessage {}) as Box<dyn Message>
-    )))
+pub(crate) fn new_request() -> RequestHeaders {
+    RequestHeaders::default()
 }
 
 // A test subchannel that forwards connect calls to a channel.

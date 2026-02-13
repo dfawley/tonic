@@ -1,4 +1,6 @@
-use crate::{rt::Runtime, service::Service};
+use crate::client::interceptor::InvokeFactory;
+use crate::client::{DynRecvStream, DynSendStream, Invoke};
+use crate::rt::Runtime;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
 
@@ -15,7 +17,9 @@ pub(crate) use registry::GLOBAL_TRANSPORT_REGISTRY;
 use tokio::sync::oneshot;
 
 pub(crate) struct ConnectedTransport {
-    pub service: Box<dyn Service>,
+    pub service: Box<
+        dyn InvokeFactory<SendStream = Box<dyn DynSendStream>, RecvStream = Box<dyn DynRecvStream>>,
+    >,
     pub disconnection_listener: oneshot::Receiver<Result<(), String>>,
 }
 

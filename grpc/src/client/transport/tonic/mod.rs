@@ -1,16 +1,24 @@
+use crate::client::name_resolution::TCP_IP_NETWORK_TYPE;
 use crate::client::transport::registry::GLOBAL_TRANSPORT_REGISTRY;
 use crate::client::transport::ConnectedTransport;
 use crate::client::transport::Transport;
 use crate::client::transport::TransportOptions;
+use crate::client::CallOptions;
+use crate::client::DynRecvStream;
+use crate::client::DynSendStream;
+use crate::client::Invoke;
+use crate::client::RecvStream;
+use crate::client::SendOptions;
+use crate::client::SendStream;
 use crate::codec::BytesCodec;
+use crate::core::ClientResponseStreamItem;
+use crate::core::RecvMessage;
+use crate::core::RequestHeaders;
+use crate::core::SendMessage;
 use crate::rt::hyper_wrapper::{HyperCompatExec, HyperCompatTimer, HyperStream};
 use crate::rt::BoxedTaskHandle;
 use crate::rt::Runtime;
 use crate::rt::TcpOptions;
-use crate::service::Message;
-use crate::service::Request as GrpcRequest;
-use crate::service::Response as GrpcResponse;
-use crate::{client::name_resolution::TCP_IP_NETWORK_TYPE, service::Service};
 use bytes::Bytes;
 use http::uri::PathAndQuery;
 use http::Request as HttpRequest;
@@ -61,9 +69,12 @@ impl Drop for TonicTransport {
     }
 }
 
-#[async_trait]
-impl Service for TonicTransport {
-    async fn call(&self, method: String, request: GrpcRequest) -> GrpcResponse {
+impl TonicTransport {
+    async fn call(
+        &self,
+        method: String,
+        request: TonicRequest<Pin<Box<dyn Stream<Item = Box<dyn Any>> + Send + Sync>>>,
+    ) -> TonicResponse<Pin<Box<dyn Stream<Item = Result<Box<dyn Any>, Status>> + Send>>> {
         let Ok(path) = PathAndQuery::from_maybe_shared(method) else {
             let err = Status::internal("Failed to parse path");
             return create_error_response(err);
@@ -82,13 +93,41 @@ impl Service for TonicTransport {
     }
 }
 
+impl Invoke for &TonicTransport {
+    type SendStream = Box<dyn DynSendStream>;
+    type RecvStream = Box<dyn DynRecvStream>;
+
+    fn invoke(
+        self,
+        headers: RequestHeaders,
+        options: CallOptions,
+    ) -> (Self::SendStream, Self::RecvStream) {
+        todo!()
+    }
+}
+struct TonicStream;
+impl SendStream for TonicStream {
+    async fn send(&mut self, msg: &dyn SendMessage, options: SendOptions) -> Result<(), ()> {
+        todo!()
+    }
+}
+impl RecvStream for TonicStream {
+    async fn next(&mut self, msg: &mut dyn RecvMessage) -> ClientResponseStreamItem {
+        todo!()
+    }
+}
+
 /// Helper function to create an error response stream.
-fn create_error_response(status: Status) -> GrpcResponse {
+fn create_error_response(
+    status: Status,
+) -> TonicResponse<Pin<Box<dyn Stream<Item = Result<Box<dyn Any>, Status>> + Send>>> {
     let stream = tokio_stream::once(Err(status));
     TonicResponse::new(Box::pin(stream))
 }
 
-fn convert_request(req: GrpcRequest) -> TonicRequest<Pin<Box<dyn Stream<Item = Bytes> + Send>>> {
+fn convert_request(
+    req: TonicRequest<Pin<Box<dyn Stream<Item = Box<dyn Any>> + Send + Sync>>>,
+) -> TonicRequest<Pin<Box<dyn Stream<Item = Bytes> + Send>>> {
     let (metadata, extensions, stream) = req.into_parts();
 
     let bytes_stream = Box::pin(stream.filter_map(|msg| {
@@ -104,7 +143,9 @@ fn convert_request(req: GrpcRequest) -> TonicRequest<Pin<Box<dyn Stream<Item = B
     TonicRequest::from_parts(metadata, extensions, bytes_stream as _)
 }
 
-fn convert_response(res: Result<TonicResponse<Streaming<Bytes>>, Status>) -> GrpcResponse {
+fn convert_response(
+    res: Result<TonicResponse<Streaming<Bytes>>, Status>,
+) -> TonicResponse<Pin<Box<dyn Stream<Item = Result<Box<dyn Any>, Status>> + Send>>> {
     let response = match res {
         Ok(s) => s,
         Err(e) => {
@@ -113,9 +154,9 @@ fn convert_response(res: Result<TonicResponse<Streaming<Bytes>>, Status>) -> Grp
         }
     };
     let (metadata, stream, extensions) = response.into_parts();
-    let message_stream: BoxStream<Box<dyn Message>> = Box::pin(stream.map(|msg| {
+    let message_stream: BoxStream<Box<dyn Any>> = Box::pin(stream.map(|msg| {
         msg.map(|b| {
-            let msg: Box<dyn Message> = Box::new(b);
+            let msg: Box<dyn Any> = Box::new(b);
             msg
         })
     }));

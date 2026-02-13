@@ -233,8 +233,8 @@ mod test {
     use crate::client::load_balancing::{LbState, Pick};
     use crate::client::name_resolution::{Address, Endpoint, ResolverUpdate};
     use crate::client::ConnectivityState;
+    use crate::core::RequestHeaders;
     use crate::rt::default_runtime;
-    use crate::service::Request;
     use std::time::Duration;
     use std::{panic, sync::Arc};
     use tokio::select;
@@ -275,7 +275,7 @@ mod test {
         }
     }
     impl Picker for TestPicker {
-        fn pick(&self, _req: &Request) -> PickResult {
+        fn pick(&self, _req: &RequestHeaders) -> PickResult {
             PickResult::Pick(Pick {
                 subchannel: Arc::new(TestSubchannel::new(
                     Address {

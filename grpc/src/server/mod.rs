@@ -3,13 +3,10 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tonic::async_trait;
 
-use crate::{
-    core::{RecvMessage, RequestHeaders, ServerResponseStreamItem},
-    service::{Request, Response, Service},
-};
+use crate::core::{RecvMessage, RequestHeaders, ServerResponseStreamItem};
 
 pub struct Server {
-    handler: Option<Arc<dyn Service>>,
+    handler: Option<Arc<dyn Handle>>,
 }
 
 pub type Call = (String, Request, oneshot::Sender<Response>);

@@ -30,7 +30,7 @@ use crate::client::load_balancing::{
 };
 use crate::client::name_resolution::{Endpoint, ResolverUpdate};
 use crate::client::ConnectivityState;
-use crate::service::Request;
+use crate::core::RequestHeaders;
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Once};
@@ -223,7 +223,7 @@ impl RoundRobinPicker {
 }
 
 impl Picker for RoundRobinPicker {
-    fn pick(&self, request: &Request) -> PickResult {
+    fn pick(&self, request: &RequestHeaders) -> PickResult {
         let len = self.pickers.len();
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % len;
         self.pickers[idx].pick(request)
@@ -243,8 +243,8 @@ mod test {
     };
     use crate::client::name_resolution::{Address, Endpoint, ResolverUpdate};
     use crate::client::ConnectivityState;
+    use crate::core::RequestHeaders;
     use crate::rt::default_runtime;
-    use crate::service::Request;
     use std::collections::HashSet;
     use std::panic;
     use std::sync::Arc;
@@ -389,7 +389,7 @@ mod test {
     }
 
     impl Picker for OneSubchannelPicker {
-        fn pick(&self, request: &Request) -> PickResult {
+        fn pick(&self, request: &RequestHeaders) -> PickResult {
             PickResult::Pick(Pick {
                 subchannel: self.sc.clone(),
                 on_complete: None,

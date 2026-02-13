@@ -29,6 +29,7 @@
 use bytes::Bytes;
 use std::any::TypeId;
 use std::collections::VecDeque;
+use tonic::metadata::MetadataMap;
 
 use crate::Status;
 
@@ -139,8 +140,13 @@ pub struct ResponseHeaders {}
 
 /// Contains all information transmitted in the request headers of an RPC.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
-pub struct RequestHeaders {}
+#[derive(Debug, Clone, Default)]
+pub struct RequestHeaders {
+    /// The full (e.g. "/Service/Method") method name specified for the call.
+    method_name: String,
+    /// The application-specified metadata for the call.
+    metadata: MetadataMap,
+}
 
 /// Contains all information transmitted in the response trailers of an RPC.
 /// gRPC does not support request trailers.

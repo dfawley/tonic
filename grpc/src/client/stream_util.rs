@@ -4,6 +4,7 @@ use crate::client::Invoke;
 use crate::client::RecvStream;
 use crate::core::ClientResponseStreamItem;
 use crate::core::RecvMessage;
+use crate::core::RequestHeaders;
 use crate::core::ResponseStreamItem;
 use crate::core::Trailers;
 use crate::Status;
@@ -33,7 +34,7 @@ impl<I: Invoke> Intercept<I> for &ResponseValidator {
 
     fn intercept(
         self,
-        method: String,
+        method: RequestHeaders,
         options: CallOptions,
         next: I,
     ) -> (Self::SendStream, Self::RecvStream) {
@@ -156,6 +157,7 @@ mod test {
     use crate::client::SendStream;
     use crate::core::ClientResponseStreamItem;
     use crate::core::RecvMessage;
+    use crate::core::RequestHeaders;
     use crate::core::ResponseHeaders;
     use crate::core::SendMessage;
     use crate::core::Trailers;
@@ -388,7 +390,7 @@ mod test {
     ) {
         let (channel, tx) = MockRecvStream::new();
         let channel = channel.with_interceptor(ResponseValidator::new(unary));
-        let (_, recv_stream) = channel.invoke("method".to_string(), CallOptions::default());
+        let (_, recv_stream) = channel.invoke(RequestHeaders::default(), CallOptions::default());
 
         let mut validator = RecvStreamValidator::new(recv_stream, unary);
         // Send all but the last item, verifying it is returned by the
@@ -443,7 +445,7 @@ mod test {
 
         fn invoke(
             self,
-            method: String,
+            method: RequestHeaders,
             options: CallOptions,
         ) -> (Self::SendStream, Self::RecvStream) {
             (NopSendStream, self)
