@@ -54,11 +54,11 @@ pub(crate) mod graceful_switch;
 pub(crate) mod pick_first;
 pub(crate) mod round_robin;
 
-#[cfg(test)]
-pub(crate) mod test_utils;
-
 pub(crate) mod registry;
 pub(crate) use registry::GLOBAL_LB_REGISTRY;
+
+#[cfg(test)]
+pub(crate) mod test_utils;
 
 /// A collection of data configured on the channel that is constructing this
 /// LbPolicy.
@@ -538,7 +538,7 @@ impl Subchannel for ExternalSubchannel {
 
     fn connect(&self) {
         println!("connect called for subchannel: {self}");
-        self.isc.as_ref().unwrap().connect(false);
+        self.isc.as_ref().unwrap().connect();
     }
 }
 
