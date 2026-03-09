@@ -1,20 +1,21 @@
-use crate::grpc_pb::{self, *};
-use async_stream::try_stream;
-use http::header::{HeaderMap, HeaderName};
-use http_body_util::BodyExt;
 use std::future::Future;
 use std::pin::Pin;
 use std::result::Result as StdResult;
 use std::task::{Context, Poll};
 use std::time::Duration;
+
+use async_stream::try_stream;
+pub use grpc_pb::test_service_server::TestServiceServer;
+pub use grpc_pb::unimplemented_service_server::UnimplementedServiceServer;
+use http::header::{HeaderMap, HeaderName};
+use http_body_util::BodyExt;
+use protobuf::proto;
 use tokio_stream::StreamExt;
 use tonic::codegen::BoxStream;
 use tonic::{Code, Request, Response, Status, body::Body, server::NamedService};
-use tonic_protobuf::protobuf::proto;
 use tower::Service;
 
-pub use grpc_pb::test_service_server::TestServiceServer;
-pub use grpc_pb::unimplemented_service_server::UnimplementedServiceServer;
+use crate::grpc_pb::{self, *};
 
 #[derive(Default, Clone)]
 pub struct TestService {}
