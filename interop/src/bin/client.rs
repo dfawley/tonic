@@ -1,8 +1,19 @@
-use interop::client::{InteropTest, InteropTestUnimplemented};
-use interop::{client_prost, client_protobuf};
-use std::{str::FromStr, time::Duration};
+use std::str::FromStr;
+use std::time::Duration;
+
+use grpc::client::ChannelOptions;
+use grpc::credentials::LocalChannelCredentials;
+use grpc::credentials::rustls::RootCertificates;
+use grpc::credentials::rustls::StaticProvider;
+use grpc::credentials::rustls::client::ClientTlsConfig as GrpcClientTlsConfig;
+use grpc::credentials::rustls::client::RustlsClientTlsCredendials;
+use interop::client::InteropTest;
+use interop::client::InteropTestUnimplemented;
+use interop::client_prost;
+use interop::client_protobuf;
+use tonic::transport::Certificate;
+use tonic::transport::ClientTlsConfig;
 use tonic::transport::Endpoint;
-use tonic::transport::{Certificate, ClientTlsConfig};
 
 #[derive(Debug)]
 struct Opts {
@@ -52,35 +63,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let scheme = if matches.use_tls { "https" } else { "http" };
 
-    #[allow(unused_mut)]
-    let mut endpoint = Endpoint::try_from(format!("{scheme}://localhost:10000"))?
-        .timeout(Duration::from_secs(5))
-        .concurrency_limit(30);
-
-    if matches.use_tls {
-        let pem = std::fs::read_to_string("interop/data/ca.pem")?;
-        let ca = Certificate::from_pem(pem);
-        endpoint = endpoint.tls_config(
-            ClientTlsConfig::new()
-                .ca_certificate(ca)
-                .domain_name("foo.test.google.fr"),
-        )?;
-    }
-
-    let channel = endpoint.connect().await?;
-
     let (mut client, mut unimplemented_client): (
         Box<dyn InteropTest>,
         Box<dyn InteropTestUnimplemented>,
     ) = match matches.codec {
-        Codec::Prost => (
-            Box::new(client_prost::TestClient::new(channel.clone())),
-            Box::new(client_prost::UnimplementedClient::new(channel)),
-        ),
-        Codec::Protobuf => (
-            Box::new(client_protobuf::TestClient::new(channel.clone())),
-            Box::new(client_protobuf::UnimplementedClient::new(channel)),
-        ),
+        Codec::Prost => {
+            #[allow(unused_mut)]
+            let mut endpoint = Endpoint::try_from(format!("{scheme}://localhost:10000"))?
+                .timeout(Duration::from_secs(5))
+                .concurrency_limit(30);
+
+            if matches.use_tls {
+                let pem = std::fs::read_to_string("interop/data/ca.pem")?;
+                let ca = Certificate::from_pem(pem);
+                endpoint = endpoint.tls_config(
+                    ClientTlsConfig::new()
+                        .ca_certificate(ca)
+                        .domain_name("foo.test.google.fr"),
+                )?;
+            }
+
+            let channel = endpoint.connect().await?;
+
+            (
+                Box::new(client_prost::TestClient::new(channel.clone())),
+                Box::new(client_prost::UnimplementedClient::new(channel)),
+            )
+        }
+        Codec::Protobuf => {
+            let channel = if matches.use_tls {
+                return Ok(());
+                #[allow(unreachable_code)]
+                // TODO: delete the above when Rustls is working in the channel.
+                let pem = std::fs::read_to_string("interop/data/ca.pem")?;
+                let root_certs = RootCertificates::from_pem(pem);
+                let creds = RustlsClientTlsCredendials::new(
+                    GrpcClientTlsConfig::new()
+                        .with_root_certificates_provider(StaticProvider::new(root_certs)),
+                )?;
+                grpc::client::Channel::new(
+                    "dns:///localhost:10000",
+                    creds,
+                    ChannelOptions::default(),
+                )
+            } else {
+                grpc::client::Channel::new(
+                    "dns:///localhost:10000",
+                    LocalChannelCredentials::new(),
+                    ChannelOptions::default(),
+                )
+            };
+
+            (
+                Box::new(client_protobuf::TestClient::new(channel.clone())),
+                Box::new(client_protobuf::UnimplementedClient::new(channel)),
+            )
+        }
     };
 
     let mut failures = Vec::new();

@@ -63,6 +63,7 @@ use crate::client::load_balancing::round_robin;
 use crate::client::load_balancing::{self};
 use crate::client::name_resolution::Address;
 use crate::client::name_resolution::ResolverUpdate;
+use crate::client::name_resolution::dns;
 use crate::client::name_resolution::global_registry;
 use crate::client::name_resolution::{self};
 use crate::client::service_config::LbPolicyType;
@@ -74,6 +75,8 @@ use crate::client::subchannel::SubchannelKey;
 use crate::client::subchannel::SubchannelStateWatcher;
 use crate::client::transport::GLOBAL_TRANSPORT_REGISTRY;
 use crate::client::transport::TransportRegistry;
+#[cfg(feature = "_runtime-tokio")]
+use crate::client::transport::tonic as tonic_transport;
 use crate::core::RequestHeaders;
 use crate::credentials::ChannelCredentials;
 use crate::credentials::dyn_wrapper::DynChannelCredentials;
@@ -166,6 +169,9 @@ impl Channel {
     {
         pick_first::reg();
         round_robin::reg();
+        dns::reg();
+        #[cfg(feature = "_runtime-tokio")]
+        tonic_transport::reg();
         Self {
             inner: Arc::new(PersistentChannel::new(
                 target,
