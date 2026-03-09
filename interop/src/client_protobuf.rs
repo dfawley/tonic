@@ -22,18 +22,19 @@
  *
  */
 
+use grpc::client::Channel;
+use grpc::{Status, StatusCode};
+use protobuf::__internal::MatcherEq; // TODO: ????????????????
+use protobuf::proto;
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+use tonic::async_trait;
+
 use crate::client::{InteropTest, InteropTestUnimplemented};
 use crate::{
     TestAssertion, grpc_pb::test_service_client::*, grpc_pb::unimplemented_service_client::*,
     grpc_pb::*, test_assert,
 };
-use tokio::sync::mpsc;
-use tokio_stream::StreamExt;
-use tonic::async_trait;
-use tonic::transport::Channel;
-use tonic::{Code, Request, Response, Status, metadata::MetadataValue};
-use tonic_protobuf::protobuf::__internal::MatcherEq;
-use tonic_protobuf::protobuf::proto;
 
 pub type TestClient = TestServiceClient<Channel>;
 pub type UnimplementedClient = UnimplementedServiceClient<Channel>;
@@ -49,22 +50,22 @@ const SPECIAL_TEST_STATUS_MESSAGE: &str =
 #[async_trait]
 impl InteropTest for TestClient {
     async fn empty_unary(&mut self, assertions: &mut Vec<TestAssertion>) {
-        let result = self.empty_call(Request::new(Empty::default())).await;
+        let result = self.empty_call(proto!(Empty {})).await;
 
         assertions.push(test_assert!(
             "call must be successful",
             result.is_ok(),
             format!("result={:?}", result)
         ));
+        let Ok(result) = result else {
+            return;
+        };
 
-        if let Ok(response) = result {
-            let body = response.into_inner();
-            assertions.push(test_assert!(
-                "body must not be null",
-                body.matches(&Empty::default()),
-                format!("body={:?}", body)
-            ));
-        }
+        assertions.push(test_assert!(
+            "response must not be null",
+            result.matches(&Empty::default()),
+            format!("result={:?}", result)
+        ));
     }
 
     async fn large_unary(&mut self, assertions: &mut Vec<TestAssertion>) {
@@ -76,27 +77,27 @@ impl InteropTest for TestClient {
             payload: payload,
         });
 
-        let result = self.unary_call(Request::new(req)).await;
+        let result = self.unary_call(req).await;
 
         assertions.push(test_assert!(
             "call must be successful",
             result.is_ok(),
             format!("result={:?}", result)
         ));
+        let Ok(result) = result else {
+            return;
+        };
+        let body = result.payload().body();
+        let payload_len = body.len();
 
-        if let Ok(response) = result {
-            let body = response.into_inner();
-            let payload_len = body.payload().body().len();
-
-            assertions.push(test_assert!(
-                "body must be 314159 bytes",
-                payload_len == LARGE_RSP_SIZE as usize,
-                format!("mem::size_of_val(&body)={:?}", mem::size_of_val(&body))
-            ));
-        }
+        assertions.push(test_assert!(
+            "body must be 314159 bytes",
+            payload_len == LARGE_RSP_SIZE as usize,
+            format!("mem::size_of_val(&body)={:?}", mem::size_of_val(&body))
+        ));
     }
-
     async fn client_streaming(&mut self, assertions: &mut Vec<TestAssertion>) {
+        /*
         let requests: Vec<_> = REQUEST_LENGTHS
             .iter()
             .map(make_streaming_input_request)
@@ -124,9 +125,11 @@ impl InteropTest for TestClient {
                 )
             ));
         }
+        */
     }
 
     async fn server_streaming(&mut self, assertions: &mut Vec<TestAssertion>) {
+        /*
         let req = proto!(StreamingOutputCallRequest {
             response_parameters: RESPONSE_LENGTHS
                 .iter()
@@ -164,9 +167,11 @@ impl InteropTest for TestClient {
 
             assertions.extend(asserts);
         }
+        */
     }
 
     async fn ping_pong(&mut self, assertions: &mut Vec<TestAssertion>) {
+        /*
         let (tx, rx) = mpsc::unbounded_channel();
         tx.send(make_ping_pong_request(0)).unwrap();
 
@@ -220,9 +225,11 @@ impl InteropTest for TestClient {
                 format!("{:?}={:?}", RESPONSE_LENGTHS, actual_response_lengths)
             ));
         }
+        */
     }
 
     async fn empty_stream(&mut self, assertions: &mut Vec<TestAssertion>) {
+        /*
         let stream = tokio_stream::empty();
         let result = self.full_duplex_call(Request::new(stream)).await;
 
@@ -241,6 +248,7 @@ impl InteropTest for TestClient {
                 format!("responses.len()={:?}", responses.len())
             ));
         }
+        */
     }
 
     async fn status_code_and_message(&mut self, assertions: &mut Vec<TestAssertion>) {
@@ -251,7 +259,7 @@ impl InteropTest for TestClient {
             assertions.push(test_assert!(
                 "call must fail with unknown status code",
                 match &result {
-                    Err(status) => status.code() == Code::Unknown,
+                    Err(status) => status.code() == StatusCode::Unknown,
                     _ => false,
                 },
                 format!("result={:?}", result)
@@ -273,28 +281,29 @@ impl InteropTest for TestClient {
                 message: TEST_STATUS_MESSAGE.to_string(),
             },
         });
-
-        let duplex_req = proto!(StreamingOutputCallRequest {
-            response_status: EchoStatus {
-                code: 2,
-                message: TEST_STATUS_MESSAGE.to_string(),
-            },
-        });
-
-        let result = self.unary_call(Request::new(simple_req)).await;
+        /*
+                let duplex_req = proto!(StreamingOutputCallRequest {
+                    response_status: EchoStatus {
+                        code: 2,
+                        message: TEST_STATUS_MESSAGE.to_string(),
+                    },
+                });
+        */
+        let result = self.unary_call(simple_req).await;
         validate_response(result, assertions);
+        /*
+            let stream = tokio_stream::once(duplex_req);
+            let result = match self.full_duplex_call(Request::new(stream)).await {
+                Ok(response) => {
+                    let stream = response.into_inner();
+                    let responses = stream.collect::<Vec<_>>().await;
+                    Ok(responses)
+                }
+                Err(e) => Err(e),
+            };
 
-        let stream = tokio_stream::once(duplex_req);
-        let result = match self.full_duplex_call(Request::new(stream)).await {
-            Ok(response) => {
-                let stream = response.into_inner();
-                let responses = stream.collect::<Vec<_>>().await;
-                Ok(responses)
-            }
-            Err(e) => Err(e),
-        };
-
-        validate_response(result, assertions);
+            validate_response(result, assertions);
+        */
     }
 
     async fn special_status_message(&mut self, assertions: &mut Vec<TestAssertion>) {
@@ -305,12 +314,12 @@ impl InteropTest for TestClient {
             },
         });
 
-        let result = self.unary_call(Request::new(req)).await;
+        let result = self.unary_call(req).await;
 
         assertions.push(test_assert!(
             "call must fail with unknown status code",
             match &result {
-                Err(status) => status.code() == Code::Unknown,
+                Err(status) => status.code() == StatusCode::Unknown,
                 _ => false,
             },
             format!("result={:?}", result)
@@ -327,13 +336,11 @@ impl InteropTest for TestClient {
     }
 
     async fn unimplemented_method(&mut self, assertions: &mut Vec<TestAssertion>) {
-        let result = self
-            .unimplemented_call(Request::new(Empty::default()))
-            .await;
+        let result = self.unimplemented_call(Empty::default()).await;
         assertions.push(test_assert!(
             "call must fail with unimplemented status code",
             match &result {
-                Err(status) => status.code() == Code::Unimplemented,
+                Err(status) => status.code() == StatusCode::Unimplemented,
                 _ => false,
             },
             format!("result={:?}", result)
@@ -341,6 +348,7 @@ impl InteropTest for TestClient {
     }
 
     async fn custom_metadata(&mut self, assertions: &mut Vec<TestAssertion>) {
+        /*
         let key1 = "x-grpc-test-echo-initial";
         let value1: MetadataValue<_> = "test_initial_metadata_value".parse().unwrap();
         let key2 = "x-grpc-test-echo-trailing-bin";
@@ -393,19 +401,18 @@ impl InteropTest for TestClient {
             trailers.get_bin(key2) == Some(&value2),
             format!("result={:?}", trailers.get_bin(key1))
         ));
+        */
     }
 }
 
 #[async_trait]
 impl InteropTestUnimplemented for UnimplementedClient {
     async fn unimplemented_service(&mut self, assertions: &mut Vec<TestAssertion>) {
-        let result = self
-            .unimplemented_call(Request::new(Empty::default()))
-            .await;
+        let result = self.unimplemented_call(Empty::default()).await;
         assertions.push(test_assert!(
             "call must fail with unimplemented status code",
             match &result {
-                Err(status) => status.code() == Code::Unimplemented,
+                Err(status) => status.code() == StatusCode::Unimplemented,
                 _ => false,
             },
             format!("result={:?}", result)

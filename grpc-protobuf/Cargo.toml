@@ -1,0 +1,21 @@
+[package]
+name = "grpc-protobuf"
+version = "0.9.0-alpha.1"
+edition = "2024"
+authors = ["gRPC Authors"]
+license = "MIT"
+rust-version = { workspace = true }
+
+[package.metadata.cargo_check_external_types]
+allowed_external_types = [
+]
+
+[features]
+
+[dependencies]
+bytes = "1.11.1"
+futures = "0.3.32"
+grpc = { path = "../grpc" }
+protobuf = "4.34.0-release"
+
+[dev-dependencies]

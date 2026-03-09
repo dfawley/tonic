@@ -87,6 +87,25 @@ pub struct CallOptions {
     deadline: Option<Instant>,
 }
 
+impl CallOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    pub fn set_deadline(&mut self, deadline: Instant) {
+        self.deadline = Some(deadline);
+    }
+
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+}
+
 /// A trait which may be implemented by types to perform RPCs (Remote Procedure
 /// Calls, often shortened to "call").
 ///
@@ -210,6 +229,22 @@ pub struct SendOptions {
     pub final_msg: bool,
     /// If set, compression will be disabled for this message.
     pub disable_compression: bool,
+}
+
+impl SendOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_final_msg(mut self, final_msg: bool) -> Self {
+        self.final_msg = final_msg;
+        self
+    }
+
+    pub fn with_disable_compression(mut self, disable_compression: bool) -> Self {
+        self.disable_compression = disable_compression;
+        self
+    }
 }
 
 /// Represents the receiving side of a client stream.  When a `RecvStream` is
