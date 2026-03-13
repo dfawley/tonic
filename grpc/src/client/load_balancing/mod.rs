@@ -31,21 +31,15 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::ptr::addr_eq;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::Weak;
 
 use tonic::Status;
 use tonic::metadata::MetadataMap;
 
 use crate::client::ConnectivityState;
-use crate::client::channel::InternalChannelController;
-use crate::client::channel::WorkQueueItem;
-use crate::client::channel::WorkQueueTx;
 use crate::client::name_resolution::Address;
 use crate::client::name_resolution::ResolverUpdate;
 use crate::client::service_config::LbConfig;
-use crate::client::subchannel::InternalSubchannel;
-use crate::client::subchannel::SubchannelStateWatcher;
 use crate::core::RequestHeaders;
 use crate::rt::GrpcRuntime;
 
@@ -395,11 +389,7 @@ impl<T: Eq + PartialEq + 'static> DynPartialEq for T {
     }
 }
 
-mod private {
-    pub trait Sealed {}
-}
-
-pub(crate) trait SealedSubchannel: private::Sealed {}
+pub(crate) trait Sealed {}
 
 /// A Subchannel represents a method of communicating with a server which may be
 /// connected or disconnected many times across its lifetime.
@@ -418,9 +408,7 @@ pub(crate) trait SealedSubchannel: private::Sealed {}
 ///
 /// When a Subchannel is dropped, it is disconnected automatically, and no
 /// subsequent state updates will be provided for it to the LB policy.
-pub(crate) trait Subchannel:
-    SealedSubchannel + DynHash + DynPartialEq + Any + Send + Sync
-{
+pub(crate) trait Subchannel: Sealed + DynHash + DynPartialEq + Any + Send + Sync {
     /// Returns the address of the Subchannel.
     /// TODO: Consider whether this should really be public.
     fn address(&self) -> Address;
@@ -497,84 +485,6 @@ impl PartialEq for WeakSubchannel {
 
 impl Eq for WeakSubchannel {}
 
-pub(crate) struct ExternalSubchannel {
-    pub(crate) isc: Option<Arc<InternalSubchannel>>,
-    work_scheduler: WorkQueueTx,
-    watcher: Mutex<Option<Arc<SubchannelStateWatcher>>>,
-}
-
-impl ExternalSubchannel {
-    pub(super) fn new(isc: Arc<InternalSubchannel>, work_scheduler: WorkQueueTx) -> Self {
-        ExternalSubchannel {
-            isc: Some(isc),
-            work_scheduler,
-            watcher: Mutex::default(),
-        }
-    }
-
-    pub(super) fn set_watcher(&self, watcher: Arc<SubchannelStateWatcher>) {
-        self.watcher.lock().unwrap().replace(watcher);
-    }
-}
-
-impl Hash for ExternalSubchannel {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.address().hash(state);
-    }
-}
-
-impl PartialEq for ExternalSubchannel {
-    fn eq(&self, other: &Self) -> bool {
-        self.address() == other.address()
-    }
-}
-
-impl Eq for ExternalSubchannel {}
-
-impl Subchannel for ExternalSubchannel {
-    fn address(&self) -> Address {
-        self.isc.as_ref().unwrap().address()
-    }
-
-    fn connect(&self) {
-        println!("connect called for subchannel: {self}");
-        self.isc.as_ref().unwrap().connect();
-    }
-}
-
-impl SealedSubchannel for ExternalSubchannel {}
-impl private::Sealed for ExternalSubchannel {}
-
-impl Drop for ExternalSubchannel {
-    fn drop(&mut self) {
-        let watcher = self.watcher.lock().unwrap().take();
-        let address = self.address().address.clone();
-        let isc = self.isc.take();
-        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
-            move |c: &mut InternalChannelController| {
-                println!("unregistering connectivity state watcher for {address:?}");
-                isc.as_ref()
-                    .unwrap()
-                    .unregister_connectivity_state_watcher(watcher.unwrap());
-            },
-            // The internal subchannel is dropped from here (i.e., from inside
-            // the work serializer), if this is the last reference to it.
-        )));
-    }
-}
-
-impl Debug for ExternalSubchannel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel {}", self.address())
-    }
-}
-
-impl Display for ExternalSubchannel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Subchannel {}", self.address())
-    }
-}
-
 pub(crate) trait ForwardingSubchannel: DynHash + DynPartialEq + Any + Send + Sync {
     fn delegate(&self) -> Arc<dyn Subchannel>;
 
@@ -594,8 +504,7 @@ impl<T: ForwardingSubchannel> Subchannel for T {
         self.connect()
     }
 }
-impl<T: ForwardingSubchannel> SealedSubchannel for T {}
-impl<T: ForwardingSubchannel> private::Sealed for T {}
+impl<T: ForwardingSubchannel> Sealed for T {}
 
 /// QueuingPicker always returns Queue.  LB policies that are not actively
 /// Connecting should not use this picker.

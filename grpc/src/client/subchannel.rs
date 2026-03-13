@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::Debug;
 use std::fmt::Display;
+use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -46,7 +47,8 @@ use crate::client::DynSendStream;
 use crate::client::channel::InternalChannelController;
 use crate::client::channel::WorkQueueItem;
 use crate::client::channel::WorkQueueTx;
-use crate::client::load_balancing::ExternalSubchannel;
+use crate::client::load_balancing;
+use crate::client::load_balancing::Subchannel;
 use crate::client::load_balancing::SubchannelState;
 use crate::client::name_resolution::Address;
 use crate::client::transport::DynTransport;
@@ -480,5 +482,82 @@ impl SubchannelStateWatcher {
                 },
             )));
         }
+    }
+}
+
+pub(super) struct ExternalSubchannel {
+    pub(crate) isc: Option<Arc<InternalSubchannel>>,
+    work_scheduler: WorkQueueTx,
+    watcher: Mutex<Option<Arc<SubchannelStateWatcher>>>,
+}
+
+impl ExternalSubchannel {
+    pub(super) fn new(isc: Arc<InternalSubchannel>, work_scheduler: WorkQueueTx) -> Self {
+        ExternalSubchannel {
+            isc: Some(isc),
+            work_scheduler,
+            watcher: Mutex::default(),
+        }
+    }
+
+    pub(super) fn set_watcher(&self, watcher: Arc<SubchannelStateWatcher>) {
+        self.watcher.lock().unwrap().replace(watcher);
+    }
+}
+
+impl Hash for ExternalSubchannel {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.address().hash(state);
+    }
+}
+
+impl PartialEq for ExternalSubchannel {
+    fn eq(&self, other: &Self) -> bool {
+        self.address() == other.address()
+    }
+}
+
+impl Eq for ExternalSubchannel {}
+
+impl Subchannel for ExternalSubchannel {
+    fn address(&self) -> Address {
+        self.isc.as_ref().unwrap().address()
+    }
+
+    fn connect(&self) {
+        println!("connect called for subchannel: {self}");
+        self.isc.as_ref().unwrap().connect();
+    }
+}
+
+impl load_balancing::Sealed for ExternalSubchannel {}
+
+impl Drop for ExternalSubchannel {
+    fn drop(&mut self) {
+        let watcher = self.watcher.lock().unwrap().take();
+        let address = self.address().address.clone();
+        let isc = self.isc.take();
+        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+            move |c: &mut InternalChannelController| {
+                println!("unregistering connectivity state watcher for {address:?}");
+                isc.as_ref()
+                    .unwrap()
+                    .unregister_connectivity_state_watcher(watcher.unwrap());
+            },
+            // The internal subchannel is dropped from here (i.e., from inside
+            // the work serializer), if this is the last reference to it.
+        )));
+    }
+}
+
+impl Debug for ExternalSubchannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Subchannel {}", self.address())
+    }
+}
+
+impl Display for ExternalSubchannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Subchannel {}", self.address())
     }
 }
