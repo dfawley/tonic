@@ -59,11 +59,13 @@ use crate::client::load_balancing::Subchannel;
 use crate::client::load_balancing::SubchannelState;
 use crate::client::load_balancing::WorkScheduler;
 use crate::client::load_balancing::pick_first;
+use crate::client::load_balancing::round_robin;
 use crate::client::load_balancing::{self};
 use crate::client::name_resolution::Address;
 use crate::client::name_resolution::ResolverUpdate;
 use crate::client::name_resolution::global_registry;
 use crate::client::name_resolution::{self};
+use crate::client::service_config::LbPolicyType;
 use crate::client::service_config::ServiceConfig;
 use crate::client::subchannel::InternalSubchannel;
 use crate::client::subchannel::InternalSubchannelPool;
@@ -79,9 +81,6 @@ use crate::rt;
 use crate::rt::GrpcEndpoint;
 use crate::rt::GrpcRuntime;
 use crate::rt::default_runtime;
-use crate::service::Request;
-use crate::service::Response;
-use crate::service::Service;
 
 #[non_exhaustive]
 pub struct ChannelOptions {
@@ -166,6 +165,7 @@ impl Channel {
         C::Output<Box<dyn GrpcEndpoint>>: GrpcEndpoint + 'static,
     {
         pick_first::reg();
+        round_robin::reg();
         Self {
             inner: Arc::new(PersistentChannel::new(
                 target,
@@ -192,11 +192,6 @@ impl Channel {
         deadline: Instant,
     ) -> Result<(), Box<dyn Error>> {
         todo!()
-    }
-
-    pub async fn call(&self, method: String, request: Request) -> Response {
-        let ac = self.inner.get_active_channel();
-        ac.call(method, request).await
     }
 }
 
@@ -338,43 +333,6 @@ impl ActiveChannel {
             runtime,
         })
     }
-
-    async fn call(&self, method: String, request: Request) -> Response {
-        // TODO: pre-pick tasks (e.g. deadlines, interceptors, retry)
-        let mut i = self.picker.iter();
-        loop {
-            if let Some(p) = i.next().await {
-                let result = &p.pick(
-                    &RequestHeaders::new()
-                        .with_method_name(&method)
-                        .with_metadata(request.metadata().clone()),
-                );
-                // TODO: handle picker errors (queue or fail RPC)
-                match result {
-                    PickResult::Pick(pr) => {
-                        if let Some(sc) = (pr.subchannel.as_ref() as &dyn Any)
-                            .downcast_ref::<ExternalSubchannel>()
-                        {
-                            return sc.isc.as_ref().unwrap().call(method, request).await;
-                        } else {
-                            panic!(
-                                "picked subchannel is not an implementation provided by the channel"
-                            );
-                        }
-                    }
-                    PickResult::Queue => {
-                        // Continue and retry the RPC with the next picker.
-                    }
-                    PickResult::Fail(status) => {
-                        panic!("failed pick: {}", status);
-                    }
-                    PickResult::Drop(status) => {
-                        panic!("dropped pick: {}", status);
-                    }
-                }
-            }
-        }
-    }
 }
 
 impl Invoke for Arc<ActiveChannel> {
@@ -446,6 +404,7 @@ pub(crate) struct InternalChannelController {
     pub(super) subchannel_pool: Arc<InternalSubchannelPool>,
     resolve_now: Arc<Notify>,
     wqtx: WorkQueueTx,
+    lb_work_scheduler: Arc<LbWorkScheduler>,
     picker: Arc<Watcher<Arc<dyn Picker>>>,
     connectivity_state: Arc<Watcher<ConnectivityState>>,
     runtime: GrpcRuntime,
@@ -460,7 +419,14 @@ impl InternalChannelController {
         connectivity_state: Arc<Watcher<ConnectivityState>>,
         runtime: GrpcRuntime,
     ) -> Self {
-        let lb = Arc::new(LbController::new(wqtx.clone(), runtime.clone()));
+        let lb_work_scheduler = Arc::new(LbWorkScheduler {
+            wqtx: wqtx.clone(),
+            pending: Mutex::default(),
+        });
+        let lb = Arc::new(LbController::new(
+            lb_work_scheduler.clone(),
+            runtime.clone(),
+        ));
 
         Self {
             lb,
@@ -471,6 +437,7 @@ impl InternalChannelController {
             picker,
             connectivity_state,
             runtime,
+            lb_work_scheduler,
         }
     }
 
@@ -545,20 +512,25 @@ impl load_balancing::ChannelController for InternalChannelController {
 pub(super) struct LbController {
     pub(super) policy: Mutex<Option<Box<dyn LbPolicy>>>,
     policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
-    work_scheduler: WorkQueueTx,
-    pending: Mutex<bool>,
     runtime: GrpcRuntime,
+    work_scheduler: Arc<LbWorkScheduler>,
 }
 
-impl WorkScheduler for LbController {
+#[derive(Debug)]
+struct LbWorkScheduler {
+    pending: Mutex<bool>,
+    wqtx: WorkQueueTx,
+}
+
+impl WorkScheduler for LbWorkScheduler {
     fn schedule_work(&self) {
         if mem::replace(&mut *self.pending.lock().unwrap(), true) {
             // Already had a pending call scheduled.
             return;
         }
-        let _ = self.work_scheduler.send(WorkQueueItem::Closure(Box::new(
+        let _ = self.wqtx.send(WorkQueueItem::Closure(Box::new(
             |c: &mut InternalChannelController| {
-                *c.lb.pending.lock().unwrap() = false;
+                *c.lb_work_scheduler.pending.lock().unwrap() = false;
                 c.lb.clone()
                     .policy
                     .lock()
@@ -572,12 +544,11 @@ impl WorkScheduler for LbController {
 }
 
 impl LbController {
-    fn new(work_scheduler: WorkQueueTx, runtime: GrpcRuntime) -> Self {
+    fn new(work_scheduler: Arc<LbWorkScheduler>, runtime: GrpcRuntime) -> Self {
         Self {
             policy_builder: Mutex::default(),
             policy: Mutex::default(), // new(None::<Box<dyn LbPolicy>>),
             work_scheduler,
-            pending: Mutex::default(),
             runtime,
         }
     }
@@ -587,15 +558,20 @@ impl LbController {
         update: ResolverUpdate,
         controller: &mut InternalChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if update.service_config.as_ref().is_ok_and(|sc| sc.is_some()) {
-            return Err("can't do service configs yet".into());
+        let mut policy_name = pick_first::POLICY_NAME;
+        if let Ok(Some(service_config)) = update.service_config.as_ref()
+            && service_config
+                .load_balancing_policy
+                .as_ref()
+                .is_some_and(|p| *p == LbPolicyType::RoundRobin)
+        {
+            policy_name = round_robin::POLICY_NAME;
         }
-        let policy_name = pick_first::POLICY_NAME;
         let mut p = self.policy.lock().unwrap();
         if p.is_none() {
             let builder = GLOBAL_LB_REGISTRY.get_policy(policy_name).unwrap();
             let newpol = builder.build(LbPolicyOptions {
-                work_scheduler: self.clone(),
+                work_scheduler: self.work_scheduler.clone(),
                 runtime: self.runtime.clone(),
             });
             *self.policy_builder.lock().unwrap() = Some(builder);
