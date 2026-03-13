@@ -42,7 +42,6 @@ pub use channel::ChannelOptions;
 
 pub(crate) mod load_balancing;
 pub(crate) mod name_resolution;
-mod subchannel;
 pub(crate) mod transport;
 
 /// A representation of the current state of a gRPC channel, also used for the

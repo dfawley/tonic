@@ -46,6 +46,12 @@ use crate::client::DynInvoke;
 use crate::client::DynRecvStream;
 use crate::client::DynSendStream;
 use crate::client::Invoke;
+use crate::client::channel::subchannel::ExternalSubchannel;
+use crate::client::channel::subchannel::InternalSubchannel;
+use crate::client::channel::subchannel::InternalSubchannelPool;
+use crate::client::channel::subchannel::NopBackoff;
+use crate::client::channel::subchannel::SubchannelKey;
+use crate::client::channel::subchannel::SubchannelStateWatcher;
 use crate::client::load_balancing::GLOBAL_LB_REGISTRY;
 use crate::client::load_balancing::LbPolicy;
 use crate::client::load_balancing::LbPolicyBuilder;
@@ -66,12 +72,6 @@ use crate::client::name_resolution::global_registry;
 use crate::client::name_resolution::{self};
 use crate::client::service_config::LbPolicyType;
 use crate::client::service_config::ServiceConfig;
-use crate::client::subchannel::ExternalSubchannel;
-use crate::client::subchannel::InternalSubchannel;
-use crate::client::subchannel::InternalSubchannelPool;
-use crate::client::subchannel::NopBackoff;
-use crate::client::subchannel::SubchannelKey;
-use crate::client::subchannel::SubchannelStateWatcher;
 use crate::client::transport::GLOBAL_TRANSPORT_REGISTRY;
 use crate::client::transport::TransportRegistry;
 use crate::core::RequestHeaders;
@@ -81,6 +81,10 @@ use crate::rt;
 use crate::rt::GrpcEndpoint;
 use crate::rt::GrpcRuntime;
 use crate::rt::default_runtime;
+
+mod subchannel;
+
+pub struct TODO;
 
 #[non_exhaustive]
 pub struct ChannelOptions {
@@ -390,7 +394,7 @@ struct ResolverWorkScheduler {
     wqtx: WorkQueueTx,
 }
 
-pub(super) type WorkQueueTx = mpsc::UnboundedSender<WorkQueueItem>;
+type WorkQueueTx = mpsc::UnboundedSender<WorkQueueItem>;
 
 impl name_resolution::WorkScheduler for ResolverWorkScheduler {
     fn schedule_work(&self) {
@@ -398,10 +402,10 @@ impl name_resolution::WorkScheduler for ResolverWorkScheduler {
     }
 }
 
-pub(crate) struct InternalChannelController {
-    pub(super) lb: Arc<LbController>, // called and passes mutable parent to it, so must be Arc.
+struct InternalChannelController {
+    lb: Arc<LbController>, // called and passes mutable parent to it, so must be Arc.
     transport_registry: TransportRegistry,
-    pub(super) subchannel_pool: Arc<InternalSubchannelPool>,
+    subchannel_pool: Arc<InternalSubchannelPool>,
     resolve_now: Arc<Notify>,
     wqtx: WorkQueueTx,
     lb_work_scheduler: Arc<LbWorkScheduler>,
@@ -509,8 +513,8 @@ impl load_balancing::ChannelController for InternalChannelController {
 
 // A channel that is not idle (connecting, ready, or erroring).
 #[derive(Debug)]
-pub(super) struct LbController {
-    pub(super) policy: Mutex<Option<Box<dyn LbPolicy>>>,
+struct LbController {
+    policy: Mutex<Option<Box<dyn LbPolicy>>>,
     policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
     runtime: GrpcRuntime,
     work_scheduler: Arc<LbWorkScheduler>,
@@ -598,7 +602,7 @@ impl LbController {
 
         // TODO: close old LB policy gracefully vs. drop?
     }
-    pub(super) fn subchannel_update(
+    fn subchannel_update(
         &self,
         subchannel: Arc<dyn Subchannel>,
         state: &SubchannelState,
@@ -612,14 +616,12 @@ impl LbController {
     }
 }
 
-pub(super) enum WorkQueueItem {
+enum WorkQueueItem {
     // Execute the closure.
     Closure(Box<dyn FnOnce(&mut InternalChannelController) + Send + Sync>),
     // Call the resolver to do work.
     ScheduleResolver,
 }
-
-pub struct TODO;
 
 // Enables multiple receivers to view data output from a single producer.
 // Producer calls update.  Consumers call iter() and call next() until they find
@@ -635,13 +637,13 @@ impl<T: Clone> Watcher<T> {
         Self { tx, rx }
     }
 
-    pub(crate) fn iter(&self) -> WatcherIter<T> {
+    pub fn iter(&self) -> WatcherIter<T> {
         let mut rx = self.rx.clone();
         rx.mark_changed();
         WatcherIter { rx }
     }
 
-    pub(crate) fn cur(&self) -> Option<T> {
+    pub fn cur(&self) -> Option<T> {
         let mut rx = self.rx.clone();
         rx.mark_changed();
         let c = rx.borrow();
@@ -662,7 +664,7 @@ pub(crate) struct WatcherIter<T> {
 
 impl<T: Clone> WatcherIter<T> {
     /// Returns the next unseen value
-    pub(crate) async fn next(&mut self) -> Option<T> {
+    pub async fn next(&mut self) -> Option<T> {
         loop {
             self.rx.changed().await.ok()?;
             let x = self.rx.borrow_and_update();
