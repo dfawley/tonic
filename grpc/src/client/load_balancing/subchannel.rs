@@ -31,6 +31,7 @@ use std::ptr::addr_eq;
 use std::sync::Arc;
 use std::sync::Weak;
 
+use crate::attributes::Attributes;
 use crate::client::ConnectivityState;
 use crate::client::name_resolution::Address;
 
@@ -42,7 +43,10 @@ pub(crate) struct SubchannelState {
     pub(crate) connectivity_state: ConnectivityState,
     // Set if connectivity state is TransientFailure to describe the most recent
     // connection error.  None for any other connectivity_state value.
-    pub last_connection_error: Option<String>,
+    pub(crate) last_connection_error: Option<String>,
+    // Attributes for the subchannel which may be set by the channel,
+    // subchannel, or an intermediate LB policy.
+    pub(crate) attributes: Attributes,
 }
 
 impl SubchannelState {
@@ -50,6 +54,7 @@ impl SubchannelState {
         Self {
             connectivity_state: ConnectivityState::Idle,
             last_connection_error: None,
+            attributes: Attributes::new(),
         }
     }
 
@@ -57,6 +62,7 @@ impl SubchannelState {
         Self {
             connectivity_state: ConnectivityState::Ready,
             last_connection_error: None,
+            attributes: Attributes::new(),
         }
     }
 
@@ -64,6 +70,7 @@ impl SubchannelState {
         Self {
             connectivity_state: ConnectivityState::Connecting,
             last_connection_error: None,
+            attributes: Attributes::new(),
         }
     }
 
@@ -71,6 +78,7 @@ impl SubchannelState {
         Self {
             connectivity_state: ConnectivityState::TransientFailure,
             last_connection_error: Some(last_connection_error.into()),
+            attributes: Attributes::new(),
         }
     }
 }
@@ -118,7 +126,7 @@ pub(crate) mod private {
 ///
 /// - Subchannels start IDLE.
 ///
-/// - IDLE transitions to CONNECTING when connect() is called.
+/// - IDLE transitions to CONNECTING when [`Subchannel::connect`] is called.
 ///
 /// - CONNECTING transitions to READY on success or TRANSIENT_FAILURE on error.
 ///
@@ -130,6 +138,11 @@ pub(crate) mod private {
 ///
 /// When a Subchannel is dropped, it is disconnected automatically, and no
 /// subsequent state updates will be provided for it to the LB policy.
+///
+/// Note that with other features like subchannel sharing and dynamic connection
+/// scaling, it is possible for subchannels to start in any state, to transition
+/// to CONNECTING from IDLE without calling [`Subchannel::connect`], or to make
+/// unexpected transitions between states, e.g. READY to CONNECTING.
 pub(crate) trait Subchannel:
     private::Sealed + DynHash + DynPartialEq + Any + Send + Sync
 {
@@ -176,7 +189,7 @@ impl Display for dyn Subchannel {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct WeakSubchannel(Weak<dyn Subchannel>);
 
 impl From<&Arc<dyn Subchannel>> for WeakSubchannel {
@@ -212,6 +225,18 @@ impl PartialEq for WeakSubchannel {
 }
 
 impl Eq for WeakSubchannel {}
+
+impl PartialOrd for WeakSubchannel {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for WeakSubchannel {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.0.as_ptr() as *const () as usize).cmp(&(other.0.as_ptr() as *const () as usize))
+    }
+}
 
 pub(crate) trait ForwardingSubchannel: DynHash + DynPartialEq + Any + Send + Sync {
     fn delegate(&self) -> &Arc<dyn Subchannel>;

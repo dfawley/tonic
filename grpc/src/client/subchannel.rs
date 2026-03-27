@@ -40,7 +40,6 @@ use tonic::async_trait;
 use crate::Status;
 use crate::StatusCode;
 use crate::client::CallOptions;
-use crate::client::ConnectivityState;
 use crate::client::DynInvoke;
 use crate::client::DynRecvStream;
 use crate::client::DynSendStream;
@@ -98,22 +97,12 @@ enum InternalSubchannelState {
 impl<'a> From<&'a InternalSubchannelState> for SubchannelState {
     fn from(iss: &'a InternalSubchannelState) -> SubchannelState {
         match &iss {
-            InternalSubchannelState::Idle => SubchannelState {
-                connectivity_state: ConnectivityState::Idle,
-                last_connection_error: None,
-            },
-            InternalSubchannelState::Connecting => SubchannelState {
-                connectivity_state: ConnectivityState::Connecting,
-                last_connection_error: None,
-            },
-            InternalSubchannelState::Ready(_) => SubchannelState {
-                connectivity_state: ConnectivityState::Ready,
-                last_connection_error: None,
-            },
-            InternalSubchannelState::TransientFailure(err) => SubchannelState {
-                connectivity_state: ConnectivityState::TransientFailure,
-                last_connection_error: Some(err.clone()),
-            },
+            InternalSubchannelState::Idle => SubchannelState::idle(),
+            InternalSubchannelState::Connecting => SubchannelState::connecting(),
+            InternalSubchannelState::Ready(_) => SubchannelState::ready(),
+            InternalSubchannelState::TransientFailure(err) => {
+                SubchannelState::transient_failure(err)
+            }
         }
     }
 }

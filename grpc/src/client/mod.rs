@@ -137,7 +137,7 @@ pub trait Invoke: Sync {
 }
 
 #[async_trait]
-pub trait DynInvoke: Send + Sync {
+pub(crate) trait DynInvoke: Send + Sync {
     async fn dyn_invoke(
         &self,
         headers: RequestHeaders,
@@ -145,15 +145,16 @@ pub trait DynInvoke: Send + Sync {
     ) -> (Box<dyn DynSendStream>, Box<dyn DynRecvStream>);
 }
 
-#[async_trait]
-impl<T: Invoke> DynInvoke for T {
-    async fn dyn_invoke(
+impl<T: DynInvoke> Invoke for T {
+    type SendStream = Box<dyn DynSendStream>;
+    type RecvStream = Box<dyn DynRecvStream>;
+
+    async fn invoke(
         &self,
         headers: RequestHeaders,
         options: CallOptions,
-    ) -> (Box<dyn DynSendStream>, Box<dyn DynRecvStream>) {
-        let (tx, rx) = self.invoke(headers, options).await;
-        (Box::new(tx), Box::new(rx))
+    ) -> (Self::SendStream, Self::RecvStream) {
+        self.dyn_invoke(headers, options).await
     }
 }
 

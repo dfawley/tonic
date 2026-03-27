@@ -403,14 +403,7 @@ mod test {
         err: &str,
         tcc: &mut dyn ChannelController,
     ) {
-        lb_policy.subchannel_update(
-            subchannel,
-            &SubchannelState {
-                connectivity_state: ConnectivityState::TransientFailure,
-                last_connection_error: Some(err.into()),
-            },
-            tcc,
-        );
+        lb_policy.subchannel_update(subchannel, &SubchannelState::transient_failure(err), tcc);
     }
 
     #[derive(Debug)]

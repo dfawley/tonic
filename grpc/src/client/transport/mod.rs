@@ -26,8 +26,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::client::CallOptions;
 use crate::client::DynInvoke;
+use crate::client::DynRecvStream;
+use crate::client::DynSendStream;
 use crate::client::Invoke;
+use crate::core::RequestHeaders;
 use crate::credentials::client::ClientHandshakeInfo;
 use crate::credentials::client::DynClientConnectionSecurityInfo;
 use crate::credentials::common::Authority;
@@ -103,6 +107,20 @@ pub(crate) trait DynTransport: Send + Sync {
     >;
 }
 
+struct DynAdapter<T>(T);
+
+#[async_trait]
+impl<T: Invoke> DynInvoke for DynAdapter<T> {
+    async fn dyn_invoke(
+        &self,
+        headers: RequestHeaders,
+        options: CallOptions,
+    ) -> (Box<dyn DynSendStream>, Box<dyn DynRecvStream>) {
+        let (tx, rx) = self.0.invoke(headers, options).await;
+        (Box::new(tx), Box::new(rx))
+    }
+}
+
 #[async_trait]
 impl<T: Transport> DynTransport for T {
     async fn dyn_connect(
@@ -120,7 +138,7 @@ impl<T: Transport> DynTransport for T {
         String,
     > {
         let (i, sc, rx) = self.connect(address, runtime, security_opts, opts).await?;
-        Ok((Box::new(i), sc, rx))
+        Ok((Box::new(DynAdapter(i)), sc, rx))
     }
 }
 

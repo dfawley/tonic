@@ -97,6 +97,7 @@ impl PartialEq for TestSubchannel {
 }
 impl Eq for TestSubchannel {}
 
+#[derive(PartialEq, Eq)]
 pub(crate) enum TestEvent {
     NewSubchannel(Arc<dyn Subchannel>),
     UpdatePicker(LbState),
@@ -274,6 +275,12 @@ impl StubPolicy {
 pub(crate) struct StubPolicyBuilder {
     name: &'static str,
     funcs: StubPolicyFuncs,
+}
+
+impl StubPolicyBuilder {
+    pub(crate) fn new(name: &'static str, funcs: StubPolicyFuncs) -> Self {
+        Self { name, funcs }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
