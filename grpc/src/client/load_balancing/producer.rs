@@ -53,7 +53,7 @@ pub(crate) trait Producer: Any + Send + Sync + Debug + 'static {
     ///
     /// Note that when a [`Producer`] is dropped, it should ensure that it
     /// releases any resources it acquired and cancel any tasks it spawned.
-    fn update_state(&self, state: &mut SubchannelState);
+    fn update_state(&self, subchannel_state: &mut SubchannelState);
 }
 
 /// Holds per-subchannel data for producers.
@@ -311,6 +311,18 @@ impl<T: LbPolicyBuilder> ProducerPolicy<T> {
         subchannel: Arc<dyn Subchannel>,
         channel_controller: &mut dyn ChannelController,
     ) {
+        let delegate_sc = self
+            .state
+            .subchannels
+            .get(&(&subchannel).into())
+            .and_then(|entry| entry.delegate_subchannel.upgrade());
+
+        // Abort early if the subchannel was already dropped by the child
+        // policy.
+        let Some(delegate_sc) = delegate_sc else {
+            return;
+        };
+
         let mut subchannel_state;
         let subchannel_data;
         {
@@ -335,6 +347,12 @@ impl<T: LbPolicyBuilder> ProducerPolicy<T> {
             // Get the latest known state from the delegate.
             subchannel_state = entry.state.clone();
 
+            // Clear the flag requesting to call the producers for this
+            // subchannel, if set.
+            subchannel_data
+                .pending_update
+                .store(false, Ordering::Release);
+
             // Apply updates from alive producers.
             for producer in alive_producers {
                 producer.update_state(&mut subchannel_state);
@@ -346,16 +364,6 @@ impl<T: LbPolicyBuilder> ProducerPolicy<T> {
                     subchannel_data: subchannel_data.clone(),
                 });
         }
-
-        let delegate_sc = self
-            .state
-            .subchannels
-            .get(&(&subchannel).into())
-            .and_then(|entry| entry.delegate_subchannel.upgrade());
-
-        let Some(delegate_sc) = delegate_sc else {
-            return;
-        };
 
         let mut wrapped_cc = DelegateChannelController {
             inner: channel_controller,
@@ -485,7 +493,7 @@ impl<T: LbPolicyBuilder> LbPolicy for ProducerPolicy<T> {
                 entry
                     .data
                     .pending_update
-                    .swap(false, Ordering::AcqRel)
+                    .load(Ordering::Acquire)
                     .then(|| sc.upgrade())?
             })
             .collect();
