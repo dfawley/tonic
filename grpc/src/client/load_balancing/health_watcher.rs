@@ -1,5 +1,11 @@
 use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::Weak;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 use crate::client::load_balancing::WorkScheduler;
 use crate::client::load_balancing::producer;
@@ -8,6 +14,7 @@ use crate::client::load_balancing::producer::ProducerBuilder;
 use crate::client::load_balancing::subchannel::Subchannel;
 use crate::client::load_balancing::subchannel::SubchannelState;
 
+/// The connection health state of a subchannel.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum HealthState {
     Healthy,
@@ -15,15 +22,21 @@ pub(crate) enum HealthState {
     Unknown,
 }
 
+/// An attribute added to the subchannel state to store its health.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct HealthAttribute(HealthState);
 
 /// Allows a parent LB policy to explicitly subscribe a Subchannel to background Health checking
 /// without knowing about the underlying ProducerPolicy execution framework logic!
-pub(crate) fn subscribe(state: &SubchannelState) -> Arc<HealthWatcherProvider> {
-    producer::get_or_build_producer(HealthWatcherBuilder, state)
+pub(crate) fn subscribe(state: &SubchannelState) -> Arc<HealthWatcher> {
+    #[cfg(test)]
+    let builder = HealthWatcherBuilder { drop_tracker: None };
+    #[cfg(not(test))]
+    let builder = HealthWatcherBuilder;
+    producer::get_or_build_producer(builder, state)
 }
 
+/// Retrieves the health state from the subchannel state attributes if it exists.
 pub(crate) fn get_health(state: &SubchannelState) -> Option<HealthState> {
     state
         .attributes
@@ -31,11 +44,18 @@ pub(crate) fn get_health(state: &SubchannelState) -> Option<HealthState> {
         .map(|h| h.0.clone())
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct HealthWatcherBuilder {
+    pub(crate) drop_tracker: Option<Weak<AtomicBool>>,
+}
+
+#[cfg(not(test))]
 #[derive(Debug)]
 pub(crate) struct HealthWatcherBuilder;
 
 impl ProducerBuilder for HealthWatcherBuilder {
-    type Producer = HealthWatcherProvider;
+    type Producer = HealthWatcher;
 
     fn build(
         &self,
@@ -43,40 +63,53 @@ impl ProducerBuilder for HealthWatcherBuilder {
         subchannel_state: &SubchannelState,
         work_scheduler: &Arc<dyn WorkScheduler>,
     ) -> Self::Producer {
-        let provider = HealthWatcherProvider {
+        let provider = HealthWatcher {
             health_state: Mutex::new(HealthState::Unknown),
             work_scheduler: work_scheduler.clone(),
+            #[cfg(test)]
+            drop_tracker: self.drop_tracker.clone(),
         };
         provider.start_rpc();
         provider
     }
 }
 
+/// A producer that watches the health of a subchannel and updates its state.
 #[derive(Debug)]
-pub(crate) struct HealthWatcherProvider {
+pub(crate) struct HealthWatcher {
+    /// The current health state.
     health_state: Mutex<HealthState>,
+    /// The work scheduler we use to notify the policy when health changes.
     work_scheduler: Arc<dyn WorkScheduler>,
+    #[cfg(test)]
+    pub(crate) drop_tracker: Option<Weak<AtomicBool>>,
 }
 
-impl HealthWatcherProvider {
+impl HealthWatcher {
     fn start_rpc(&self) {
         // [STUB] Spawn background task, fetch metadata loop natively checking health
     }
 
-    #[allow(dead_code)]
+    /// Sets the health state and schedules work to notify the policy.
     pub(crate) fn set_health(&self, state: HealthState) {
         *self.health_state.lock().unwrap() = state;
         self.work_scheduler.schedule_work();
     }
 }
 
-impl Drop for HealthWatcherProvider {
+impl Drop for HealthWatcher {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(tracker) = &self.drop_tracker
+            && let Some(tracker) = tracker.upgrade()
+        {
+            tracker.store(true, Ordering::Relaxed);
+        }
         // [STUB] Notify cancellation to active RPC loop safely dropping resources.
     }
 }
 
-impl Producer for HealthWatcherProvider {
+impl Producer for HealthWatcher {
     fn update_state(&self, state: &mut SubchannelState) {
         let health = self.health_state.lock().unwrap().clone();
         state.attributes = state.attributes.add(HealthAttribute(health));
@@ -86,6 +119,7 @@ impl Producer for HealthWatcherProvider {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::sync::Mutex;
     use std::sync::mpsc;
 
@@ -111,6 +145,12 @@ mod tests {
         let last_health1 = Arc::new(Mutex::new(Some(HealthState::Unknown)));
         let last_health1_clone = last_health1.clone();
 
+        let drop_tracker = Arc::new(AtomicBool::new(false));
+        let drop_tracker_clone = drop_tracker.clone();
+
+        let hw1_ref: Arc<Mutex<Option<Arc<HealthWatcher>>>> = Arc::new(Mutex::new(None));
+        let hw1_ref_clone = hw1_ref.clone();
+
         // Must preserve exact variables cleanly to simulate active policy states.
         let sc1_ref: Arc<Mutex<Option<Arc<dyn Subchannel>>>> = Arc::new(Mutex::new(None));
         let sc2_ref: Arc<Mutex<Option<Arc<dyn Subchannel>>>> = Arc::new(Mutex::new(None));
@@ -131,7 +171,11 @@ mod tests {
                 *sc2_ref_clone.lock().unwrap() = Some(sc2.clone());
 
                 // We dynamically subscribe without manually injecting structures
-                subscribe(&state1);
+                let builder = HealthWatcherBuilder {
+                    drop_tracker: Some(std::sync::Arc::downgrade(&drop_tracker_clone)),
+                };
+                let hw = producer::get_or_build_producer(builder, &state1);
+                *hw1_ref_clone.lock().unwrap() = Some(hw);
 
                 Ok(())
             })),
@@ -204,8 +248,10 @@ mod tests {
         assert_eq!(*last_health1.lock().unwrap(), Some(HealthState::Unknown));
 
         // Inject out of band change mirroring RPC hook mapping directly to watched channel
-        // TODO:
-        // test_inject_health(&sc1, HealthState::Healthy);
+        {
+            let hw1 = hw1_ref.lock().unwrap().clone().unwrap();
+            hw1.set_health(HealthState::Healthy);
+        }
 
         // Await strictly over out of bounds event triggered by .schedule_work() inside provider
         assert_eq!(rx.try_recv(), Ok(TestEvent::ScheduleWork));
@@ -225,10 +271,11 @@ mod tests {
         // Finalize: drops pointers seamlessly cancelling Providers!
         sc1_ref.lock().unwrap().take();
         sc2_ref.lock().unwrap().take();
+        hw1_ref.lock().unwrap().take();
 
         assert_eq!(rx.try_recv(), Ok(TestEvent::ScheduleWork));
         producer.work(&mut cc);
 
-        // TODO: verify that producer was dropped.
+        assert!(drop_tracker.load(Ordering::Relaxed));
     }
 }
