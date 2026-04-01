@@ -958,4 +958,456 @@ mod test {
         // child policies had their work methods called.
         child_manager.update(updates, &mut tcc).unwrap();
     }
+
+    // Tests that if a child is updated with a different builder, it is replaced.
+    //
+    // This test ensures that when the ChildManager receives an update for a child identifier
+    // that it already manages, but with a different policy builder, it treats it as a new child.
+    // This involves destroying the old child and creating a new one using the new builder.
+    #[tokio::test]
+    async fn childmanager_update_replaces_child_if_builder_changes() {
+        let name1 = "childmanager_update_replaces_child_if_builder_changes-one";
+        let name2 = "childmanager_update_replaces_child_if_builder_changes-two";
+        test_utils::reg_stub_policy(name1, create_verifying_funcs_for_aggregate_tests());
+        test_utils::reg_stub_policy(name2, create_verifying_funcs_for_aggregate_tests());
+
+        let (mut rx_events, mut child_manager, mut tcc) =
+            setup(create_verifying_funcs_for_aggregate_tests(), name1);
+
+        let builder1: Arc<dyn LbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(name1).unwrap();
+        let builder2: Arc<dyn LbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(name2).unwrap();
+
+        let endpoint = Endpoint {
+            addresses: vec![Address {
+                address: String::from("1.1.1.1:80").into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // Create a child using builder1.
+        let updates = vec![ChildUpdate {
+            child_identifier: endpoint.clone(),
+            child_policy_builder: builder1.clone(),
+            child_update: Some((
+                ResolverUpdate {
+                    attributes: crate::attributes::Attributes,
+                    endpoints: Ok(vec![endpoint.clone()]),
+                    service_config: Ok(None),
+                    resolution_note: None,
+                },
+                None,
+            )),
+        }];
+        assert!(child_manager.update(updates, tcc.as_mut()).is_ok());
+
+        // A new subchannel indicates that a new policy instance was created.
+        let sc1 = verify_subchannel_creation_from_policy(&mut rx_events, 1)
+            .await
+            .remove(0);
+
+        // Confirm the child is using builder1.
+        {
+            let children: Vec<_> = child_manager.children().collect();
+            assert_eq!(children.len(), 1);
+            assert_eq!(children[0].builder.name(), name1);
+        }
+
+        // Update the same child identifier but using builder2.
+        let updates = vec![ChildUpdate {
+            child_identifier: endpoint.clone(),
+            child_policy_builder: builder2.clone(),
+            child_update: Some((
+                ResolverUpdate {
+                    attributes: crate::attributes::Attributes,
+                    endpoints: Ok(vec![endpoint.clone()]),
+                    service_config: Ok(None),
+                    resolution_note: None,
+                },
+                None,
+            )),
+        }];
+        assert!(child_manager.update(updates, tcc.as_mut()).is_ok());
+
+        // The creation of another subchannel confirms that the old policy was replaced
+        // by a new one, as the stub policy implementation creates a subchannel on initialization.
+        let _ = verify_subchannel_creation_from_policy(&mut rx_events, 1)
+            .await
+            .remove(0);
+
+        // Confirm the child is now using builder2.
+        {
+            let children: Vec<_> = child_manager.children().collect();
+            assert_eq!(children.len(), 1);
+            assert_eq!(children[0].builder.name(), name2);
+        }
+    }
+
+    // Tests that if a child is updated with the same builder, it is retained.
+    //
+    // This test verifies that if an update provides the same identifier and builder for an existing
+    // child, the ChildManager reuses the existing child policy instance instead of replacing it.
+    // This is crucial for maintaining state (like connectivity state) across updates.
+    #[tokio::test]
+    async fn childmanager_update_retains_child_if_builder_same() {
+        let name = "childmanager_update_retains_child_if_builder_same";
+        test_utils::reg_stub_policy(name, create_verifying_funcs_for_aggregate_tests());
+        let (mut rx_events, mut child_manager, mut tcc) =
+            setup(create_verifying_funcs_for_aggregate_tests(), name);
+
+        let builder: Arc<dyn LbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(name).unwrap();
+
+        let endpoint = Endpoint {
+            addresses: vec![Address {
+                address: String::from("1.1.1.1:80").into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // Create a child using the builder.
+        let updates = vec![ChildUpdate {
+            child_identifier: endpoint.clone(),
+            child_policy_builder: builder.clone(),
+            child_update: Some((
+                ResolverUpdate {
+                    attributes: crate::attributes::Attributes,
+                    endpoints: Ok(vec![endpoint.clone()]),
+                    service_config: Ok(None),
+                    resolution_note: None,
+                },
+                None,
+            )),
+        }];
+        assert!(child_manager.update(updates, tcc.as_mut()).is_ok());
+
+        let sc1 = verify_subchannel_creation_from_policy(&mut rx_events, 1)
+            .await
+            .remove(0);
+
+        // Transition the child's state to Ready.
+        move_subchannel_to_state(
+            &mut child_manager,
+            sc1.clone(),
+            tcc.as_mut(),
+            ConnectivityState::Ready,
+        );
+        assert_eq!(child_manager.aggregate_states(), ConnectivityState::Ready);
+
+        // Update the child again with the same builder.
+        let updates = vec![ChildUpdate {
+            child_identifier: endpoint.clone(),
+            child_policy_builder: builder.clone(),
+            child_update: Some((
+                ResolverUpdate {
+                    attributes: crate::attributes::Attributes,
+                    endpoints: Ok(vec![endpoint.clone()]),
+                    service_config: Ok(None),
+                    resolution_note: None,
+                },
+                None,
+            )),
+        }];
+        assert!(child_manager.update(updates, tcc.as_mut()).is_ok());
+
+        // The absence of a state reset (it remains Ready) confirms that the policy instance was reused.
+        // If it had been replaced, the new instance would have started with the initial state (Idle).
+        assert_eq!(child_manager.aggregate_states(), ConnectivityState::Ready);
+    }
+
+    // Tests that updating with an empty list removes all children.
+    //
+    // This verifies that the ChildManager correctly cleans up children that are no longer present
+    // in the update list.
+    #[tokio::test]
+    async fn childmanager_update_removes_children() {
+        let name = "childmanager_update_removes_children";
+        test_utils::reg_stub_policy(name, create_verifying_funcs_for_aggregate_tests());
+        let (mut rx_events, mut child_manager, mut tcc) =
+            setup(create_verifying_funcs_for_aggregate_tests(), name);
+        let builder: Arc<dyn LbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(name).unwrap();
+
+        let endpoint = Endpoint {
+            addresses: vec![Address {
+                address: String::from("1.1.1.1:80").into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let updates = vec![ChildUpdate {
+            child_identifier: endpoint.clone(),
+            child_policy_builder: builder.clone(),
+            child_update: Some((
+                ResolverUpdate {
+                    attributes: crate::attributes::Attributes,
+                    endpoints: Ok(vec![endpoint.clone()]),
+                    service_config: Ok(None),
+                    resolution_note: None,
+                },
+                None,
+            )),
+        }];
+        assert!(child_manager.update(updates, tcc.as_mut()).is_ok());
+        let _ = verify_subchannel_creation_from_policy(&mut rx_events, 1).await;
+        assert_eq!(child_manager.children().count(), 1);
+
+        // Update with an empty list.
+        assert!(child_manager.update(vec![], tcc.as_mut()).is_ok());
+        assert_eq!(child_manager.children().count(), 0);
+    }
+
+    // Tests that children with same ID but different builders are distinct.
+    //
+    // The ChildManager distinguishes children based on a composite key of their identifier
+    // and the name of their policy builder. This test confirms that two children can coexist
+    // with the same identifier provided they use different builders.
+    #[tokio::test]
+    async fn childmanager_identifiers_with_different_builders_are_distinct() {
+        let name1 = "childmanager_distinct-one";
+        let name2 = "childmanager_distinct-two";
+        test_utils::reg_stub_policy(name1, create_verifying_funcs_for_aggregate_tests());
+        test_utils::reg_stub_policy(name2, create_verifying_funcs_for_aggregate_tests());
+
+        let (mut rx_events, mut child_manager, mut tcc) =
+            setup(create_verifying_funcs_for_aggregate_tests(), name1);
+
+        let builder1: Arc<dyn LbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(name1).unwrap();
+        let builder2: Arc<dyn LbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(name2).unwrap();
+
+        let endpoint = Endpoint {
+            addresses: vec![Address {
+                address: String::from("1.1.1.1:80").into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // Create two children with the same endpoint identifier but different builders.
+        let updates = vec![
+            ChildUpdate {
+                child_identifier: endpoint.clone(),
+                child_policy_builder: builder1.clone(),
+                child_update: Some((
+                    ResolverUpdate {
+                        attributes: crate::attributes::Attributes,
+                        endpoints: Ok(vec![endpoint.clone()]),
+                        service_config: Ok(None),
+                        resolution_note: None,
+                    },
+                    None,
+                )),
+            },
+            ChildUpdate {
+                child_identifier: endpoint.clone(),
+                child_policy_builder: builder2.clone(),
+                child_update: Some((
+                    ResolverUpdate {
+                        attributes: crate::attributes::Attributes,
+                        endpoints: Ok(vec![endpoint.clone()]),
+                        service_config: Ok(None),
+                        resolution_note: None,
+                    },
+                    None,
+                )),
+            },
+        ];
+
+        assert!(child_manager.update(updates, tcc.as_mut()).is_ok());
+
+        // Verify two subchannels were created, one for each child policy.
+        let _ = verify_subchannel_creation_from_policy(&mut rx_events, 2).await;
+
+        assert_eq!(child_manager.children().count(), 2);
+        let builders: Vec<_> = child_manager
+            .children()
+            .map(|c| c.builder.name())
+            .collect();
+        assert!(builders.contains(&name1));
+        assert!(builders.contains(&name2));
+    }
+
+    // Tests retain_children functionality.
+    //
+    // `retain_children` allows filtering the active children to a specific subset.
+    // Any children not in the provided list should be removed.
+    #[tokio::test]
+    async fn childmanager_retain_children() {
+        let name = "childmanager_retain_children";
+        test_utils::reg_stub_policy(name, create_verifying_funcs_for_aggregate_tests());
+        let (mut rx_events, mut child_manager, mut tcc) =
+            setup(create_verifying_funcs_for_aggregate_tests(), name);
+        let builder: Arc<dyn LbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(name).unwrap();
+
+        let endpoint1 = Endpoint {
+            addresses: vec![Address {
+                address: String::from("1.1.1.1:80").into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let endpoint2 = Endpoint {
+            addresses: vec![Address {
+                address: String::from("2.2.2.2:80").into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let updates = vec![
+            ChildUpdate {
+                child_identifier: endpoint1.clone(),
+                child_policy_builder: builder.clone(),
+                child_update: Some((
+                    ResolverUpdate {
+                        attributes: crate::attributes::Attributes,
+                        endpoints: Ok(vec![endpoint1.clone()]),
+                        service_config: Ok(None),
+                        resolution_note: None,
+                    },
+                    None,
+                )),
+            },
+            ChildUpdate {
+                child_identifier: endpoint2.clone(),
+                child_policy_builder: builder.clone(),
+                child_update: Some((
+                    ResolverUpdate {
+                        attributes: crate::attributes::Attributes,
+                        endpoints: Ok(vec![endpoint2.clone()]),
+                        service_config: Ok(None),
+                        resolution_note: None,
+                    },
+                    None,
+                )),
+            },
+        ];
+
+        assert!(child_manager.update(updates, tcc.as_mut()).is_ok());
+        let _ = verify_subchannel_creation_from_policy(&mut rx_events, 2).await;
+        assert_eq!(child_manager.children().count(), 2);
+
+        // Retain only endpoint1.
+        child_manager.retain_children(vec![(endpoint1.clone(), builder.clone())]);
+        assert_eq!(child_manager.children().count(), 1);
+        assert_eq!(
+            child_manager.children().next().unwrap().identifier,
+            endpoint1
+        );
+
+        // Try to retain endpoint2 (which was removed), and endpoint3 (which never existed).
+        // Since `retain_children` implies `retain_only=true`, new children are not created,
+        // and existing children not in the list are removed. This should result in an empty list.
+        let endpoint3 = Endpoint {
+            addresses: vec![Address {
+                address: String::from("3.3.3.3:80").into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        child_manager.retain_children(vec![
+            (endpoint2.clone(), builder.clone()),
+            (endpoint3.clone(), builder.clone()),
+        ]);
+        assert_eq!(child_manager.children().count(), 0);
+    }
+
+    // Tests that work scheduler is invalidated when child is removed.
+    //
+    // It is important that removed children cannot schedule new work, as this could lead to
+    // operations on stale or invalid state. This test verifies that the `WorkScheduler`
+    // associated with a child is invalidated upon child removal.
+    #[tokio::test]
+    async fn childmanager_child_removal_invalidates_work_scheduler() {
+        let name = "childmanager_child_removal_invalidates_work_scheduler";
+        test_utils::reg_stub_policy(name, create_funcs_for_schedule_work_tests(name));
+
+        let (tx_events, mut rx_events) = mpsc::unbounded_channel::<TestEvent>();
+        let mut tcc = TestChannelController {
+            tx_events: tx_events.clone(),
+        };
+
+        let mut child_manager =
+            ChildManager::new(default_runtime(), Arc::new(TestWorkScheduler { tx_events }));
+
+        let cfg = LbConfig::new(Mutex::new(HashMap::<&'static str, ()>::new()));
+        let children = cfg
+            .convert_to::<Mutex<HashMap<&'static str, ()>>>()
+            .unwrap();
+        children.lock().unwrap().insert(name, ());
+
+        let builder: Arc<dyn LbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(name).unwrap();
+
+        let endpoint = Endpoint {
+            addresses: vec![Address {
+                address: String::from("1.1.1.1:80").into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // Create a child.
+        let updates = vec![ChildUpdate {
+            child_identifier: endpoint.clone(),
+            child_policy_builder: builder.clone(),
+            child_update: Some((ResolverUpdate::default(), Some(cfg.clone()))),
+        }];
+        child_manager.update(updates, &mut tcc).unwrap();
+
+        // The test policy should trigger a work schedule request.
+        match rx_events.recv().await.unwrap() {
+            TestEvent::ScheduleWork => {}
+            other => panic!("unexpected event {:?}", other),
+        };
+        // Process the scheduled work.
+        child_manager.work(&mut tcc);
+
+        // Remove the child.
+        child_manager.update(vec![], &mut tcc).unwrap();
+
+        // To test invalidation, we need access to the now-removed child's scheduler.
+        // We use a custom policy implementation that extracts the scheduler during initialization.
+        let (tx_scheduler, mut rx_scheduler) = mpsc::unbounded_channel();
+        let custom_funcs = StubPolicyFuncs {
+            resolver_update: Some(Arc::new(move |data, _, _, _| {
+                // Send the scheduler out so we can access it after the child is destroyed.
+                let _ = tx_scheduler.send(data.lb_policy_options.work_scheduler.clone());
+                Ok(())
+            })),
+            subchannel_update: None,
+            work: None,
+        };
+        let custom_name = "childmanager_custom_invalidation";
+        test_utils::reg_stub_policy(custom_name, custom_funcs);
+        let custom_builder = GLOBAL_LB_REGISTRY.get_policy(custom_name).unwrap();
+
+        // Re-create the child using the custom policy.
+        let updates = vec![ChildUpdate {
+            child_identifier: endpoint.clone(),
+            child_policy_builder: custom_builder.clone(),
+            child_update: Some((ResolverUpdate::default(), Some(cfg.clone()))),
+        }];
+        child_manager.update(updates, &mut tcc).unwrap();
+
+        let scheduler = rx_scheduler.recv().await.unwrap();
+
+        // Verify the scheduler works when the child is alive.
+        scheduler.schedule_work();
+        match rx_events.recv().await.unwrap() {
+            TestEvent::ScheduleWork => {}
+            other => panic!("unexpected event {:?}", other),
+        };
+        child_manager.work(&mut tcc); // Clear pending work.
+
+        // Remove the child again.
+        child_manager.update(vec![], &mut tcc).unwrap();
+
+        // Attempt to schedule work using the scheduler from the removed child.
+        scheduler.schedule_work();
+
+        // We expect NO ScheduleWork event because the scheduler should be invalidated.
+        let result = tokio::time::timeout(std::time::Duration::from_millis(50), rx_events.recv()).await;
+        assert!(result.is_err(), "Should not receive event");
+
+    }
 }
