@@ -36,6 +36,7 @@ use crate::client::load_balancing::LbPolicy;
 use crate::client::load_balancing::LbState;
 use crate::client::load_balancing::PickResult;
 use crate::client::load_balancing::Picker;
+use crate::client::load_balancing::SubchannelUpdate;
 use crate::client::load_balancing::subchannel::ForwardingSubchannel;
 use crate::client::load_balancing::subchannel::Subchannel;
 use crate::client::load_balancing::subchannel::SubchannelState;
@@ -93,7 +94,7 @@ impl<T: LbPolicy> LbPolicy for SubchannelSharing<T> {
     fn subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
+        update: SubchannelUpdate<'_>,
         channel_controller: &mut dyn ChannelController,
     ) {
         let mut channel_controller = SharingChannelController {
@@ -112,7 +113,9 @@ impl<T: LbPolicy> LbPolicy for SubchannelSharing<T> {
         };
 
         // Update the stored internal state for future subchannel creation.
-        *old_state = state.clone();
+        if let SubchannelUpdate::ConnectivityUpdate(state) = update {
+            *old_state = state.clone();
+        }
 
         let ext_subchannels: Vec<_> = subchannel_set
             .iter()
@@ -125,7 +128,7 @@ impl<T: LbPolicy> LbPolicy for SubchannelSharing<T> {
 
         for ext in ext_subchannels {
             self.delegate
-                .subchannel_update(ext, state, &mut channel_controller)
+                .subchannel_update(ext, update, &mut channel_controller)
         }
     }
 
@@ -528,11 +531,11 @@ mod tests {
             .unwrap()
             .delegate
             .clone();
-        let state = SubchannelState::idle();
+        let update = SubchannelUpdate::ConnectivityUpdate(&SubchannelState::idle());
 
         // Perform a subchannel update and confirm that two calls are made to
         // the delegate.
-        sharing.subchannel_update(internal_sc.clone(), &state, &mut cc);
+        sharing.subchannel_update(internal_sc.clone(), update, &mut cc);
         assert_eq!(*update_calls.lock().unwrap(), 2);
 
         // Drop one external subchannel.
@@ -540,7 +543,7 @@ mod tests {
 
         // Perform a subchannel update and confirm that only one call is made.
         *update_calls.lock().unwrap() = 0;
-        sharing.subchannel_update(internal_sc.clone(), &state, &mut cc);
+        sharing.subchannel_update(internal_sc.clone(), update, &mut cc);
         assert_eq!(*update_calls.lock().unwrap(), 1);
 
         // We should have 4 strong references to the internal subchannel: ours,
@@ -556,7 +559,7 @@ mod tests {
 
         // Perform a subchannel update and confirm zero calls are made.
         *update_calls.lock().unwrap() = 0;
-        sharing.subchannel_update(internal_sc.clone(), &state, &mut cc);
+        sharing.subchannel_update(internal_sc.clone(), update, &mut cc);
         assert_eq!(*update_calls.lock().unwrap(), 0);
 
         // Create a subchannel with the same address again and confirm that a
@@ -620,15 +623,15 @@ mod tests {
             .unwrap()
             .delegate
             .clone();
-        let state = SubchannelState::idle();
+        let update = SubchannelUpdate::ConnectivityUpdate(&SubchannelState::idle());
 
         // Verify that two delegated update calls are made.
-        sharing.subchannel_update(internal_sc.clone(), &state, &mut cc);
+        sharing.subchannel_update(internal_sc.clone(), update, &mut cc);
         assert_eq!(*update_calls.lock().unwrap(), 2);
 
         // Drop one and verify that one delegated update call is made.
         drop(external_sc1);
-        sharing.subchannel_update(internal_sc, &state, &mut cc);
+        sharing.subchannel_update(internal_sc, update, &mut cc);
         assert_eq!(*update_calls.lock().unwrap(), 3);
     }
 
@@ -802,9 +805,9 @@ mod tests {
             .delegate
             .clone();
 
-        let state = SubchannelState::idle();
+        let update = SubchannelUpdate::ConnectivityUpdate(&SubchannelState::idle());
         // This should not deadlock.
-        sharing.subchannel_update(internal_sc.clone(), &state, &mut cc);
+        sharing.subchannel_update(internal_sc.clone(), update, &mut cc);
     }
 
     // Tests that a shared subchannel's correct state is returned by
@@ -858,7 +861,11 @@ mod tests {
         };
 
         // Update the state to Connecting.
-        sharing.subchannel_update(int_sc.clone(), &SubchannelState::connecting(), &mut cc);
+        sharing.subchannel_update(
+            int_sc.clone(),
+            SubchannelUpdate::ConnectivityUpdate(&SubchannelState::connecting()),
+            &mut cc,
+        );
 
         // Create a second subchannel for the address and verify that the state
         // is also Connecting.
@@ -872,7 +879,11 @@ mod tests {
         sharing.work(&mut cc);
 
         // Update the state to Ready.
-        sharing.subchannel_update(int_sc.clone(), &SubchannelState::ready(), &mut cc);
+        sharing.subchannel_update(
+            int_sc.clone(),
+            SubchannelUpdate::ConnectivityUpdate(&SubchannelState::ready()),
+            &mut cc,
+        );
 
         // Create another subchannel for the address and verify that the state
         // is now Ready.

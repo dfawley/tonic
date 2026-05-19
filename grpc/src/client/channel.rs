@@ -52,6 +52,7 @@ use crate::client::load_balancing::ParsedJsonLbConfig;
 use crate::client::load_balancing::PickResult;
 use crate::client::load_balancing::Picker;
 use crate::client::load_balancing::QueuingPicker;
+use crate::client::load_balancing::SubchannelUpdate;
 use crate::client::load_balancing::WorkScheduler;
 use crate::client::load_balancing::graceful_switch::GracefulSwitchPolicy;
 use crate::client::load_balancing::pick_first;
@@ -353,7 +354,7 @@ impl ActiveChannel {
                     WorkQueueItem::SubchannelStateUpdate { subchannel, state } => {
                         resolver_channel_controller.lb_policy.subchannel_update(
                             subchannel,
-                            &state,
+                            SubchannelUpdate::ConnectivityUpdate(&state),
                             &mut resolver_channel_controller.lb_channel_controller,
                         );
                     }

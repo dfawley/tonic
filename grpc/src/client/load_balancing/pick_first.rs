@@ -34,7 +34,7 @@ use crate::client::load_balancing::LbPolicyOptions;
 use crate::client::load_balancing::LbState;
 use crate::client::load_balancing::OneSubchannelPicker;
 use crate::client::load_balancing::Subchannel;
-use crate::client::load_balancing::SubchannelState;
+use crate::client::load_balancing::SubchannelUpdate;
 use crate::client::load_balancing::WorkScheduler;
 use crate::client::name_resolution::Address;
 use crate::client::name_resolution::ResolverUpdate;
@@ -112,9 +112,12 @@ impl LbPolicy for PickFirstPolicy {
     fn subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
+        update: SubchannelUpdate<'_>,
         channel_controller: &mut dyn ChannelController,
     ) {
+        let SubchannelUpdate::ConnectivityUpdate(state) = update else {
+            return;
+        };
         match state.connectivity_state {
             // Assume the update is for our subchannel.
             ConnectivityState::Ready => {

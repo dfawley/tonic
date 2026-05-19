@@ -43,6 +43,7 @@ use crate::client::load_balancing::LbPolicyOptions;
 use crate::client::load_balancing::LbState;
 use crate::client::load_balancing::Subchannel;
 use crate::client::load_balancing::SubchannelState;
+use crate::client::load_balancing::SubchannelUpdate;
 use crate::client::load_balancing::WorkScheduler;
 use crate::client::load_balancing::subchannel::WeakSubchannel;
 use crate::client::name_resolution::Address;
@@ -373,7 +374,7 @@ where
     pub fn subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
+        update: SubchannelUpdate<'_>,
         channel_controller: &mut dyn ChannelController,
     ) {
         // Determine which child created this subchannel.
@@ -385,7 +386,7 @@ where
         // Wrap the channel_controller to track the child's operations.
         let mut channel_controller = WrappedController::new(channel_controller);
         // Call the proper child.
-        policy.subchannel_update(subchannel, state, &mut channel_controller);
+        policy.subchannel_update(subchannel, update, &mut channel_controller);
         self.resolve_child_controller(channel_controller, child_idx);
     }
 
@@ -488,6 +489,7 @@ mod test {
     use crate::client::load_balancing::QueuingPicker;
     use crate::client::load_balancing::Subchannel;
     use crate::client::load_balancing::SubchannelState;
+    use crate::client::load_balancing::SubchannelUpdate;
     use crate::client::load_balancing::child_manager::ChildManager;
     use crate::client::load_balancing::child_manager::ChildUpdate;
     use crate::client::load_balancing::test_utils::StubPolicyFuncs;
@@ -583,7 +585,11 @@ mod test {
         tcc: &mut dyn ChannelController,
         state: &SubchannelState,
     ) {
-        child_manager.subchannel_update(subchannel, state, tcc);
+        child_manager.subchannel_update(
+            subchannel,
+            SubchannelUpdate::ConnectivityUpdate(state),
+            tcc,
+        );
     }
 
     // Verifies that the expected number of subchannels is created. Returns the
@@ -622,7 +628,10 @@ mod test {
             // Closure for subchannel_update. Sends a picker of the same state
             // that was passed to it.
             subchannel_update: Some(Arc::new(
-                move |data, updated_subchannel, state, controller| {
+                move |data, updated_subchannel, update, controller| {
+                    let SubchannelUpdate::ConnectivityUpdate(state) = update else {
+                        return;
+                    };
                     controller.update_picker(LbState {
                         connectivity_state: state.connectivity_state,
                         picker: Arc::new(QueuingPicker {}),

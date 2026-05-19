@@ -41,6 +41,7 @@ use crate::client::load_balancing::LbState;
 use crate::client::load_balancing::ParsedJsonLbConfig;
 use crate::client::load_balancing::Subchannel;
 use crate::client::load_balancing::SubchannelState;
+use crate::client::load_balancing::SubchannelUpdate;
 use crate::client::load_balancing::WorkScheduler;
 use crate::client::load_balancing::subchannel::ForwardingSubchannel;
 use crate::client::name_resolution::Address;
@@ -172,8 +173,12 @@ type ResolverUpdateFn = Arc<
 
 // The callback to invoke when subchannel_update is invoked on the stub policy.
 type SubchannelUpdateFn = Arc<
-    dyn Fn(&mut StubPolicyData, Arc<dyn Subchannel>, &SubchannelState, &mut dyn ChannelController)
-        + Send
+    dyn Fn(
+            &mut StubPolicyData,
+            Arc<dyn Subchannel>,
+            SubchannelUpdate<'_>,
+            &mut dyn ChannelController,
+        ) + Send
         + Sync,
 >;
 
@@ -239,11 +244,11 @@ impl LbPolicy for StubPolicy {
     fn subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
+        update: SubchannelUpdate<'_>,
         channel_controller: &mut dyn ChannelController,
     ) {
         if let Some(f) = &self.funcs.subchannel_update {
-            f(&mut self.data, subchannel, state, channel_controller);
+            f(&mut self.data, subchannel, update, channel_controller);
         }
     }
 

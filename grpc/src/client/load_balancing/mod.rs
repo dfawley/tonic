@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use crate::StatusCodeError;
 use crate::StatusError;
+use crate::attributes::Attributes;
 use crate::client::ConnectivityState;
 use crate::client::load_balancing::subchannel::Subchannel;
 use crate::client::load_balancing::subchannel::SubchannelState;
@@ -105,7 +106,7 @@ pub(crate) trait LbPolicy: Send + Sync + Debug + 'static {
     fn subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
+        update: SubchannelUpdate<'_>,
         channel_controller: &mut dyn ChannelController,
     );
 
@@ -136,6 +137,12 @@ pub(crate) trait WorkScheduler: Send + Sync + Debug {
     // pending work call that has not yet started, this may not schedule another
     // call.
     fn schedule_work(&self);
+}
+
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum SubchannelUpdate<'a> {
+    ConnectivityUpdate(&'a SubchannelState),
+    AttributeUpdate(&'a Attributes),
 }
 
 /// Abstract representation of the configuration for any LB policy, stored as
@@ -406,10 +413,10 @@ impl<T: LbPolicy + ?Sized> LbPolicy for Box<T> {
     fn subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
+        update: SubchannelUpdate,
         channel_controller: &mut dyn ChannelController,
     ) {
-        (**self).subchannel_update(subchannel, state, channel_controller);
+        (**self).subchannel_update(subchannel, update, channel_controller);
     }
 
     fn work(&mut self, channel_controller: &mut dyn ChannelController) {

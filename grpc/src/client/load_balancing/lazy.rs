@@ -34,7 +34,7 @@ use crate::client::load_balancing::LbState;
 use crate::client::load_balancing::PickResult;
 use crate::client::load_balancing::Picker;
 use crate::client::load_balancing::Subchannel;
-use crate::client::load_balancing::SubchannelState;
+use crate::client::load_balancing::SubchannelUpdate;
 use crate::client::load_balancing::WorkScheduler;
 use crate::client::name_resolution::ResolverUpdate;
 use crate::core::RequestHeaders;
@@ -111,11 +111,11 @@ where
     fn subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
+        update: SubchannelUpdate<'_>,
         channel_controller: &mut dyn ChannelController,
     ) {
         if let Inner::Built(delegate) = &mut self.inner {
-            delegate.subchannel_update(subchannel, state, channel_controller);
+            delegate.subchannel_update(subchannel, update, channel_controller);
         }
     }
 
@@ -407,7 +407,7 @@ mod tests {
         fn subchannel_update(
             &mut self,
             _subchannel: Arc<dyn Subchannel>,
-            _state: &SubchannelState,
+            _update: SubchannelUpdate<'_>,
             _channel_controller: &mut dyn ChannelController,
         ) {
             self.tx.send(MockEvent::SubchannelUpdate).unwrap();

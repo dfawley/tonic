@@ -34,7 +34,7 @@ use crate::client::load_balancing::LbPolicy;
 use crate::client::load_balancing::LbState;
 use crate::client::load_balancing::ParsedJsonLbConfig;
 use crate::client::load_balancing::Subchannel;
-use crate::client::load_balancing::SubchannelState;
+use crate::client::load_balancing::SubchannelUpdate;
 use crate::client::load_balancing::WorkScheduler;
 use crate::client::load_balancing::child_manager::ChildManager;
 use crate::client::load_balancing::child_manager::ChildUpdate;
@@ -106,11 +106,11 @@ impl LbPolicy for GracefulSwitchPolicy {
     fn subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
+        update: SubchannelUpdate<'_>,
         channel_controller: &mut dyn ChannelController,
     ) {
         self.child_manager
-            .subchannel_update(subchannel, state, channel_controller);
+            .subchannel_update(subchannel, update, channel_controller);
         self.update_picker(channel_controller);
     }
 
@@ -261,6 +261,7 @@ mod test {
     use crate::client::load_balancing::Picker;
     use crate::client::load_balancing::Subchannel;
     use crate::client::load_balancing::SubchannelState;
+    use crate::client::load_balancing::SubchannelUpdate;
     use crate::client::load_balancing::graceful_switch::GracefulSwitchPolicy;
     use crate::client::load_balancing::test_utils::StubPolicyData;
     use crate::client::load_balancing::test_utils::StubPolicyFuncs;
@@ -359,7 +360,11 @@ mod test {
             // in resolver_update. It then sends a picker of the same state that
             // was passed to it.
             subchannel_update: Some(Arc::new(
-                move |data: &mut StubPolicyData, updated_subchannel, state, channel_controller| {
+                move |data: &mut StubPolicyData, updated_subchannel, update, channel_controller| {
+                    let SubchannelUpdate::ConnectivityUpdate(state) = update else {
+                        return;
+                    };
+
                     // Retrieve the specific TestState from the generic test_data field.
                     // This downcasts the `Any` trait object.
                     let test_data = data.test_data.as_mut().unwrap();
@@ -465,7 +470,7 @@ mod test {
         tcc: &mut dyn ChannelController,
         state: &SubchannelState,
     ) {
-        lb_policy.subchannel_update(subchannel, state, tcc);
+        lb_policy.subchannel_update(subchannel, SubchannelUpdate::ConnectivityUpdate(state), tcc);
     }
 
     // Tests that the gracefulswitch policy correctly sets a child and sends
