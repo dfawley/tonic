@@ -1,12 +1,28 @@
 # protoc-gen-rust-grpc
 
-A protoc plugin that generates Rust gRPC service code using the Tonic framework.
+A protoc plugin that generates Rust gRPC service code for use with the [`grpc`
+crate](https://crates.io/crates/grpc).
 
-## Build
+> NOTE: This version is a preview and not recommended for any production
+> use.  All APIs are unstable.  Proceed at your own risk.
+
+Note: as part of compiling, the source files for `protoc` are downloaded from
+the [protobuf github repository](https://github.com/protocolbuffers/protobuf).
+The archive's checksum is verified before compiling.
+
+## Using from Rust
+
+A `build.rs` script will ensure the `protoc` and `protoc-gen-rust-grpc` binaries
+are compiled, and the functions `protoc` and `protoc_gen_rust_grpc` can be used
+to find their locations.
+
+## Building binaries manually
 
 Requirements:
 - CMake 3.14 or higher
 - C++17 compatible compiler
+
+From the `src/cpp_source` directory:
 
 ```bash
 # Create build directory
@@ -28,7 +44,8 @@ The binaries will be in `build/bin/`:
 
 ## Usage
 
-**Note:** It's generally recommended to use `grpc_protobuf_build::CodeGen` and/or `protobuf_codegen::CodeGen` instead of invoking `protoc` directly.
+**Note:** It's generally recommended to use `grpc_protobuf_build::CodeGen`
+and/or `protobuf_codegen::CodeGen` instead of invoking `protoc` directly.
 
 ```bash
 # Add the plugin to PATH

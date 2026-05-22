@@ -19,6 +19,7 @@
 // IN THE SOFTWARE.
 
 #include <vector>
+#include <iostream>
 
 #include "google/protobuf/compiler/code_generator.h"
 #include "google/protobuf/compiler/plugin.h"
@@ -95,6 +96,10 @@ public:
 };
 
 int main(int argc, char *argv[]) {
+  if (argc > 1 && std::string(argv[1]) == "--version") {
+    std::cout << "protoc-gen-rust-grpc " << RUST_GRPC_VERSION << std::endl;
+    return 0;
+  }
   RustGrpcGenerator generator;
   return protobuf::compiler::PluginMain(argc, argv, &generator);
 }

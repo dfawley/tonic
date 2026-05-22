@@ -1,11 +1,11 @@
 [package]
-name = "grpc-protobuf-build"
+name = "protoc-gen-rust-grpc"
 version = "0.9.0-alpha.2"
 authors = ["gRPC Authors"]
 license = "MIT"
 homepage = "https://grpc.io"
 repository = "https://github.com/grpc/grpc-rust"
-description = "Protobuf build integration for grpc"
+description = "Protobuf plugin to generate gRPC-Rust service bindings"
 readme = "README.md"
 keywords = ["rpc", "grpc", "async", "protobuf", "proto"]
 categories = ["web-programming", "network-programming", "asynchronous"]
@@ -13,14 +13,6 @@ rust-version = { workspace = true }
 edition = "2024"
 
 [dependencies]
-prettyplease = "0.2.35"
-protobuf-codegen = { version = "4.34.0-release" }
-syn = "2.0.104"
-protoc-gen-rust-grpc = { version = "0.9.0-alpha.2", path = "../protoc-gen-rust-grpc", optional = true }
-
-[features]
-default = ["build-plugin"]
-build-plugin = ["dep:protoc-gen-rust-grpc"]
 
 [build-dependencies]
 cmake = "0.1"

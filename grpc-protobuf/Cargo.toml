@@ -1,11 +1,12 @@
 [package]
 name = "grpc-protobuf"
-version = "0.9.0-alpha.1"
+version = "0.9.0-alpha.2"
 authors = ["gRPC Authors"]
 license = "MIT"
 homepage = "https://grpc.io"
 repository = "https://github.com/grpc/grpc-rust"
 description = "Protobuf integration for the grpc crate"
+readme = "README.md"
 keywords = ["rpc", "grpc", "async", "protobuf", "proto"]
 categories = ["web-programming", "network-programming", "asynchronous"]
 rust-version = { workspace = true }
@@ -21,7 +22,7 @@ allowed_external_types = [
 
 [dependencies]
 bytes = "1.11.1"
-grpc = { version = "0.9.0-alpha.1", path = "../grpc" }
+grpc = { version = "0.9.0-alpha.2", path = "../grpc" }
 protobuf = "4.34.0-release"
 
 [dev-dependencies]
