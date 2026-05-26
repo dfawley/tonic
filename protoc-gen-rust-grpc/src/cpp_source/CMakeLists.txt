@@ -5,7 +5,7 @@ project(protoc-gen-rust-grpc LANGUAGES CXX)
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../Cargo.toml" CARGO_TOML_CONTENT)
 string(REGEX MATCH "\nversion[ \t]*=[ \t]*\"([^\"]+)\"" _ "${CARGO_TOML_CONTENT}")
 set(RUST_GRPC_VERSION ${CMAKE_MATCH_1})
-add_compile_definitions(RUST_GRPC_VERSION="${RUST_GRPC_VERSION}")
+add_compile_definitions(RUST_GRPC_VERSION="\\"${RUST_GRPC_VERSION}\\"")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

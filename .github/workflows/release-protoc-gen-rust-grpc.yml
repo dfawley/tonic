@@ -1,0 +1,129 @@
+name: Release protoc-gen-rust-grpc
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  publish-protoc-gen-rust-grpc:
+    name: Build and attach protoc-gen-rust-grpc binaries
+    if: startsWith(github.event.release.tag_name, 'protoc-gen-rust-grpc')
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- Linux Builds ---
+          - runs_on: ubuntu-latest
+            target: linux-x86_64
+            asset_name: ${{ github.event.release.tag_name }}-linux-x86_64.zip
+            binary_name: protoc-gen-rust-grpc
+            cmake_flags: ""
+          - runs_on: ubuntu-latest
+            target: linux-x86_32
+            asset_name: ${{ github.event.release.tag_name }}-linux-x86_32.zip
+            binary_name: protoc-gen-rust-grpc
+            # Multiarch build (32-bit x86)
+            cmake_flags: "-DCMAKE_CXX_FLAGS=-m32 -DCMAKE_C_FLAGS=-m32"
+            install_32bit: true
+          - runs_on: ubuntu-24.04-arm
+            target: linux-aarch_64
+            asset_name: ${{ github.event.release.tag_name }}-linux-aarch_64.zip
+            binary_name: protoc-gen-rust-grpc
+            cmake_flags: ""
+          - runs_on: ubuntu-latest
+            target: linux-ppcle_64
+            asset_name: ${{ github.event.release.tag_name }}-linux-ppcle_64.zip
+            binary_name: protoc-gen-rust-grpc
+            # Cross-compilation using GCC cross-compiler
+            cmake_flags: "-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=ppc64le -DCMAKE_C_COMPILER=powerpc64le-linux-gnu-gcc -DCMAKE_CXX_COMPILER=powerpc64le-linux-gnu-g++"
+            install_cross: "g++-powerpc64le-linux-gnu"
+          - runs_on: ubuntu-latest
+            target: linux-s390_64
+            asset_name: ${{ github.event.release.tag_name }}-linux-s390_64.zip
+            binary_name: protoc-gen-rust-grpc
+            # Cross-compilation using GCC cross-compiler
+            cmake_flags: "-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=s390x -DCMAKE_C_COMPILER=s390x-linux-gnu-gcc -DCMAKE_CXX_COMPILER=s390x-linux-gnu-g++"
+            install_cross: "g++-s390x-linux-gnu"
+
+          # --- macOS Builds ---
+          - runs_on: macos-latest
+            target: osx-x86_64
+            asset_name: ${{ github.event.release.tag_name }}-osx-x86_64.zip
+            binary_name: protoc-gen-rust-grpc
+            cmake_flags: "-DCMAKE_OSX_ARCHITECTURES=x86_64"
+          - runs_on: macos-latest
+            target: osx-aarch_64
+            asset_name: ${{ github.event.release.tag_name }}-osx-aarch_64.zip
+            binary_name: protoc-gen-rust-grpc
+            cmake_flags: "-DCMAKE_OSX_ARCHITECTURES=arm64"
+          - runs_on: macos-latest
+            target: osx-universal_binary
+            asset_name: ${{ github.event.release.tag_name }}-osx-universal_binary.zip
+            binary_name: protoc-gen-rust-grpc
+            cmake_flags: "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+
+          # --- Windows Builds ---
+          - runs_on: windows-latest
+            target: win32
+            asset_name: ${{ github.event.release.tag_name }}-win32.zip
+            binary_name: protoc-gen-rust-grpc.exe
+            cmake_flags: "-A Win32"
+          - runs_on: windows-latest
+            target: win64
+            asset_name: ${{ github.event.release.tag_name }}-win64.zip
+            binary_name: protoc-gen-rust-grpc.exe
+            cmake_flags: "-A x64"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Cross-Compilers (Ubuntu Cross)
+        if: runner.os == 'Linux' && matrix.install_cross != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.install_cross }}
+
+      - name: Install 32-bit Libraries (Ubuntu 32-bit)
+        if: runner.os == 'Linux' && matrix.install_32bit == true
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y g++-multilib gcc-multilib
+
+      - name: Configure CMake
+        run: |
+          cmake -S protoc-gen-rust-grpc/src/cpp_source -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_PROTOC=OFF \
+            -DBUILD_PLUGIN=ON \
+            ${{ matrix.cmake_flags }}
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Prepare and Zip Asset (non-Windows)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p bin
+          cp build/bin/${{ matrix.binary_name }} bin/
+          zip -r ${{ matrix.asset_name }} bin/
+
+      - name: Prepare and Zip Asset (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p bin
+          cp build/bin/Release/${{ matrix.binary_name }} bin/ || cp build/bin/${{ matrix.binary_name }} bin/
+          7z a ${{ matrix.asset_name }} bin/
+
+      - name: Upload asset to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
