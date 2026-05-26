@@ -40,6 +40,29 @@ fn main() {
         .codec_path("crate::common::SmallBufferCodec")
         .compile_protos(&["proto/helloworld/helloworld.proto"], &["proto"])
         .unwrap();
+
+    let grpc_helloworld = env::var_os("CARGO_FEATURE_GRPC_HELLOWORLD").is_some();
+    let grpc_routeguide = env::var_os("CARGO_FEATURE_GRPC_ROUTEGUIDE").is_some();
+
+    if grpc_helloworld || grpc_routeguide {
+        let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+
+        grpc_protobuf_build::CodeGen::new()
+            .output_dir(manifest_dir.join("src/grpc-helloworld/generated"))
+            .input("helloworld.proto")
+            .include(manifest_dir.join("proto/helloworld"))
+            .client_only()
+            .compile()
+            .unwrap();
+
+        grpc_protobuf_build::CodeGen::new()
+            .output_dir(manifest_dir.join("src/grpc-routeguide/generated"))
+            .input("route_guide.proto")
+            .include(manifest_dir.join("proto/routeguide"))
+            .client_only()
+            .compile()
+            .unwrap();
+    }
 }
 
 // Manually define the json.helloworld.Greeter service which used a custom JsonCodec to use json

@@ -323,3 +323,4 @@ grpc = { path = "../grpc", optional = true }
 
 [build-dependencies]
 tonic-prost-build = { path = "../tonic-prost-build" }
+grpc-protobuf-build = { path = "../grpc-protobuf-build", default-features = false }

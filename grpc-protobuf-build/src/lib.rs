@@ -370,6 +370,11 @@ Please do one of the following:
         if self.should_format_code {
             self.format_code();
         }
+
+        if crate_mapping_path.exists() {
+            let _ = fs::remove_file(&crate_mapping_path);
+        }
+
         Ok(())
     }
 
