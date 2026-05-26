@@ -147,7 +147,11 @@ impl CodeGen {
     }
 
     /// Sets explicit paths to the `protoc` and `protoc-gen-rust-grpc` plugin binaries.
-    pub fn prebuilt_binaries(&mut self, protoc: impl Into<PathBuf>, plugin: impl Into<PathBuf>) -> &mut Self {
+    pub fn prebuilt_binaries(
+        &mut self,
+        protoc: impl Into<PathBuf>,
+        plugin: impl Into<PathBuf>,
+    ) -> &mut Self {
         self.prebuilt_binaries = Some((protoc.into(), plugin.into()));
         self
     }
@@ -247,8 +251,16 @@ impl CodeGen {
             }
         }
 
-        let protoc_filename = if cfg!(windows) { "protoc.exe" } else { "protoc" };
-        let plugin_filename = if cfg!(windows) { "protoc-gen-rust-grpc.exe" } else { "protoc-gen-rust-grpc" };
+        let protoc_filename = if cfg!(windows) {
+            "protoc.exe"
+        } else {
+            "protoc"
+        };
+        let plugin_filename = if cfg!(windows) {
+            "protoc-gen-rust-grpc.exe"
+        } else {
+            "protoc-gen-rust-grpc"
+        };
 
         // 3. Prebuilt binaries environment variable
         if let Ok(dir) = std::env::var("GRPC_RUST_PROTOC_DIR") {
@@ -261,17 +273,23 @@ impl CodeGen {
         }
 
         // 4. Discovery from PATH
-        if let (Some(protoc), Some(plugin)) = (Self::find_in_path(protoc_filename), Self::find_in_path(plugin_filename)) {
+        if let (Some(protoc), Some(plugin)) = (
+            Self::find_in_path(protoc_filename),
+            Self::find_in_path(plugin_filename),
+        ) {
             return Ok((protoc, plugin));
         }
 
-        Err("Could not locate the protoc and/or protoc-gen-rust-grpc plugin binaries.
+        Err(
+            "Could not locate the protoc and/or protoc-gen-rust-grpc plugin binaries.
 Please do one of the following:
   1. Enable the \"build-plugin\" feature to compile from source.
   2. Set the \"GRPC_RUST_PROTOC_DIR\" environment variable to a path
      containing both binaries.
   3. Ensure both binaries are in your system PATH.
-  4. Supply paths via CodeGen::prebuilt_binaries() method in build.rs.".to_string())
+  4. Supply paths via CodeGen::prebuilt_binaries() method in build.rs."
+                .to_string(),
+        )
     }
 
     pub fn compile(&self) -> Result<(), String> {
