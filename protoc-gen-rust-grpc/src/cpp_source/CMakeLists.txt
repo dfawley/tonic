@@ -1,10 +1,16 @@
 cmake_minimum_required(VERSION 3.14)
 project(protoc-gen-rust-grpc LANGUAGES CXX)
 
-# Parse version from Cargo.toml
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../Cargo.toml" CARGO_TOML_CONTENT)
-string(REGEX MATCH "\nversion[ \t]*=[ \t]*\"([^\"]+)\"" _ "${CARGO_TOML_CONTENT}")
-set(RUST_GRPC_VERSION ${CMAKE_MATCH_1})
+# Parse version from Cargo.toml unless already set (e.g. from CI or environment)
+if(NOT RUST_GRPC_VERSION)
+    if(DEFINED ENV{RUST_GRPC_VERSION})
+        set(RUST_GRPC_VERSION "$ENV{RUST_GRPC_VERSION}")
+    else()
+        file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../Cargo.toml" CARGO_TOML_CONTENT)
+        string(REGEX MATCH "\nversion[ \t]*=[ \t]*\"([^\"]+)\"" _ "${CARGO_TOML_CONTENT}")
+        set(RUST_GRPC_VERSION ${CMAKE_MATCH_1})
+    endif()
+endif()
 add_compile_definitions(RUST_GRPC_VERSION="${RUST_GRPC_VERSION}")
 
 set(CMAKE_CXX_STANDARD 17)
