@@ -128,6 +128,8 @@ pub(crate) struct LbPolicyOptions {
     pub runtime: GrpcRuntime,
 }
 
+/// A dynamic payload passed between [`WorkScheduler::schedule_work`] and its
+/// associated policy's [`work`](LbPolicy::work) method.
 pub(crate) type WorkData = Box<dyn Any + Send>;
 
 /// Used to asynchronously request a call into the LbPolicy's work method if
