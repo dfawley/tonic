@@ -111,7 +111,7 @@ pub(crate) trait LbPolicy: Send + Sync + Debug + 'static {
 
     /// Called by the channel in response to a call from the LB policy to the
     /// WorkScheduler's request_work method.
-    fn work(&mut self, channel_controller: &mut dyn ChannelController);
+    fn work(&mut self, data: Option<WorkData>, channel_controller: &mut dyn ChannelController);
 
     /// Called by the channel when an LbPolicy goes idle and the channel
     /// wants it to start connecting to subchannels again.
@@ -128,6 +128,8 @@ pub(crate) struct LbPolicyOptions {
     pub runtime: GrpcRuntime,
 }
 
+pub(crate) type WorkData = Box<dyn Any + Send>;
+
 /// Used to asynchronously request a call into the LbPolicy's work method if
 /// the LbPolicy needs to provide an update without waiting for an update
 /// from the channel first.
@@ -135,7 +137,7 @@ pub(crate) trait WorkScheduler: Send + Sync + Debug {
     // Schedules a call into the LbPolicy's work method.  If there is already a
     // pending work call that has not yet started, this may not schedule another
     // call.
-    fn schedule_work(&self);
+    fn schedule_work(&self, data: Option<WorkData>);
 }
 
 /// Abstract representation of the configuration for any LB policy, stored as
@@ -412,8 +414,8 @@ impl<T: LbPolicy + ?Sized> LbPolicy for Box<T> {
         (**self).subchannel_update(subchannel, state, channel_controller);
     }
 
-    fn work(&mut self, channel_controller: &mut dyn ChannelController) {
-        (**self).work(channel_controller);
+    fn work(&mut self, data: Option<WorkData>, channel_controller: &mut dyn ChannelController) {
+        (**self).work(data, channel_controller);
     }
 
     fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController) {
