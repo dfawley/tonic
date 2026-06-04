@@ -586,7 +586,8 @@ impl LbPolicy for PickFirstPolicy {
         }
     }
 
-    fn work(&mut self, _data: Option<WorkData>, channel_controller: &mut dyn ChannelController) {
+    fn work(&mut self, data: Option<WorkData>, channel_controller: &mut dyn ChannelController) {
+        debug_assert!(data.is_none(), "expected no data but got {data:?}");
         if self.connectivity_state == ConnectivityState::Idle {
             // TODO: is it safe to assume any call to work() while idle means we
             // should connect?

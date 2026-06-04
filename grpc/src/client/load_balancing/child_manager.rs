@@ -383,18 +383,27 @@ where
 
     /// Calls work on any children that scheduled work via the work scheduler.
     pub fn work(&mut self, data: Option<WorkData>, channel_controller: &mut dyn ChannelController) {
-        if let Some(data) = data
-            && let Ok(child_work_item) = data.downcast::<ChildWorkItem>()
-        {
-            let child_work_item = *child_work_item;
-            if let Some(&child_idx) = self.handle_to_child_idx.get(&child_work_item.handle) {
-                let child = &mut self.children[child_idx];
-                let mut channel_controller = WrappedController::new(channel_controller);
-                child
-                    .policy
-                    .work(child_work_item.data, &mut channel_controller);
-                self.resolve_child_controller(channel_controller, child_idx);
+        let Some(data) = data else {
+            debug_assert!(false, "ChildManager::work called with None value");
+            return;
+        };
+        let child_work_item = match data.downcast::<ChildWorkItem>() {
+            Ok(item) => item,
+            Err(data) => {
+                debug_assert!(
+                    false,
+                    "ChildManager::work called with {data:?}; expected ChildWorkItem"
+                );
+                return;
             }
+        };
+        if let Some(&child_idx) = self.handle_to_child_idx.get(&child_work_item.handle) {
+            let child = &mut self.children[child_idx];
+            let mut channel_controller = WrappedController::new(channel_controller);
+            child
+                .policy
+                .work(child_work_item.data, &mut channel_controller);
+            self.resolve_child_controller(channel_controller, child_idx);
         }
     }
 
@@ -458,6 +467,7 @@ impl std::hash::Hash for ChildHandle {
     }
 }
 
+#[derive(Debug)]
 struct ChildWorkItem {
     handle: ChildHandle,
     data: Option<WorkData>,
