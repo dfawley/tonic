@@ -43,7 +43,6 @@ use crate::client::load_balancing::Subchannel;
 use crate::client::load_balancing::SubchannelState;
 use crate::client::load_balancing::WorkData;
 use crate::client::load_balancing::WorkScheduler;
-use crate::client::load_balancing::subchannel::WeakSubchannel;
 use crate::client::name_resolution::Address;
 use crate::client::name_resolution::ResolverUpdate;
 use crate::rt::GrpcRuntime;
@@ -51,7 +50,6 @@ use crate::rt::GrpcRuntime;
 // An LbPolicy implementation that manages multiple children.
 #[derive(Debug)]
 pub(crate) struct ChildManager<T: Debug> {
-    subchannel_to_child_idx: HashMap<WeakSubchannel, usize>,
     handle_to_child_idx: HashMap<ChildHandle, usize>,
     children: Vec<Child<T>>,
     runtime: GrpcRuntime,
@@ -66,7 +64,7 @@ pub(crate) struct Child<T> {
     pub builder: Arc<DynLbPolicyBuilder>,
     pub state: LbState,
     policy: Box<DynLbPolicy>,
-    work_scheduler: Arc<ChildWorkScheduler>,
+    pub(crate) work_scheduler: Arc<ChildWorkScheduler>,
 }
 
 /// A collection of data sent to a child of the ChildManager.
@@ -93,7 +91,6 @@ where
     /// resolver_update operation occurs.
     pub fn new(runtime: GrpcRuntime, work_scheduler: Arc<dyn WorkScheduler>) -> Self {
         Self {
-            subchannel_to_child_idx: Default::default(),
             handle_to_child_idx: Default::default(),
             children: Default::default(),
             runtime,
@@ -154,11 +151,6 @@ where
         channel_controller: WrappedController,
         child_idx: usize,
     ) {
-        // Add all created subchannels into the subchannel_child_map.
-        for csc in channel_controller.created_subchannels {
-            self.subchannel_to_child_idx
-                .insert((&csc).into(), child_idx);
-        }
         // Update the tracked state if the child produced an update.
         if let Some(state) = channel_controller.picker_update {
             self.children[child_idx].state = state;
@@ -195,17 +187,6 @@ where
         // Replace self.children with an empty vec.
         let old_children = mem::take(&mut self.children);
 
-        // Replace the subchannel map with an empty map.
-        let old_subchannel_child_map = mem::take(&mut self.subchannel_to_child_idx);
-
-        // Reverse the old subchannel map into a vector indexed by the old child ID.
-        let mut old_child_subchannels: Vec<Vec<WeakSubchannel>> = Vec::new();
-        old_child_subchannels.resize_with(old_children.len(), Vec::new);
-
-        for (subchannel, old_idx) in old_subchannel_child_map {
-            old_child_subchannels[old_idx].push(subchannel);
-        }
-
         // Build a map of the old children from their IDs for efficient lookups.
         // This leverages a Child<usize> to hold all the entries where the
         // identifier becomes the index within the old self.children vector.
@@ -230,17 +211,11 @@ where
         self.handle_to_child_idx.clear();
 
         // Transfer children whose identifiers appear before and after the
-        // update, and create new children.  Add entries back into the
-        // subchannel map.
+        // update, and create new children.
         for (identifier, builder) in ids_builders {
             let k = (builder.name(), identifier);
             if let Some(old_child) = old_children.remove(&k) {
-                let old_idx = old_child.identifier;
                 let new_child_idx = self.children.len();
-                for subchannel in mem::take(&mut old_child_subchannels[old_idx]) {
-                    self.subchannel_to_child_idx
-                        .insert(subchannel, new_child_idx);
-                }
                 self.handle_to_child_idx
                     .insert(old_child.work_scheduler.handle.clone(), new_child_idx);
                 self.children.push(Child {
@@ -360,27 +335,6 @@ where
         }
     }
 
-    /// Forwards the incoming subchannel_update to the child that created the
-    /// subchannel being updated.
-    pub fn subchannel_update(
-        &mut self,
-        subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
-        channel_controller: &mut dyn ChannelController,
-    ) {
-        // Determine which child created this subchannel.
-        let child_idx = *self
-            .subchannel_to_child_idx
-            .get(&WeakSubchannel::new(&subchannel))
-            .unwrap();
-        let policy = &mut self.children[child_idx].policy;
-        // Wrap the channel_controller to track the child's operations.
-        let mut channel_controller = WrappedController::new(channel_controller);
-        // Call the proper child.
-        policy.subchannel_update(subchannel, state, &mut channel_controller);
-        self.resolve_child_controller(channel_controller, child_idx);
-    }
-
     /// Calls work on any children that scheduled work via the work scheduler.
     pub fn work(&mut self, data: Option<WorkData>, channel_controller: &mut dyn ChannelController) {
         let Some(data) = data else {
@@ -420,7 +374,6 @@ where
 
 struct WrappedController<'a> {
     channel_controller: &'a mut dyn ChannelController,
-    created_subchannels: Vec<Arc<dyn Subchannel>>,
     picker_update: Option<LbState>,
 }
 
@@ -428,7 +381,6 @@ impl<'a> WrappedController<'a> {
     fn new(channel_controller: &'a mut dyn ChannelController) -> Self {
         Self {
             channel_controller,
-            created_subchannels: vec![],
             picker_update: None,
         }
     }
@@ -436,9 +388,7 @@ impl<'a> WrappedController<'a> {
 
 impl ChannelController for WrappedController<'_> {
     fn new_subchannel(&mut self, address: &Address) -> (Arc<dyn Subchannel>, SubchannelState) {
-        let (subchannel, state) = self.channel_controller.new_subchannel(address);
-        self.created_subchannels.push(subchannel.clone());
-        (subchannel, state)
+        self.channel_controller.new_subchannel(address)
     }
 
     fn update_picker(&mut self, update: LbState) {
@@ -451,7 +401,7 @@ impl ChannelController for WrappedController<'_> {
 }
 
 #[derive(Clone, Debug)]
-struct ChildHandle(Arc<()>);
+pub(crate) struct ChildHandle(pub(crate) Arc<()>);
 
 impl PartialEq for ChildHandle {
     fn eq(&self, other: &Self) -> bool {
@@ -468,15 +418,15 @@ impl std::hash::Hash for ChildHandle {
 }
 
 #[derive(Debug)]
-struct ChildWorkItem {
-    handle: ChildHandle,
-    data: Option<WorkData>,
+pub(crate) struct ChildWorkItem {
+    pub(crate) handle: ChildHandle,
+    pub(crate) data: Option<WorkData>,
 }
 
 #[derive(Debug)]
-struct ChildWorkScheduler {
-    work_scheduler: Arc<dyn WorkScheduler>, // The real work scheduler of the channel.
-    handle: ChildHandle,
+pub(crate) struct ChildWorkScheduler {
+    pub(crate) work_scheduler: Arc<dyn WorkScheduler>, // The real work scheduler of the channel.
+    pub(crate) handle: ChildHandle,
 }
 
 impl WorkScheduler for ChildWorkScheduler {
@@ -504,8 +454,6 @@ mod test {
     use crate::client::load_balancing::GLOBAL_LB_REGISTRY;
     use crate::client::load_balancing::LbState;
     use crate::client::load_balancing::QueuingPicker;
-    use crate::client::load_balancing::Subchannel;
-    use crate::client::load_balancing::SubchannelState;
     use crate::client::load_balancing::child_manager::ChildManager;
     use crate::client::load_balancing::child_manager::ChildUpdate;
     use crate::client::load_balancing::test_utils::StubPolicyFuncs;
@@ -548,8 +496,10 @@ mod test {
         let tcc = Box::new(TestChannelController {
             tx_events: tx_events.clone(),
         });
-        let child_manager =
-            ChildManager::new(default_runtime(), Arc::new(TestWorkScheduler { tx_events }));
+        let child_manager = ChildManager::new(
+            default_runtime(),
+            Arc::new(TestWorkScheduler::new(tx_events)),
+        );
         (rx_events, child_manager, tcc)
     }
 
@@ -595,58 +545,21 @@ mod test {
         child_manager.update(updates, tcc)
     }
 
-    fn move_subchannel_to_state(
-        child_manager: &mut ChildManager<Endpoint>,
-        subchannel: Arc<dyn Subchannel>,
-        tcc: &mut dyn ChannelController,
-        state: &SubchannelState,
-    ) {
-        child_manager.subchannel_update(subchannel, state, tcc);
-    }
-
-    // Verifies that the expected number of subchannels is created. Returns the
-    // subchannels created.
-    fn verify_subchannel_creation_from_policy(
-        rx_events: &mut mpsc::Receiver<TestEvent>,
-        number_of_subchannels: usize,
-    ) -> Vec<Arc<dyn Subchannel>> {
-        let mut subchannels = Vec::new();
-        for _ in 0..number_of_subchannels {
-            match rx_events.recv().unwrap() {
-                TestEvent::NewSubchannel(sc) => {
-                    subchannels.push(sc);
-                }
-                other => panic!("unexpected event {:?}", other),
-            };
-        }
-        subchannels
-    }
-
     // Defines the functions resolver_update and subchannel_update to test
     // aggregate_states.
     fn create_verifying_funcs_for_aggregate_tests() -> StubPolicyFuncs {
         StubPolicyFuncs {
-            // Closure for resolver_update. resolver_update should only receive
-            // one endpoint and create one subchannel for the endpoint it
-            // receives.
-            resolver_update: Some(Arc::new(
-                move |data, update: ResolverUpdate, _, controller| {
-                    assert_eq!(update.endpoints.iter().len(), 1);
-                    let endpoint = update.endpoints.unwrap().pop().unwrap();
-                    let subchannel = controller.new_subchannel(&endpoint.addresses[0]);
-                    Ok(())
-                },
-            )),
-            // Closure for subchannel_update. Sends a picker of the same state
-            // that was passed to it.
-            subchannel_update: Some(Arc::new(
-                move |data, updated_subchannel, state, controller| {
+            resolver_update: Some(Arc::new(move |_data, _update, _, _controller| Ok(()))),
+            work: Some(Arc::new(move |_data, work_data, controller| {
+                if let Some(work_data) = work_data
+                    && let Ok(state) = work_data.downcast::<ConnectivityState>()
+                {
                     controller.update_picker(LbState {
-                        connectivity_state: state.connectivity_state,
+                        connectivity_state: *state,
                         picker: Arc::new(QueuingPicker {}),
                     });
-                },
-            )),
+                }
+            })),
             ..Default::default()
         }
     }
@@ -657,7 +570,7 @@ mod test {
     #[test]
     fn childmanager_aggregate_state_is_ready_if_any_child_is_ready() {
         let test_name = "stub-childmanager_aggregate_state_is_ready_if_any_child_is_ready";
-        let (mut rx_events, mut child_manager, mut tcc) =
+        let (_rx_events, mut child_manager, mut tcc) =
             setup(create_verifying_funcs_for_aggregate_tests(), test_name);
         let builder: Arc<DynLbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(test_name).unwrap();
 
@@ -669,39 +582,22 @@ mod test {
             tcc.as_mut(),
         )
         .unwrap();
-        let mut subchannels = vec![];
-        for endpoint in endpoints {
-            subchannels.push(
-                verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.len())
-                    .remove(0),
-            );
+
+        let states = [
+            ConnectivityState::TransientFailure,
+            ConnectivityState::Idle,
+            ConnectivityState::Connecting,
+            ConnectivityState::Ready,
+        ];
+        for (i, state) in states.into_iter().enumerate() {
+            let handle = child_manager.children[i].work_scheduler.handle.clone();
+            let work_item = Box::new(super::ChildWorkItem {
+                handle,
+                data: Some(Box::new(state)),
+            });
+            child_manager.work(Some(work_item), tcc.as_mut());
         }
 
-        let mut subchannels = subchannels.into_iter();
-        move_subchannel_to_state(
-            &mut child_manager,
-            subchannels.next().unwrap(),
-            tcc.as_mut(),
-            &SubchannelState::transient_failure("n/a"),
-        );
-        move_subchannel_to_state(
-            &mut child_manager,
-            subchannels.next().unwrap(),
-            tcc.as_mut(),
-            &SubchannelState::idle(),
-        );
-        move_subchannel_to_state(
-            &mut child_manager,
-            subchannels.next().unwrap(),
-            tcc.as_mut(),
-            &SubchannelState::connecting(),
-        );
-        move_subchannel_to_state(
-            &mut child_manager,
-            subchannels.next().unwrap(),
-            tcc.as_mut(),
-            &SubchannelState::ready(),
-        );
         assert_eq!(child_manager.aggregate_states(), ConnectivityState::Ready);
     }
 
@@ -711,7 +607,7 @@ mod test {
     #[test]
     fn childmanager_aggregate_state_is_connecting_if_no_child_is_ready() {
         let test_name = "stub-childmanager_aggregate_state_is_connecting_if_no_child_is_ready";
-        let (mut rx_events, mut child_manager, mut tcc) =
+        let (_rx_events, mut child_manager, mut tcc) =
             setup(create_verifying_funcs_for_aggregate_tests(), test_name);
         let builder: Arc<DynLbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(test_name).unwrap();
         let endpoints = create_n_endpoints_with_k_addresses(3, 1);
@@ -722,32 +618,20 @@ mod test {
             tcc.as_mut(),
         )
         .unwrap();
-        let mut subchannels = vec![];
-        for endpoint in endpoints {
-            subchannels.push(
-                verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.len())
-                    .remove(0),
-            );
+
+        let states = [
+            ConnectivityState::TransientFailure,
+            ConnectivityState::Idle,
+            ConnectivityState::Connecting,
+        ];
+        for (i, state) in states.into_iter().enumerate() {
+            let handle = child_manager.children[i].work_scheduler.handle.clone();
+            let work_item = Box::new(super::ChildWorkItem {
+                handle,
+                data: Some(Box::new(state)),
+            });
+            child_manager.work(Some(work_item), tcc.as_mut());
         }
-        let mut subchannels = subchannels.into_iter();
-        move_subchannel_to_state(
-            &mut child_manager,
-            subchannels.next().unwrap(),
-            tcc.as_mut(),
-            &SubchannelState::transient_failure("n/a"),
-        );
-        move_subchannel_to_state(
-            &mut child_manager,
-            subchannels.next().unwrap(),
-            tcc.as_mut(),
-            &SubchannelState::idle(),
-        );
-        move_subchannel_to_state(
-            &mut child_manager,
-            subchannels.next().unwrap(),
-            tcc.as_mut(),
-            &SubchannelState::connecting(),
-        );
 
         assert_eq!(
             child_manager.aggregate_states(),
@@ -761,7 +645,7 @@ mod test {
     #[test]
     fn childmanager_aggregate_state_is_idle_if_only_idle_and_failure() {
         let test_name = "stub-childmanager_aggregate_state_is_idle_if_only_idle_and_failure";
-        let (mut rx_events, mut child_manager, mut tcc) =
+        let (_rx_events, mut child_manager, mut tcc) =
             setup(create_verifying_funcs_for_aggregate_tests(), test_name);
         let builder: Arc<DynLbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(test_name).unwrap();
 
@@ -773,26 +657,17 @@ mod test {
             tcc.as_mut(),
         )
         .unwrap();
-        let mut subchannels = vec![];
-        for endpoint in endpoints {
-            subchannels.push(
-                verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.len())
-                    .remove(0),
-            );
+
+        let states = [ConnectivityState::TransientFailure, ConnectivityState::Idle];
+        for (i, state) in states.into_iter().enumerate() {
+            let handle = child_manager.children[i].work_scheduler.handle.clone();
+            let work_item = Box::new(super::ChildWorkItem {
+                handle,
+                data: Some(Box::new(state)),
+            });
+            child_manager.work(Some(work_item), tcc.as_mut());
         }
-        let mut subchannels = subchannels.into_iter();
-        move_subchannel_to_state(
-            &mut child_manager,
-            subchannels.next().unwrap(),
-            tcc.as_mut(),
-            &SubchannelState::transient_failure("n/a"),
-        );
-        move_subchannel_to_state(
-            &mut child_manager,
-            subchannels.next().unwrap(),
-            tcc.as_mut(),
-            &SubchannelState::idle(),
-        );
+
         assert_eq!(child_manager.aggregate_states(), ConnectivityState::Idle);
     }
 
@@ -803,7 +678,7 @@ mod test {
     fn childmanager_aggregate_state_is_transient_failure_if_all_children_are() {
         let test_name =
             "stub-childmanager_aggregate_state_is_transient_failure_if_all_children_are";
-        let (mut rx_events, mut child_manager, mut tcc) =
+        let (_rx_events, mut child_manager, mut tcc) =
             setup(create_verifying_funcs_for_aggregate_tests(), test_name);
         let builder: Arc<DynLbPolicyBuilder> = GLOBAL_LB_REGISTRY.get_policy(test_name).unwrap();
         let endpoints = create_n_endpoints_with_k_addresses(2, 1);
@@ -814,26 +689,20 @@ mod test {
             tcc.as_mut(),
         )
         .unwrap();
-        let mut subchannels = vec![];
-        for endpoint in endpoints {
-            subchannels.push(
-                verify_subchannel_creation_from_policy(&mut rx_events, endpoint.addresses.len())
-                    .remove(0),
-            );
+
+        let states = [
+            ConnectivityState::TransientFailure,
+            ConnectivityState::TransientFailure,
+        ];
+        for (i, state) in states.into_iter().enumerate() {
+            let handle = child_manager.children[i].work_scheduler.handle.clone();
+            let work_item = Box::new(super::ChildWorkItem {
+                handle,
+                data: Some(Box::new(state)),
+            });
+            child_manager.work(Some(work_item), tcc.as_mut());
         }
-        let mut subchannels = subchannels.into_iter();
-        move_subchannel_to_state(
-            &mut child_manager,
-            subchannels.next().unwrap(),
-            tcc.as_mut(),
-            &SubchannelState::transient_failure("n/a"),
-        );
-        move_subchannel_to_state(
-            &mut child_manager,
-            subchannels.next().unwrap(),
-            tcc.as_mut(),
-            &SubchannelState::transient_failure("n/a"),
-        );
+
         assert_eq!(
             child_manager.aggregate_states(),
             ConnectivityState::TransientFailure
@@ -913,8 +782,8 @@ mod test {
         };
 
         let names = [name1, name2];
-        let mut child_manager =
-            ChildManager::new(default_runtime(), Arc::new(TestWorkScheduler { tx_events }));
+        let work_scheduler = Arc::new(TestWorkScheduler::new(tx_events));
+        let mut child_manager = ChildManager::new(default_runtime(), work_scheduler.clone());
 
         // Request that child one requests work.
         let cfg = Arc::new(Mutex::new(HashMap::<&'static str, ()>::new())) as DynLbConfig;
@@ -940,9 +809,16 @@ mod test {
 
         // Confirm that child one has requested work.
         let event = rx_events.recv().unwrap();
-        let TestEvent::ScheduleWork(data) = event else {
+        let TestEvent::ScheduleWork(_) = event else {
             panic!("unexpected event {:?}", event);
         };
+        let data = work_scheduler
+            .pending_work
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap();
+
         // Validate data indicates the child to call.
         {
             let wrapped = data
@@ -971,10 +847,17 @@ mod test {
         let mut works = vec![];
         for _ in 0..2 {
             let event = rx_events.recv().unwrap();
-            let TestEvent::ScheduleWork(data) = event else {
+            let TestEvent::ScheduleWork(_) = event else {
                 panic!("unexpected event {:?}", event);
             };
-            works.push(data);
+            works.push(
+                work_scheduler
+                    .pending_work
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap(),
+            );
         }
 
         // We expect one work item for child1 and one for child2.

@@ -145,6 +145,13 @@ pub(crate) trait Subchannel:
 
     /// Notifies the Subchannel to connect.
     fn connect(&self);
+
+    /// Subscribes a listener to the subchannel dynamically.
+    fn subscribe_dyn(
+        &self,
+        id: TypeId,
+        listener: Box<dyn Any + Send + Sync>,
+    ) -> Result<Box<dyn CancelToken>, String>;
 }
 
 impl dyn Subchannel {
@@ -162,6 +169,16 @@ impl dyn Subchannel {
     pub fn get_attribute<T: 'static>(&self) -> Option<&T> {
         self.get_attribute_dyn(TypeId::of::<T>())
             .and_then(|any| any.downcast_ref::<T>())
+    }
+
+    pub(crate) fn subscribe<U>(&self, listener: impl Listener<U> + 'static) -> Box<dyn CancelToken>
+    where
+        U: Send + Sync + 'static,
+    {
+        let listener_arc: Arc<dyn Listener<U>> = Arc::new(listener);
+        let listener_any = Box::new(listener_arc) as Box<dyn Any + Send + Sync>;
+        self.subscribe_dyn(TypeId::of::<U>(), listener_any)
+            .expect("subscription update type not supported by subchannel")
     }
 }
 
@@ -191,7 +208,7 @@ impl Display for dyn Subchannel {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct WeakSubchannel(Weak<dyn Subchannel>);
 
 impl From<&Arc<dyn Subchannel>> for WeakSubchannel {
@@ -242,6 +259,14 @@ pub(crate) trait ForwardingSubchannel: DynHash + DynPartialEq + Any + Send + Syn
     fn connect(&self) {
         self.delegate().connect()
     }
+
+    fn subscribe_dyn(
+        &self,
+        id: TypeId,
+        listener: Box<dyn Any + Send + Sync>,
+    ) -> Result<Box<dyn CancelToken>, String> {
+        self.delegate().subscribe_dyn(id, listener)
+    }
 }
 
 impl<T: ForwardingSubchannel> Subchannel for T {
@@ -256,5 +281,33 @@ impl<T: ForwardingSubchannel> Subchannel for T {
     fn connect(&self) {
         self.connect()
     }
+
+    fn subscribe_dyn(
+        &self,
+        id: TypeId,
+        listener: Box<dyn Any + Send + Sync>,
+    ) -> Result<Box<dyn CancelToken>, String> {
+        self.subscribe_dyn(id, listener)
+    }
 }
 impl<T: ForwardingSubchannel> private::Sealed for T {}
+
+pub(crate) trait Listener<T>: Send + Sync + 'static {
+    fn on_update(&self, update: T);
+}
+
+impl<F, T> Listener<T> for F
+where
+    F: Fn(T) + Send + Sync + 'static,
+    T: Send + Sync + 'static,
+{
+    fn on_update(&self, update: T) {
+        self(update);
+    }
+}
+
+pub(crate) trait CancelToken: Send + Sync + 'static {}
+
+pub(crate) trait SubscriptionManager: Send + Sync + 'static {
+    fn remove_subscriber(&self, listener: &Arc<dyn Listener<SubchannelState>>);
+}

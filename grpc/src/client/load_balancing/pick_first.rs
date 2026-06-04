@@ -45,6 +45,7 @@ use crate::client::load_balancing::Picker;
 use crate::client::load_balancing::QueuingPicker;
 use crate::client::load_balancing::WorkData;
 use crate::client::load_balancing::WorkScheduler;
+use crate::client::load_balancing::subchannel::CancelToken;
 use crate::client::load_balancing::subchannel::Subchannel;
 use crate::client::load_balancing::subchannel::SubchannelState;
 use crate::client::name_resolution::Address;
@@ -78,6 +79,7 @@ impl LbPolicyBuilder for PickFirstBuilder {
             connectivity_state: ConnectivityState::Idle,
             subchannels: Vec::default(),
             subchannel_states: HashMap::default(),
+            subchannel_handles: HashMap::default(),
             selected: None,
             frontier_index: 0,
             last_connection_error: None,
@@ -101,6 +103,12 @@ pub(crate) fn reg() {
     super::GLOBAL_LB_REGISTRY.add_builder(PickFirstBuilder {})
 }
 
+#[derive(Debug)]
+struct PickFirstSubchannelUpdate {
+    subchannel: Arc<dyn Subchannel>,
+    state: SubchannelState,
+}
+
 pub(crate) struct PickFirstPolicy {
     work_scheduler: Arc<dyn WorkScheduler>,
     runtime: GrpcRuntime,
@@ -109,6 +117,7 @@ pub(crate) struct PickFirstPolicy {
     // Subchannel information.
     subchannels: Vec<Arc<dyn Subchannel>>,
     subchannel_states: HashMap<Address, SubchannelState>, // Cached states for all subchannels by address.
+    subchannel_handles: HashMap<Address, Box<dyn CancelToken>>,
     selected: Option<Arc<dyn Subchannel>>,
     frontier_index: usize,
 
@@ -155,18 +164,35 @@ impl PickFirstPolicy {
             .map(|sc| (sc.address(), sc))
             .collect();
 
+        let mut existing_handles = std::mem::take(&mut self.subchannel_handles);
+
         let mut new_subchannels = Vec::with_capacity(new_addresses.len());
         let mut new_states = HashMap::with_capacity(new_addresses.len());
+        let mut new_handles = HashMap::with_capacity(new_addresses.len());
         let mut ready_subchannel = None;
 
         for addr in new_addresses {
             let (sc, state) = if let Some(sc) = existing_subchannels.remove(&addr) {
                 let state = self.subchannel_states.get(&addr).unwrap().clone();
+                if let Some(handle) = existing_handles.remove(&addr) {
+                    new_handles.insert(addr.clone(), handle);
+                }
                 (sc, state)
             } else {
                 // Get a new subchannel handle from the controller if we don't
                 // have an existing one.
-                channel_controller.new_subchannel(&addr)
+                let (sc, state) = channel_controller.new_subchannel(&addr);
+                let subchannel = sc.clone();
+                let work_scheduler = self.work_scheduler.clone();
+                let handle = sc.subscribe(move |state| {
+                    let update = PickFirstSubchannelUpdate {
+                        subchannel: subchannel.clone(),
+                        state,
+                    };
+                    work_scheduler.schedule_work(Some(Box::new(update)));
+                });
+                new_handles.insert(addr.clone(), handle);
+                (sc, state)
             };
 
             // Track the best candidate for immediate activation:
@@ -190,6 +216,7 @@ impl PickFirstPolicy {
 
         self.subchannels = new_subchannels;
         self.subchannel_states = new_states;
+        self.subchannel_handles = new_handles;
         ready_subchannel
     }
 
@@ -530,7 +557,42 @@ impl LbPolicy for PickFirstPolicy {
         Ok(())
     }
 
-    fn subchannel_update(
+    fn work(&mut self, data: Option<WorkData>, channel_controller: &mut dyn ChannelController) {
+        if let Some(work_data) = data {
+            match work_data.downcast::<PickFirstSubchannelUpdate>() {
+                Ok(update) => {
+                    self.handle_subchannel_update(
+                        update.subchannel,
+                        &update.state,
+                        channel_controller,
+                    );
+                    return;
+                }
+                Err(original_work_data) => {
+                    panic!("unexpected work data: {:?}", original_work_data);
+                }
+            }
+        }
+
+        if self.connectivity_state == ConnectivityState::Idle {
+            // TODO: is it safe to assume any call to work() while idle means we
+            // should connect?
+            self.exit_idle(channel_controller);
+        } else if self.timer.as_ref().is_some_and(|t| t.expired()) {
+            // Advance frontier and trigger next connection.
+            if let Some(next_sc) = self.advance_frontier(false) {
+                self.trigger_subchannel_connection(next_sc, channel_controller);
+            }
+        }
+    }
+
+    fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController) {
+        self.start_connection_pass(channel_controller);
+    }
+}
+
+impl PickFirstPolicy {
+    fn handle_subchannel_update(
         &mut self,
         subchannel: Arc<dyn Subchannel>,
         state: &SubchannelState,
@@ -582,20 +644,6 @@ impl LbPolicy for PickFirstPolicy {
                 } else {
                     self.update_first_pass(subchannel, state, channel_controller);
                 }
-            }
-        }
-    }
-
-    fn work(&mut self, data: Option<WorkData>, channel_controller: &mut dyn ChannelController) {
-        debug_assert!(data.is_none(), "expected no data but got {data:?}");
-        if self.connectivity_state == ConnectivityState::Idle {
-            // TODO: is it safe to assume any call to work() while idle means we
-            // should connect?
-            self.exit_idle(channel_controller);
-        } else if self.timer.as_ref().is_some_and(|t| t.expired()) {
-            // Advance frontier and trigger next connection.
-            if let Some(next_sc) = self.advance_frontier(false) {
-                self.trigger_subchannel_connection(next_sc, channel_controller);
             }
         }
     }
@@ -774,9 +822,7 @@ mod test {
         Box<TestChannelController>,
     ) {
         let (tx, rx) = mpsc::channel();
-        let work_scheduler = Arc::new(TestWorkScheduler {
-            tx_events: tx.clone(),
-        });
+        let work_scheduler = Arc::new(TestWorkScheduler::new(tx.clone()));
         let runtime = crate::rt::default_runtime();
         let mut policy = PickFirstBuilder {}.build(LbPolicyOptions {
             work_scheduler,
@@ -881,7 +927,7 @@ mod test {
 
         // Simulating READY for addr1.
         let sc1 = policy.subchannels[0].clone();
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc1.clone(),
             &SubchannelState {
                 connectivity_state: ConnectivityState::Ready,
@@ -904,7 +950,7 @@ mod test {
 
         // Simulating TransientFailure for addr1.
         let sc1 = policy.subchannels[0].clone();
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc1.clone(),
             &SubchannelState {
                 connectivity_state: ConnectivityState::TransientFailure,
@@ -946,7 +992,7 @@ mod test {
 
         // Simulate addr2 succeeding.
         let sc2 = policy.subchannels[1].clone();
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc2,
             &SubchannelState {
                 connectivity_state: ConnectivityState::Ready,
@@ -1248,7 +1294,7 @@ mod test {
         assert!(policy.steady_state.is_some());
 
         // Simulate addr1 transitioning to IDLE (backoff over).
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc1.clone(),
             &SubchannelState {
                 connectivity_state: ConnectivityState::Idle,
@@ -1277,7 +1323,7 @@ mod test {
         assert_eq!(addr.address.to_string(), "addr2");
 
         // While addr2 is connecting, simulate addr1 going IDLE (backoff over).
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc1.clone(),
             &SubchannelState {
                 connectivity_state: ConnectivityState::Idle,
@@ -1292,7 +1338,7 @@ mod test {
 
         // Now fail addr2 to complete first pass.
         let sc2 = policy.subchannels[1].clone();
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc2.clone(),
             &SubchannelState {
                 connectivity_state: ConnectivityState::TransientFailure,
@@ -1315,7 +1361,7 @@ mod test {
         assert!(policy.steady_state.is_some());
 
         // Simulate addr1 going IDLE again.
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc1.clone(),
             &SubchannelState {
                 connectivity_state: ConnectivityState::Idle,
@@ -1329,7 +1375,7 @@ mod test {
         assert_eq!(addr.address.to_string(), "addr1");
 
         // Simulate addr1 successfully connecting and becoming READY.
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc1.clone(),
             &SubchannelState {
                 connectivity_state: ConnectivityState::Ready,
@@ -1367,7 +1413,7 @@ mod test {
 
         // Simulate addr1 backing off and transitioning to IDLE early
         // (while addr2 is still connecting).
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc1.clone(),
             &SubchannelState {
                 connectivity_state: ConnectivityState::Idle,
@@ -1381,7 +1427,7 @@ mod test {
 
         // Fail addr2 to exhaust the first pass.
         let sc2 = policy.subchannels[1].clone();
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc2,
             &SubchannelState {
                 connectivity_state: ConnectivityState::TransientFailure,
@@ -1505,7 +1551,7 @@ mod test {
 
         // 2. Simulate addr2 failing first while addr1 is still in flight.
         let sc2 = policy.subchannels[1].clone();
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc2,
             &SubchannelState {
                 connectivity_state: ConnectivityState::TransientFailure,
@@ -1519,7 +1565,7 @@ mod test {
 
         // 3. Simulate addr1 failing. Pass is now fully exhausted.
         let sc1 = policy.subchannels[0].clone();
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc1,
             &SubchannelState {
                 connectivity_state: ConnectivityState::TransientFailure,
@@ -1553,7 +1599,7 @@ mod test {
 
         // Simulate background failure during Steady State with net-new error telemetry.
         let sc1 = policy.subchannels[0].clone();
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc1,
             &SubchannelState {
                 connectivity_state: ConnectivityState::TransientFailure,
@@ -1590,7 +1636,7 @@ mod test {
         };
 
         // 2. Simulate the subchannel disconnecting (transitioning to Idle).
-        policy.subchannel_update(
+        policy.handle_subchannel_update(
             sc1.clone(),
             &SubchannelState {
                 connectivity_state: ConnectivityState::Idle,

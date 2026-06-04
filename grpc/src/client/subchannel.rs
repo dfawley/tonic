@@ -23,6 +23,8 @@
  */
 
 use core::panic;
+use std::any::Any;
+use std::any::TypeId;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -44,10 +46,11 @@ use crate::client::ConnectivityState;
 use crate::client::DynInvoke;
 use crate::client::DynRecvStream;
 use crate::client::DynSendStream;
-use crate::client::channel::WorkQueueItem;
-use crate::client::channel::WorkQueueTx;
+use crate::client::load_balancing::subchannel::CancelToken;
+use crate::client::load_balancing::subchannel::Listener;
 use crate::client::load_balancing::subchannel::Subchannel;
 use crate::client::load_balancing::subchannel::SubchannelState;
+use crate::client::load_balancing::subchannel::SubscriptionManager;
 use crate::client::load_balancing::subchannel::private::Sealed;
 use crate::client::name_resolution::Address;
 use crate::client::stream_util::FailingRecvStream;
@@ -242,10 +245,26 @@ pub(crate) struct InternalSubchannel {
     on_drop: Arc<Notify>,
 }
 
+pub(crate) struct SubchannelStateHandle {
+    pub(crate) manager: Weak<dyn SubscriptionManager>,
+    pub(crate) subscription: Weak<dyn Listener<SubchannelState>>,
+}
+
+impl Drop for SubchannelStateHandle {
+    fn drop(&mut self) {
+        if let Some(mgr) = self.manager.upgrade()
+            && let Some(sub) = self.subscription.upgrade()
+        {
+            mgr.remove_subscriber(&sub);
+        }
+    }
+}
+
+impl CancelToken for SubchannelStateHandle {}
+
 struct InternalSubchannelData {
     address: String,
     state: InternalSubchannelState,
-    work_queue: WorkQueueTx,
     on_drop: Arc<Notify>,
     transport_builder: Arc<dyn DynTransport>,
     backoff: Arc<dyn Backoff>,
@@ -253,6 +272,7 @@ struct InternalSubchannelData {
     transport_options: TransportOptions,
     security_opts: SecurityOpts,
     weak_self: Weak<InternalSubchannel>,
+    state_update_subscribers: Vec<Arc<dyn Listener<SubchannelState>>>,
 }
 
 impl InternalSubchannelData {
@@ -260,29 +280,62 @@ impl InternalSubchannelData {
         self.state = state;
         let state: SubchannelState = (&self.state).into();
 
-        let Some(subchannel) = self.weak_self.upgrade() else {
+        let Some(_subchannel) = self.weak_self.upgrade() else {
             return;
         };
 
-        _ = self
-            .work_queue
-            .send(WorkQueueItem::SubchannelStateUpdate { subchannel, state });
+        for subscriber in &self.state_update_subscribers {
+            subscriber.on_update(state.clone());
+        }
     }
 }
 
 impl Sealed for InternalSubchannel {}
+
+impl SubscriptionManager for InternalSubchannel {
+    fn remove_subscriber(&self, listener: &Arc<dyn Listener<SubchannelState>>) {
+        let mut data = self.data.lock().unwrap();
+        data.state_update_subscribers
+            .retain(|sub| !Arc::ptr_eq(sub, listener));
+    }
+}
 
 impl Subchannel for InternalSubchannel {
     fn address(&self) -> Address {
         self.address.clone()
     }
 
-    fn get_attribute_dyn(&self, _id: std::any::TypeId) -> Option<&dyn std::any::Any> {
+    fn get_attribute_dyn(&self, _id: TypeId) -> Option<&dyn Any> {
         None
     }
 
     fn connect(&self) {
         begin_connecting_if_idle(self.data.clone());
+    }
+
+    fn subscribe_dyn(
+        &self,
+        id: TypeId,
+        listener: Box<dyn Any + Send + Sync>,
+    ) -> Result<Box<dyn CancelToken>, String> {
+        if id == TypeId::of::<SubchannelState>() {
+            let listener_arc = listener
+                .downcast::<Arc<dyn Listener<SubchannelState>>>()
+                .map_err(|_| "invalid listener type".to_string())?;
+            let listener_arc: Arc<dyn Listener<SubchannelState>> = *listener_arc;
+
+            let manager_weak = self.data.lock().unwrap().weak_self.clone();
+            let handle = SubchannelStateHandle {
+                manager: manager_weak as Weak<dyn SubscriptionManager>,
+                subscription: Arc::downgrade(&listener_arc),
+            };
+
+            let mut data = self.data.lock().unwrap();
+            data.state_update_subscribers.push(listener_arc);
+            Ok(Box::new(handle) as Box<dyn CancelToken>)
+        } else {
+            Err("unsupported topic/update type".to_string())
+        }
     }
 }
 
@@ -307,25 +360,27 @@ impl InternalSubchannel {
         backoff: Arc<dyn Backoff>,
         runtime: GrpcRuntime,
         security_opts: SecurityOpts,
-        work_queue: WorkQueueTx,
     ) -> Arc<dyn Subchannel> {
         let on_drop = Arc::new(Notify::new());
         let address_string = address.address.to_string();
-        let this = Arc::new_cyclic(|weak_self| Self {
-            address,
-            on_drop: on_drop.clone(),
-            data: Arc::new(Mutex::new(InternalSubchannelData {
+        let this = Arc::new_cyclic(|weak_self| {
+            let data = Arc::new(Mutex::new(InternalSubchannelData {
                 address: address_string,
                 transport_builder: transport,
                 backoff,
                 weak_self: weak_self.clone(),
                 runtime,
                 state: InternalSubchannelState::Idle,
-                work_queue,
-                on_drop,
+                on_drop: on_drop.clone(),
                 transport_options: TransportOptions::default(), // TODO: should be configurable
                 security_opts,
-            })),
+                state_update_subscribers: Vec::new(),
+            }));
+            Self {
+                address,
+                on_drop,
+                data,
+            }
         });
         move_to_idle(&this.data);
         this
@@ -483,5 +538,123 @@ mod tests {
         let details = create_call_details(&authority, "/service/method");
         assert_eq!(details.service_url(), "https://::1/service");
         assert_eq!(details.method_name(), "method");
+    }
+
+    #[tokio::test]
+    async fn test_subchannel_subscribers() {
+        use crate::client::transport::DynTransport;
+        use crate::client::transport::SecurityOpts;
+        use crate::client::transport::TransportOptions;
+        use crate::credentials::LocalChannelCredentials;
+        use crate::credentials::client::ClientHandshakeInfo;
+        use crate::credentials::client::DynClientConnectionSecurityInfo;
+
+        #[derive(Debug)]
+        struct DummyTransport;
+        #[async_trait]
+        impl DynTransport for DummyTransport {
+            async fn dyn_connect(
+                &self,
+                _address: String,
+                _runtime: GrpcRuntime,
+                _security_opts: &SecurityOpts,
+                _opts: &TransportOptions,
+            ) -> Result<
+                (
+                    Box<dyn DynInvoke>,
+                    DynClientConnectionSecurityInfo,
+                    oneshot::Receiver<Result<(), String>>,
+                ),
+                String,
+            > {
+                unimplemented!()
+            }
+        }
+
+        let address = Address {
+            network_type: "tcp",
+            address: crate::byte_str::ByteStr::from("localhost:50051".to_string()),
+            attributes: crate::attributes::Attributes::new(),
+        };
+        let transport = Arc::new(DummyTransport);
+        let backoff = Arc::new(NopBackoff {});
+        let runtime = crate::rt::default_runtime();
+        let security_opts = SecurityOpts {
+            credentials: LocalChannelCredentials::new_arc(),
+            authority: Authority::new("localhost", None),
+            handshake_info: ClientHandshakeInfo::default(),
+        };
+        let subchannel =
+            InternalSubchannel::new_arc(address, transport, backoff, runtime, security_opts);
+
+        let subchannel_impl = subchannel.downcast_ref::<InternalSubchannel>().unwrap();
+
+        let events1 = Arc::new(Mutex::new(Vec::new()));
+        let events2 = Arc::new(Mutex::new(Vec::new()));
+
+        let ev1 = events1.clone();
+        let handle1 = subchannel.subscribe(move |state: SubchannelState| {
+            ev1.lock().unwrap().push(state);
+        });
+
+        let ev2 = events1.clone();
+        let handle2 = subchannel.subscribe(move |state: SubchannelState| {
+            ev2.lock().unwrap().push(state);
+        });
+
+        let ev3 = events2.clone();
+        let handle3 = subchannel.subscribe(move |state: SubchannelState| {
+            ev3.lock().unwrap().push(state);
+        });
+
+        // Update state to Connecting and verify all three receive it.
+        subchannel_impl
+            .data
+            .lock()
+            .unwrap()
+            .update_state(InternalSubchannelState::Connecting);
+
+        // Since handle1 and handle2 both append to events1, events1 has 2 events.
+        assert_eq!(events1.lock().unwrap().len(), 2);
+        assert_eq!(events2.lock().unwrap().len(), 1);
+
+        // 2. Drop the first handle.
+        drop(handle1);
+
+        // Update state to TransientFailure and verify only handle2 and handle3 receive it.
+        subchannel_impl
+            .data
+            .lock()
+            .unwrap()
+            .update_state(InternalSubchannelState::TransientFailure("error".into()));
+
+        assert_eq!(events1.lock().unwrap().len(), 3); // 2 from first update, 1 from second update
+        assert_eq!(events2.lock().unwrap().len(), 2); // 1 from first update, 1 from second update
+
+        // 3. Drop handle2.
+        drop(handle2);
+
+        // Update state to Idle and verify only handle3 receives it.
+        subchannel_impl
+            .data
+            .lock()
+            .unwrap()
+            .update_state(InternalSubchannelState::Idle);
+
+        assert_eq!(events1.lock().unwrap().len(), 3);
+        assert_eq!(events2.lock().unwrap().len(), 3);
+
+        // 4. Drop handle3.
+        drop(handle3);
+
+        // Update state to Connecting and verify nobody receives it.
+        subchannel_impl
+            .data
+            .lock()
+            .unwrap()
+            .update_state(InternalSubchannelState::Connecting);
+
+        assert_eq!(events1.lock().unwrap().len(), 3);
+        assert_eq!(events2.lock().unwrap().len(), 3);
     }
 }

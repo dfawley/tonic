@@ -100,15 +100,6 @@ pub(crate) trait LbPolicy: Send + Sync + Debug + 'static {
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), String>;
 
-    /// Called by the channel when any subchannel created by the LB policy
-    /// changes state.
-    fn subchannel_update(
-        &mut self,
-        subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
-        channel_controller: &mut dyn ChannelController,
-    );
-
     /// Called by the channel in response to a call from the LB policy to the
     /// WorkScheduler's request_work method.
     fn work(&mut self, data: Option<WorkData>, channel_controller: &mut dyn ChannelController);
@@ -137,12 +128,18 @@ pub(crate) trait WorkDataTrait: Any + Send + Debug {}
 impl<T: Any + Send + Debug> WorkDataTrait for T {}
 
 impl dyn WorkDataTrait {
+    /// Like [`is`](https://doc.rust-lang.org/std/any/trait.Any.html#method.is)
+    /// implemented on [`dyn Any`](Any), but for this wrapper trait.
+    pub(crate) fn is<T: Any>(&self) -> bool {
+        (self as &(dyn Any + Send)).is::<T>()
+    }
+
     /// Like [`Box<dyn Any>::downcast`] but for this wrapper trait.
     pub(crate) fn downcast<T: Any>(self: Box<Self>) -> Result<Box<T>, Box<Self>> {
         // If we directly call downcast then we can't return `Self` anymore
         // (only a Box<dyn Any + Send>), so we first have to check `is` and only
         // downcast when we know it will succeed.
-        if (&*self as &(dyn Any + Send)).is::<T>() {
+        if self.is::<T>() {
             Ok((self as Box<dyn Any + Send>).downcast().unwrap())
         } else {
             Err(self)
@@ -164,8 +161,6 @@ impl dyn WorkDataTrait {
     }
 }
 
-/// A dynamic payload passed between [`WorkScheduler::schedule_work`] and its
-/// associated policy's [`work`](LbPolicy::work) method.
 pub(crate) type WorkData = Box<dyn WorkDataTrait>;
 
 /// Used to asynchronously request a call into the LbPolicy's work method if
@@ -441,15 +436,6 @@ impl<T: LbPolicy + ?Sized> LbPolicy for Box<T> {
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), String> {
         (**self).resolver_update(update, config, channel_controller)
-    }
-
-    fn subchannel_update(
-        &mut self,
-        subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
-        channel_controller: &mut dyn ChannelController,
-    ) {
-        (**self).subchannel_update(subchannel, state, channel_controller);
     }
 
     fn work(&mut self, data: Option<WorkData>, channel_controller: &mut dyn ChannelController) {

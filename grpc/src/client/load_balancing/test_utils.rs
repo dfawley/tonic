@@ -23,13 +23,20 @@
  */
 
 use std::any::Any;
+use std::any::TypeId;
+use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
+use crate::client::load_balancing::subchannel::SubscriptionManager;
+use crate::client::load_balancing::subchannel::Listener;
+use crate::client::load_balancing::subchannel::CancelToken;
+use crate::client::subchannel::SubchannelStateHandle;
 
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::sync::Notify;
 
 use crate::client::load_balancing::ChannelController;
 use crate::client::load_balancing::DynLbConfig;
@@ -52,19 +59,36 @@ pub(crate) fn new_request_headers() -> RequestHeaders {
     RequestHeaders::default()
 }
 
-// A test subchannel that forwards connect calls to a channel.
-// This allows tests to verify when a subchannel is asked to connect.
 pub(crate) struct TestSubchannel {
     address: Address,
     tx_connect: std::sync::mpsc::Sender<TestEvent>,
+    callbacks: Arc<Mutex<Vec<Arc<dyn Listener<SubchannelState>>>>>,
+    weak_self: Weak<TestSubchannel>,
 }
 
 impl TestSubchannel {
-    pub fn new(address: Address, tx_connect: std::sync::mpsc::Sender<TestEvent>) -> Self {
+    pub fn new(address: Address, tx_connect: std::sync::mpsc::Sender<TestEvent>, weak_self: Weak<TestSubchannel>) -> Self {
+        let callbacks = Arc::new(Mutex::new(Vec::<Arc<dyn Listener<SubchannelState>>>::new()));
         Self {
             address,
             tx_connect,
+            callbacks,
+            weak_self,
         }
+    }
+
+    pub fn set_state(&self, state: SubchannelState) {
+        let callbacks = self.callbacks.lock().unwrap();
+        for cb in &*callbacks {
+            cb.on_update(state.clone());
+        }
+    }
+}
+
+impl SubscriptionManager for TestSubchannel {
+    fn remove_subscriber(&self, listener: &Arc<dyn Listener<SubchannelState>>) {
+        let mut cb_list = self.callbacks.lock().unwrap();
+        cb_list.retain(|cb| !Arc::ptr_eq(cb, listener));
     }
 }
 
@@ -82,6 +106,29 @@ impl ForwardingSubchannel for TestSubchannel {
         self.tx_connect
             .send(TestEvent::Connect(self.address.clone()))
             .unwrap();
+    }
+    
+    fn get_attribute_dyn(&self, _id: std::any::TypeId) -> Option<&dyn std::any::Any> {
+        None
+    }
+
+    fn subscribe_dyn(&self, id: TypeId, listener: Box<dyn Any + Send + Sync>) -> Result<Box<dyn CancelToken>, String> {
+        if id == TypeId::of::<SubchannelState>() {
+            let listener_arc = listener.downcast::<Arc<dyn Listener<SubchannelState>>>()
+                .map_err(|_| "invalid listener type".to_string())?;
+            let listener_arc: Arc<dyn Listener<SubchannelState>> = *listener_arc;
+
+            let handle = SubchannelStateHandle {
+                manager: self.weak_self.clone() as Weak<dyn SubscriptionManager>,
+                subscription: Arc::downgrade(&listener_arc),
+            };
+
+            let mut cb_list = self.callbacks.lock().unwrap();
+            cb_list.push(listener_arc);
+            Ok(Box::new(handle) as Box<dyn CancelToken>)
+        } else {
+            Err("unsupported topic/update type".to_string())
+        }
     }
 }
 
@@ -129,9 +176,9 @@ pub(crate) struct TestChannelController {
 impl ChannelController for TestChannelController {
     fn new_subchannel(&mut self, address: &Address) -> (Arc<dyn Subchannel>, SubchannelState) {
         println!("new_subchannel called for address {}", address);
-        let notify = Arc::new(Notify::new());
-        let subchannel: Arc<dyn Subchannel> =
-            Arc::new(TestSubchannel::new(address.clone(), self.tx_events.clone()));
+        let subchannel: Arc<dyn Subchannel> = Arc::new_cyclic(|weak_self| {
+            TestSubchannel::new(address.clone(), self.tx_events.clone(), weak_self.clone())
+        });
         self.tx_events
             .send(TestEvent::NewSubchannel(subchannel.clone()))
             .unwrap();
@@ -151,11 +198,37 @@ impl ChannelController for TestChannelController {
 #[derive(Debug)]
 pub(crate) struct TestWorkScheduler {
     pub(crate) tx_events: std::sync::mpsc::Sender<TestEvent>,
+    pub(crate) pending_work: Arc<Mutex<VecDeque<Option<WorkData>>>>,
+}
+
+impl TestWorkScheduler {
+    pub fn new(tx_events: std::sync::mpsc::Sender<TestEvent>) -> Self {
+        Self {
+            tx_events,
+            pending_work: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
 }
 
 impl WorkScheduler for TestWorkScheduler {
     fn schedule_work(&self, data: Option<WorkData>) {
-        self.tx_events.send(TestEvent::ScheduleWork(data)).unwrap();
+        self.pending_work.lock().unwrap().push_back(data);
+        self.tx_events.send(TestEvent::ScheduleWork(None)).unwrap();
+    }
+}
+
+pub(crate) fn run_pending_work(
+    scheduler: &Arc<TestWorkScheduler>,
+    policy: &mut impl LbPolicy,
+    tcc: &mut dyn ChannelController,
+) {
+    loop {
+        let data = scheduler.pending_work.lock().unwrap().pop_front();
+        if let Some(data) = data {
+            policy.work(data, tcc);
+        } else {
+            break;
+        }
     }
 }
 
@@ -171,13 +244,6 @@ type ResolverUpdateFn = Arc<
         + Sync,
 >;
 
-// The callback to invoke when subchannel_update is invoked on the stub policy.
-type SubchannelUpdateFn = Arc<
-    dyn Fn(&mut StubPolicyData, Arc<dyn Subchannel>, &SubchannelState, &mut dyn ChannelController)
-        + Send
-        + Sync,
->;
-
 type ExitIdleFn = Arc<dyn Fn(&mut StubPolicyData, &mut dyn ChannelController) + Send + Sync>;
 
 type WorkFn =
@@ -188,7 +254,6 @@ type WorkFn =
 #[derive(Clone, Default)]
 pub(crate) struct StubPolicyFuncs {
     pub resolver_update: Option<ResolverUpdateFn>,
-    pub subchannel_update: Option<SubchannelUpdateFn>,
     pub exit_idle: Option<ExitIdleFn>,
     pub work: Option<WorkFn>,
 }
@@ -236,17 +301,6 @@ impl LbPolicy for StubPolicy {
             return f(&mut self.data, update, config, channel_controller);
         }
         Ok(())
-    }
-
-    fn subchannel_update(
-        &mut self,
-        subchannel: Arc<dyn Subchannel>,
-        state: &SubchannelState,
-        channel_controller: &mut dyn ChannelController,
-    ) {
-        if let Some(f) = &self.funcs.subchannel_update {
-            f(&mut self.data, subchannel, state, channel_controller);
-        }
     }
 
     fn exit_idle(&mut self, channel_controller: &mut dyn ChannelController) {

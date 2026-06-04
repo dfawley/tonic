@@ -349,13 +349,6 @@ impl ActiveChannel {
                             .lb_policy
                             .work(data, &mut resolver_channel_controller.lb_channel_controller);
                     }
-                    WorkQueueItem::SubchannelStateUpdate { subchannel, state } => {
-                        resolver_channel_controller.lb_policy.subchannel_update(
-                            subchannel,
-                            &state,
-                            &mut resolver_channel_controller.lb_channel_controller,
-                        );
-                    }
                 }
             }
         }));
@@ -446,16 +439,15 @@ impl ResolverChannelController {
         let lb_channel_controller = LbChannelController {
             lb_work_scheduler: lb_work_scheduler.clone(),
             transport_registry: GLOBAL_TRANSPORT_REGISTRY.clone(),
-            wqtx: wqtx.clone(),
             lb_watcher,
             runtime: runtime.clone(),
             security_opts,
         };
         Self {
-            lb_policy: SubchannelSharing::new(GracefulSwitchPolicy::new(
-                runtime.clone(),
+            lb_policy: SubchannelSharing::new(
+                GracefulSwitchPolicy::new(runtime.clone(), lb_work_scheduler.clone()),
                 lb_work_scheduler.clone(),
-            )),
+            ),
             lb_work_scheduler,
             lb_channel_controller,
             wqtx: wqtx.clone(),
@@ -494,7 +486,6 @@ impl name_resolution::ChannelController for ResolverChannelController {
 struct LbChannelController {
     lb_work_scheduler: Arc<LbWorkScheduler>, // Holds `pending` bool (??)
     transport_registry: TransportRegistry,   // For creating subchannels
-    wqtx: WorkQueueTx,                       // To queue subchannel state updates
     lb_watcher: Arc<Watcher<LbState>>,
     runtime: GrpcRuntime, // For creating subchanenls
     security_opts: SecurityOpts,
@@ -513,7 +504,6 @@ impl load_balancing::ChannelController for LbChannelController {
                 Arc::new(NopBackoff {}),
                 self.runtime.clone(),
                 self.security_opts.clone(),
-                self.wqtx.clone(),
             ),
             SubchannelState::idle(),
         )
@@ -542,11 +532,6 @@ impl WorkScheduler for LbWorkScheduler {
 pub(super) enum WorkQueueItem {
     // Call the LB policy to do work.
     ScheduleLbPolicy(Option<WorkData>),
-    // Provide the subchannel state update to the LB policy.
-    SubchannelStateUpdate {
-        subchannel: Arc<dyn Subchannel>,
-        state: SubchannelState,
-    },
     // Call the resolver to do work.
     ScheduleResolver,
     // Call the resolver to resolve now.
