@@ -139,12 +139,24 @@ pub(crate) trait Subchannel:
     fn address(&self) -> Address;
 
     /// Returns the value of an attribute for this subchannel corresponding to
-    /// the `id`, or `None` if no attribute exists for it.  Values returned here
-    /// should not change over the life of the subchannel.
-    fn get_attribute_dyn(&self, id: TypeId) -> Option<&dyn Any>;
+    /// the `key_id`, or `None` if no attribute exists for that key.  If one
+    /// does exist, the returned value should be of type [`AttributeKey::Value`]
+    /// for the key.
+    ///
+    /// Values returned should not change over the life of the subchannel.
+    fn get_attribute_dyn(&self, key_id: TypeId) -> Option<&dyn Any>;
 
     /// Notifies the Subchannel to connect.
     fn connect(&self);
+}
+
+/// A description of a key/value attribute pair.  The type ID of an
+/// `AttributeKey` is used as the key in a [`Subchannel::get_attribute_dyn`]
+/// lookup, and the returned value from that call should be an
+/// [`AttributeKey::Value`].
+pub(crate) trait AttributeKey: Any {
+    /// The value type returned by a call to [`Subchannel::get_attribute_dyn`].
+    type Value: Any;
 }
 
 impl dyn Subchannel {
@@ -156,12 +168,12 @@ impl dyn Subchannel {
     }
 
     /// Returns the value of an attribute for this subchannel of the
-    /// corresponding `T` type, or `None` if no attribute exists for it.  This
+    /// corresponding `K` type, or `None` if no attribute exists for it.  This
     /// method is a more type-friendly convenience wrapper around
     /// [`Subchannel::get_attribute_dyn`].
-    pub fn get_attribute<T: 'static>(&self) -> Option<&T> {
-        self.get_attribute_dyn(TypeId::of::<T>())
-            .and_then(|any| any.downcast_ref::<T>())
+    pub fn get_attribute<K: AttributeKey>(&self) -> Option<&K::Value> {
+        self.get_attribute_dyn(TypeId::of::<K>())
+            .and_then(|any| any.downcast_ref::<K::Value>())
     }
 }
 
