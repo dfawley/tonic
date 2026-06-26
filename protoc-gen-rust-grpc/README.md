@@ -45,8 +45,8 @@ From the `src/cpp_source` directory:
 # Create build directory
 mkdir build && cd build
 
-# Configure (requires specifying the protobuf version to download, e.g. 35.1)
-cmake .. -DCMAKE_BUILD_TYPE=Release -DPROTOBUF_VERSION=35.1
+# Configure
+cmake .. -DCMAKE_BUILD_TYPE=Release
 
 # Build
 cmake --build . --parallel

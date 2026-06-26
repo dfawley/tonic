@@ -1,8 +1,6 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-const PROTOBUF_VERSION: &str = "35.1";
-
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
@@ -39,8 +37,6 @@ fn main() {
     let mut cmake_config = cmake::Config::new(&cpp_source);
     cmake_config.define("BUILD_PROTOC", "ON");
     cmake_config.define("BUILD_PLUGIN", "ON");
-    cmake_config.define("PROTOBUF_VERSION", PROTOBUF_VERSION);
     cmake_config.define("CMAKE_INSTALL_PREFIX", &install_dir);
-    cmake_config.out_dir(out_dir.join(format!("v{}", PROTOBUF_VERSION)));
     cmake_config.build();
 }

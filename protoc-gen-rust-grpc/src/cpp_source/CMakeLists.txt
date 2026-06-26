@@ -1,9 +1,8 @@
 cmake_minimum_required(VERSION 3.14)
 project(protoc-gen-rust-grpc LANGUAGES CXX)
 
-if(NOT PROTOBUF_VERSION)
-    message(FATAL_ERROR "PROTOBUF_VERSION must be set")
-endif()
+set(PROTOBUF_VERSION "35.1" CACHE STRING "Version of protobuf to download")
+set(CMAKE_BINARY_DIR "${CMAKE_BINARY_DIR}/proto-${PROTOBUF_VERSION}")
 
 # Parse version from Cargo.toml unless already set (e.g. from CI or environment)
 if(NOT RUST_GRPC_VERSION)
