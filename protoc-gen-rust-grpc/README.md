@@ -45,7 +45,7 @@ From the `src/cpp_source` directory:
 # Create build directory
 mkdir build && cd build
 
-# Configure
+# Configure (downloads protobuf and dependencies automatically)
 cmake .. -DCMAKE_BUILD_TYPE=Release
 
 # Build
