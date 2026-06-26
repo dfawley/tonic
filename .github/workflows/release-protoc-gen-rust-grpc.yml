@@ -172,7 +172,7 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --config Release
 
       - name: Install
         shell: bash
